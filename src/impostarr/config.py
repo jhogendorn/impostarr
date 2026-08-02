@@ -86,6 +86,21 @@ class DbConfig(BaseModel):
 
 class WorkersConfig(BaseModel):
     pool_size: int = 2
+    # Transcriber backend selection: entry-point name in the
+    # `impostarr.transcribers` group ("faster-whisper" | "whisper-cpp" |
+    # "remote" | "none", or a third-party backend). See
+    # `impostarr.plugins.transcribers.load_transcriber`.
+    transcriber: str = "faster-whisper"
+    # Backend-specific options, keyed by whatever the chosen backend reads
+    # (e.g. whisper-cpp: pywhispercpp params like `language`/`use_gpu`;
+    # remote: `base_url`/`api_key`/`model`/`timeout_s`).
+    transcriber_options: dict = Field(default_factory=dict)
+    # whisper_model: model-size name, shared by the faster-whisper and
+    # whisper-cpp backends. whisper_device: CPU/CUDA device selector,
+    # consumed by the faster-whisper backend only (whisper-cpp's GPU path
+    # is a Vulkan source build, toggled via transcriber_options instead).
+    # Kept as top-level fields rather than folded into transcriber_options
+    # for backward compatibility with existing configs.
     whisper_model: str = "small"
     whisper_device: str = "auto"
 

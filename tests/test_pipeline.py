@@ -11,11 +11,16 @@ import respx
 from sqlalchemy import select
 
 from impostarr.assets import extract
-from impostarr.assets.transcribe import NullTranscriber
+from impostarr.assets.transcribe import (
+    NullTranscriber,
+    TranscribeError,
+    Transcriber,
+    TranscriptResult,
+)
 from impostarr.config import Settings, SonarrInstance, Thresholds
 from impostarr.db import init_db, make_session_factory
 from impostarr.jobs import LeaseLost, claim_next, reap_stale, release
-from impostarr.models import File, Instance, Job, PhashCorpusEntry, Verdict
+from impostarr.models import Asset, File, Instance, Job, PhashCorpusEntry, Verdict
 from impostarr.models import PluginResult as PluginResultRow
 from impostarr.pipeline import PipelineDeps, process_job
 from impostarr.plugins.base import (
@@ -65,6 +70,7 @@ def make_deps(
     *,
     instance_cfg: SonarrInstance | None = None,
     thresholds: Thresholds | None = None,
+    transcriber: Transcriber | None = None,
 ) -> PipelineDeps:
     cfg = instance_cfg or make_instance_cfg(tmp_path)
     settings = Settings(
@@ -79,7 +85,7 @@ def make_deps(
         settings=settings,
         instance_cfg=cfg,
         plugins=plugins,
-        transcriber=NullTranscriber(),
+        transcriber=transcriber if transcriber is not None else NullTranscriber(),
         refsubs=None,
         worker_id=WORKER_ID,
     )
@@ -405,6 +411,39 @@ async def test_unexpected_exception_in_a_stage_helper_fast_fails_to_error(
     job = get_job(session_factory, job_id)
     assert job.status == "error"
     assert plugin.call_count == 0
+
+
+class _FailingTranscriber:
+    """Always raises `TranscribeError` — for testing that a transcriber
+    backend failure doesn't fail the whole job (matches `ExtractError`
+    discipline in the asset-extraction stages)."""
+
+    async def transcribe(self, wav_path) -> TranscriptResult:
+        raise TranscribeError("backend unavailable")
+
+
+@respx.mock
+async def test_transcript_stage_tolerates_transcribe_error(tmp_path, session_factory):
+    """A transcriber backend failure logs a warning and leaves the
+    transcript absent — it must not fail the job, mirroring how
+    `_stage_frames`/`_stage_audio`/etc. tolerate `ExtractError`."""
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(
+        session_factory, tmp_path, [loaded(plugin)], transcriber=_FailingTranscriber()
+    )
+
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    job = get_job(session_factory, job_id)
+    assert job.status == "matched"
+    with session_factory() as session:
+        transcript_assets = session.execute(
+            select(Asset).where(Asset.type == "transcript")
+        ).scalars().all()
+    assert transcript_assets == []
 
 
 @respx.mock

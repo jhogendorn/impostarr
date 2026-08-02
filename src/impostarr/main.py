@@ -33,24 +33,17 @@ from fastapi.staticfiles import StaticFiles
 from impostarr.api.auth import AuthMiddleware
 from impostarr.api.events import EventBus
 from impostarr.api.routes import router
-from impostarr.assets.transcribe import NullTranscriber, Transcriber
 from impostarr.config import Settings, SonarrInstance, load_settings
 from impostarr.db import init_db, make_session_factory
 from impostarr.discovery import Discoverer
 from impostarr.pipeline import PipelineDeps
 from impostarr.plugins.loader import activate_plugin_overlay, ensure_external_plugins, load_plugins
+from impostarr.plugins.transcribers import load_transcriber
 from impostarr.refsubs import RefSubService
 from impostarr.sonarr import SonarrClient
 from impostarr.worker import WorkerPool
 
 logger = logging.getLogger(__name__)
-
-try:
-    import faster_whisper  # noqa: F401
-
-    _FASTER_WHISPER_AVAILABLE = True
-except ImportError:
-    _FASTER_WHISPER_AVAILABLE = False
 
 
 @dataclass
@@ -83,18 +76,6 @@ def _resolve_web_dist() -> Path:
     return Path("web/dist")
 
 
-def _build_transcriber(settings: Settings) -> Transcriber:
-    if _FASTER_WHISPER_AVAILABLE and settings.workers.whisper_model:
-        from impostarr.assets.transcribe import FasterWhisperTranscriber
-
-        return FasterWhisperTranscriber(
-            model_name=settings.workers.whisper_model,
-            device=settings.workers.whisper_device,
-            models_dir=settings.models_dir,
-        )
-    return NullTranscriber()
-
-
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings if settings is not None else load_settings()
 
@@ -106,7 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     activate_plugin_overlay(plugin_venv_dir)
     loaded_plugins = load_plugins(settings)
 
-    transcriber = _build_transcriber(settings)
+    transcriber = load_transcriber(settings)
     event_bus = EventBus()
 
     # RefSubService is instance-agnostic (no per-Sonarr-instance state), so

@@ -81,25 +81,25 @@ app behind an auth service (e.g. [Authentik](https://goauthentik.io/));
 Impostarr will attribute actions to the identity the proxy passes through
 (`auth.trusted_header` in `impostarr.yml`).
 
-## GPU (whisper transcription)
+## GPU (transcription backends)
 
-The `whisper` extra (`faster-whisper` + `ctranslate2`) is always bundled in
-the image — transcription-based identifier plugins are never dead weight,
-they just run slower without a GPU. By default, transcription runs on CPU;
-no extra setup needed.
+Transcription is a deployment choice, not a fixed dependency — pick the
+backend that fits the box this runs on via `workers.transcriber` in
+`impostarr.yml` (see the annotated comments in
+[examples/impostarr.yml](examples/impostarr.yml)). Every backend is always
+available in the image — none is ever a dead identifier that silently
+disables transcript-dependent plugins.
 
-To use an NVIDIA GPU instead: install the
-[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-on the host, run the container with `--gpus all` (or the compose
-equivalent, `deploy.resources.reservations.devices` with driver `nvidia`),
-and set `workers.whisper_device: cuda` (or `auto`) in `impostarr.yml`.
-`ctranslate2`'s GPU wheels bundle the CUDA runtime libraries they need, so
-no separate CUDA base image is required.
+| Backend | Hardware | Setup |
+|---|---|---|
+| `faster-whisper` (default) | CPU (any); NVIDIA GPU via CUDA | Bundled, no extra setup for CPU. For CUDA: install the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host, run the container with `--gpus all` (or the compose equivalent, `deploy.resources.reservations.devices` with driver `nvidia`), set `workers.whisper_device: cuda`. `ctranslate2`'s GPU wheels bundle the CUDA runtime libraries they need, so no separate CUDA base image is required. |
+| `whisper-cpp` | CPU (any) out of the box; Intel/AMD iGPU via Vulkan | Bundled CPU wheel (`pywhispercpp`, small, no compiler needed). Vulkan iGPU acceleration needs a source build of `pywhispercpp` against a Vulkan-enabled whisper.cpp — **not built by this image**; see [pywhispercpp](https://github.com/absadiki/pywhispercpp) and [whisper.cpp](https://github.com/ggml-org/whisper.cpp)'s Vulkan build docs if you want to build your own image with it. |
+| `remote` | Whatever the remote server has | Set `workers.transcriber_options.base_url` to any OpenAI-compatible `/v1/audio/transcriptions` server (e.g. [speaches](https://github.com/speaches-ai/speaches), faster-whisper-server) running on a box that actually has a GPU. **Recommended when the Impostarr box itself has no usable GPU** — e.g. an Intel iGPU with no Vulkan build available. |
+| `none` | N/A | Disables transcription; transcript-dependent plugins (`whisper-subs`) abstain rather than erroring. |
 
-Non-NVIDIA GPUs (e.g. Intel iGPUs) are **not** accelerated currently — the
-CPU path is used regardless. Adding a backend for them (OpenVINO,
-whisper.cpp, etc.) would slot in at the `Transcriber` interface
-(`src/impostarr/assets/transcribe.py`), alongside `FasterWhisperTranscriber`.
+`faster-whisper`/`whisper-cpp` share `workers.whisper_model` (model-size
+name); `workers.whisper_device` is faster-whisper-only. `whisper-cpp` and
+`remote` read their own settings from `workers.transcriber_options`.
 
 ## Plugins
 
@@ -109,6 +109,11 @@ embedded subtitles, frame hashes, ...) and returns candidate episode
 identities with confidence scores, which are combined into the file's
 overall verification score. Plugins are discovered via a Python entry-point
 group, configured per-plugin in `impostarr.yml` under `plugins.identifiers`.
+
+Transcriber backends (see GPU section above) are also an entry-point group
+(`impostarr.transcribers`), following the same discovery model but with a
+factory-function convention instead of a class — see
+`src/impostarr/plugins/transcribers.py`.
 
 ### whisper-subs
 

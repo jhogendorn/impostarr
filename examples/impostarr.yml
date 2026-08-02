@@ -122,8 +122,39 @@ auth:
 # Worker pool.
 workers:
   pool_size: 2
+
+  # Transcription backend — a deployment choice, not fixed: pick whichever
+  # fits the box this runs on. All four are always available (never a dead
+  # identifier), selected by entry-point name:
+  #   faster-whisper (default) - CPU by default; NVIDIA GPU via CUDA
+  #     (set whisper_device: cuda below and run the container with
+  #     --gpus all). No extra setup for CPU.
+  #   whisper-cpp - CPU everywhere (small wheel, no compiler); can also be
+  #     source-built with Vulkan for Intel/AMD iGPU acceleration (not done
+  #     by the prebuilt image — see README GPU section).
+  #   remote - talks to any OpenAI-compatible /v1/audio/transcriptions
+  #     server (e.g. speaches, faster-whisper-server) running wherever the
+  #     GPU actually lives. Recommended when this box has no usable GPU
+  #     (e.g. Intel iGPU only) — see the commented example below.
+  #   none - disables transcription; transcript-dependent plugins
+  #     (whisper-subs) abstain.
+  transcriber: faster-whisper
+
+  # whisper_model: model-size name, shared by faster-whisper and
+  # whisper-cpp. whisper_device: CPU/CUDA selector, faster-whisper only.
   whisper_model: small
   whisper_device: auto # auto | cpu | cuda
+
+  # Backend-specific options for whisper-cpp/remote. Ignored by
+  # faster-whisper/none.
+  transcriber_options: {}
+  # Example: remote backend pointing at a speaches/faster-whisper-server
+  # container running on a GPU box elsewhere on the network.
+  # transcriber: remote
+  # transcriber_options:
+  #   base_url: http://gpu-box:8000/v1
+  #   model: Systran/faster-whisper-small
+  #   api_key: ""  # leave empty if the server doesn't require one
 
 # Volumes (see README).
 state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay
