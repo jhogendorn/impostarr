@@ -166,8 +166,10 @@ Transitions validated against the spec queue model; invalid transition raises.
   after batch committed — crash-safe).
 - `backfill_step(batch_size)` — walk `all_series()`/`episode_files()` with
   persisted `(series_id, episode_file_id)` cursor on `instances`; same file
-  capture path; created jobs enter `hold` when a configured backfill rate
-  limit is active, else `pending`.
+  capture path. PoC decision (settled): no rate limiter in discovery —
+  backfill jobs go directly to `pending` and the caller paces via
+  batch_size/call cadence; jobs.py's `hold`/park support is the future
+  limiter seam. Documented in the Discoverer docstring.
 - Content hash: xxh64 of first+last 8MiB + size (fast, stable) via
   `hash_file(path)` helper — full-file hashing is too slow on remuxes.
 
