@@ -190,6 +190,28 @@ describe('InspectModal', () => {
     expect(screen.queryByText('Possible duplicate')).not.toBeInTheDocument()
   })
 
+  it('shows the series title in the header when external_ids.title is present', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    expect(await screen.findByRole('heading', { name: /Test Show/ })).toBeInTheDocument()
+    expect(screen.queryByText('Series 10')).not.toBeInTheDocument()
+  })
+
+  it('falls back to "Series {id}" in the header when external_ids is null', async () => {
+    getJobMock.mockResolvedValue({ ...jobDetailFixture, external_ids: null })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    expect(await screen.findByRole('heading', { name: 'Series 10' })).toBeInTheDocument()
+  })
+
+  it('falls back to "Series {id}" in the header when external_ids.title is null', async () => {
+    getJobMock.mockResolvedValue({ ...jobDetailFixture, external_ids: { ...jobDetailFixture.external_ids!, title: null } })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    expect(await screen.findByRole('heading', { name: /^Series 10/ })).toBeInTheDocument()
+  })
+
   it('shows a TVDB link in the header when external_ids are present', async () => {
     getJobMock.mockResolvedValue(jobDetailFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
