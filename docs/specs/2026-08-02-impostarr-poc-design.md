@@ -133,10 +133,13 @@ pinned), each isolated behind an adapter module so a later native rewrite
 tools, so their internals are an integration risk — the adapter owns their
 config, cache layout, and any fork/vendoring decision:
 
-- `whisper-subs` — mkv-episode-matcher internals: whisper transcript vs
-  reference subtitles per candidate episode. Requires: TMDB API key,
-  reference subtitle service. Confidence derives from match ratio over
-  compared lines.
+- `whisper-subs` — whisper transcript vs reference subtitles per candidate
+  episode. Requires: reference subtitle service. Confidence derives from
+  match ratio over compared lines. *Implementation note (2026-08-02):
+  approach 2 proved impossible — mkv-episode-matcher's dependency chain
+  (librosa → numba 0.53 → llvmlite 0.36) hard-caps at Python <3.10, so the
+  plugin was implemented natively (approach 3) with rapidfuzz; no TMDB key
+  needed.*
 - `subs-llm` — tvidentify internals: embedded subs (SRT or OCR'd PGS/VobSub)
   + LLM episode identification. Requires: an LLM provider (OpenAI-compatible
   endpoint or Ollama; provider, base URL, model, API key in plugin config)
