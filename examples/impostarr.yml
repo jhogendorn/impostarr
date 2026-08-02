@@ -178,6 +178,14 @@ dry_run: false
 # auto_replace flags.
 approval_required: false
 
+# When enabled, files removed by the replace action are first
+# copied/hardlinked into the trash directory and kept for retention_days
+# before being deleted permanently. Disable to delete immediately.
+trash:
+  enabled: true
+  dir: /trash
+  retention_days: 14
+
 # Volumes (see README).
 state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay
 assets_dir: /assets # extracted artifact blobs (transcripts, framegrabs, refsub cache)

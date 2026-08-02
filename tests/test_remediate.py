@@ -3,16 +3,17 @@ from __future__ import annotations
 import errno
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-from impostarr.config import Settings, SonarrInstance
+from impostarr.config import Settings, SonarrInstance, TrashConfig
 from impostarr.db import init_db, make_session_factory
 from impostarr.jobs import claim_next
-from impostarr.models import File, Instance, Job, Verdict
+from impostarr.models import File, Instance, Job, TrashItem, Verdict
 from impostarr.remediate import Remediator
 from impostarr.sonarr import SonarrClient
 
@@ -106,6 +107,11 @@ def get_remediation_log(session_factory, job_id: int) -> list[dict]:
     with session_factory() as session:
         verdict = session.query(Verdict).filter_by(job_id=job_id).one()
         return verdict.remediation_log
+
+
+def get_trash_items(session_factory, job_id: int) -> list[TrashItem]:
+    with session_factory() as session:
+        return session.query(TrashItem).filter_by(job_id=job_id).all()
 
 
 def seed_remediation_log(session_factory, job_id: int) -> None:
@@ -772,4 +778,167 @@ async def test_remap_copy2_failure_after_exdev_quarantines_with_staging_path(
     assert len(log) == 1
     assert log[0]["ok"] is False
     assert str(staged_path) in log[0]["detail"]
+    assert get_job_status(session_factory, job_id) == "quarantine"
+
+
+# -- trash ------------------------------------------------------------------
+
+
+@respx.mock
+async def test_replace_with_trash_enabled_hardlinks_file_and_creates_row(tmp_path, session_factory):
+    cfg = make_instance_cfg(tmp_path)
+    trash_cfg = TrashConfig(dir=tmp_path / "trash", retention_days=14)
+    job_id, local_path = make_active_job(session_factory, tmp_path, history_id=500)
+
+    respx.post(f"{API_URL}/history/failed/500").mock(return_value=httpx.Response(200, json={}))
+    respx.delete(f"{API_URL}/episodefile/9001").mock(return_value=httpx.Response(200, json={}))
+    respx.post(f"{API_URL}/command").mock(
+        return_value=httpx.Response(200, json={"id": 1, "name": "EpisodeSearch"})
+    )
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory, trash_cfg=trash_cfg)
+        await remediator.replace(job, WORKER_ID)
+
+    trash_path = tmp_path / "trash" / "main" / f"{local_path.name}-{job_id}"
+    assert trash_path.exists()
+    assert trash_path.stat().st_ino == local_path.stat().st_ino  # hardlinked, same content
+
+    items = get_trash_items(session_factory, job_id)
+    assert len(items) == 1
+    item = items[0]
+    assert item.instance == "main"
+    assert item.original_path == str(local_path)
+    assert item.trash_path == str(trash_path)
+    assert item.series_id == 42
+    assert item.episode_ids == [555]
+    assert item.deleted_at is None
+    assert item.outcome is None
+    # trashed_at (a column default evaluated at flush) and expires_at
+    # (computed slightly earlier, in Remediator.replace) are two
+    # independent `datetime.now(UTC)` calls a few microseconds apart, so
+    # comparing to timedelta(days=14) tolerates that instead of asserting
+    # an exact `.days == 14` (which truncates and can read 13).
+    assert abs((item.expires_at - item.trashed_at) - timedelta(days=14)) < timedelta(seconds=5)
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 4
+    steps = [entry["step"] for entry in log]
+    assert steps == ["mark_history_failed", "trash", "delete_episode_file", "episode_search"]
+    assert all(entry["ok"] for entry in log)
+    trash_step = log[1]
+    assert "copied file to trash" in trash_step["detail"]
+    assert str(trash_path) in trash_step["detail"]
+    delete_step = log[2]
+    assert delete_step["detail"] == (
+        f"removed file via Sonarr (episode_file_id=9001; "
+        f"copy retained in trash until {item.expires_at.isoformat()})"
+    )
+    assert get_job_status(session_factory, job_id) == "remediated"
+
+
+@respx.mock
+async def test_replace_with_trash_disabled_via_config_matches_no_trash_default(
+    tmp_path, session_factory
+):
+    cfg = make_instance_cfg(tmp_path)
+    trash_cfg = TrashConfig(enabled=False, dir=tmp_path / "trash")
+    job_id, _ = make_active_job(session_factory, tmp_path, history_id=500)
+
+    respx.post(f"{API_URL}/history/failed/500").mock(return_value=httpx.Response(200, json={}))
+    respx.delete(f"{API_URL}/episodefile/9001").mock(return_value=httpx.Response(200, json={}))
+    respx.post(f"{API_URL}/command").mock(
+        return_value=httpx.Response(200, json={"id": 1, "name": "EpisodeSearch"})
+    )
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory, trash_cfg=trash_cfg)
+        await remediator.replace(job, WORKER_ID)
+
+    assert not (tmp_path / "trash").exists()
+    assert get_trash_items(session_factory, job_id) == []
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 3  # no "trash" step at all
+    assert [entry["step"] for entry in log] == [
+        "mark_history_failed", "delete_episode_file", "episode_search",
+    ]
+    assert log[1]["detail"] == "removed file via Sonarr (episode_file_id=9001)"
+    assert get_job_status(session_factory, job_id) == "remediated"
+
+
+@respx.mock
+async def test_replace_with_trash_dry_run_skips_filesystem_and_row_but_remediates(
+    tmp_path, session_factory
+):
+    cfg = make_instance_cfg(tmp_path)
+    trash_cfg = TrashConfig(dir=tmp_path / "trash", retention_days=14)
+    job_id, local_path = make_active_job(session_factory, tmp_path, history_id=500)
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client(dry_run=True) as client:
+        remediator = Remediator(client, cfg, session_factory, dry_run=True, trash_cfg=trash_cfg)
+        await remediator.replace(job, WORKER_ID)
+
+    assert respx.calls.call_count == 0
+    assert not (tmp_path / "trash").exists()
+    assert get_trash_items(session_factory, job_id) == []
+    assert local_path.exists()  # original untouched
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 4
+    steps = [entry["step"] for entry in log]
+    assert steps == ["mark_history_failed", "trash", "delete_episode_file", "episode_search"]
+    assert all(entry["ok"] for entry in log)
+    assert log[1]["detail"].startswith("DRY-RUN: would copy file to trash: ")
+    assert log[2]["detail"].startswith("DRY-RUN: removed file via Sonarr")
+    assert "copy retained in trash until" in log[2]["detail"]
+    assert get_job_status(session_factory, job_id) == "remediated"
+
+
+@respx.mock
+async def test_replace_trash_copy_failure_quarantines_without_calling_sonarr_delete(
+    tmp_path, session_factory, monkeypatch
+):
+    cfg = make_instance_cfg(tmp_path)
+    trash_cfg = TrashConfig(dir=tmp_path / "trash", retention_days=14)
+    job_id, _ = make_active_job(session_factory, tmp_path, history_id=500)
+
+    respx.post(f"{API_URL}/history/failed/500").mock(return_value=httpx.Response(200, json={}))
+    delete_route = respx.delete(f"{API_URL}/episodefile/9001")
+    command_route = respx.post(f"{API_URL}/command")
+
+    def fake_link(*args, **kwargs):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    def fake_copy2(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "link", fake_link)
+    monkeypatch.setattr("impostarr.remediate.shutil.copy2", fake_copy2)
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory, trash_cfg=trash_cfg)
+        await remediator.replace(job, WORKER_ID)
+
+    assert not delete_route.called  # never asked Sonarr to delete a file we failed to preserve
+    assert not command_route.called
+    assert get_trash_items(session_factory, job_id) == []
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 2
+    assert log[0]["ok"] is True  # mark_history_failed
+    assert log[1]["step"] == "trash"
+    assert log[1]["ok"] is False
     assert get_job_status(session_factory, job_id) == "quarantine"

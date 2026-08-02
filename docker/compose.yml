@@ -11,6 +11,12 @@ services:
       - ./assets:/assets
       - ./models:/models
       - ${MEDIA_PATH:?set MEDIA_PATH}:/media:ro
+      # Trash mount for the trash.enabled retention feature (see
+      # examples/impostarr.yml). Must be on the SAME filesystem as
+      # MEDIA_PATH for cheap hardlinks — falls back to a full copy
+      # otherwise. Defaults to a bind mount next to ./config; point
+      # TRASH_PATH at a path on the media filesystem if that's elsewhere.
+      - ${TRASH_PATH:-./trash}:/trash
     environment:
       # Remaps the container's `impostarr` user to this uid/gid before it
       # drops privileges (docker/entrypoint.sh) — set to match whoever owns

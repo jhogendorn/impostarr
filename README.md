@@ -77,6 +77,7 @@ the header.
 | `/assets` | Extracted artifact blobs: transcripts, framegrabs, refsub cache | Backup-relevant; can grow large — mountable separately (e.g. longhorn/NFS). |
 | `/models` | Whisper/LLM model caches                                        | Multi-GB; disposable — mountable separately, no backup needed. |
 | `/media`  | Library mount                                                    | Read-only unless remap staging (hardlink + manual import) is used. |
+| `/trash`  | Files trashed by the replace action (see `trash` config)         | Backup-optional (a retention buffer, not primary storage). Must be on the SAME filesystem as `/media` for cheap hardlinks — otherwise Impostarr falls back to a full copy. |
 
 ## Database
 

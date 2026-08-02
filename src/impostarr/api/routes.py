@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from impostarr import jobs
+from impostarr import jobs, trash
 from impostarr.jobs import InvalidTransition
 from impostarr.models import (
     JOB_STATUSES,
@@ -32,10 +32,12 @@ from impostarr.models import (
     Instance,
     Job,
     PhashCorpusEntry,
+    TrashItem,
     Verdict,
 )
 from impostarr.models import PluginResult as PluginResultRow
 from impostarr.remediate import Remediator
+from impostarr.trash import RestoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +173,9 @@ def get_status(request: Request) -> dict:
             for i in instances
         ]
         queues = _queue_counts(session)
+        trash_count = session.execute(
+            select(func.count(TrashItem.id)).where(TrashItem.deleted_at.is_(None))
+        ).scalar_one()
 
         instance_names = _instance_names_by_id(session)
         active_jobs = []
@@ -213,6 +218,7 @@ def get_status(request: Request) -> dict:
         "active_jobs": active_jobs,
         "workers": {"pool_size": request.app.state.pool_size},
         "dry_run": request.app.state.settings.dry_run,
+        "trash_count": trash_count,
     }
 
 
@@ -522,7 +528,10 @@ async def approve_job(job_id: int, request: Request) -> dict:
 
     runtime = _instance_runtime_for_file(request, file)
     dry_run = request.app.state.settings.dry_run
-    remediator = Remediator(runtime.client, runtime.cfg, session_factory, dry_run=dry_run)
+    remediator = Remediator(
+        runtime.client, runtime.cfg, session_factory,
+        dry_run=dry_run, trash_cfg=request.app.state.settings.trash,
+    )
     if action["kind"] == "remap":
         await remediator.remap(job, frozenset(action["target_episode_ids"]), worker_id)
     else:
@@ -593,6 +602,83 @@ async def backfill_instance(name: str, body: BackfillRequest, request: Request) 
         raise HTTPException(404, f"unknown instance: {name!r}")
     created = await runtime.discoverer.backfill_step(body.batch_size)
     return {"created": created}
+
+
+# -- trash --------------------------------------------------------------
+
+
+def _trash_item_out(item: TrashItem, now: datetime) -> dict:
+    return {
+        "id": item.id,
+        "instance": item.instance,
+        "original_path": item.original_path,
+        "trash_path": item.trash_path,
+        "series_id": item.series_id,
+        "episode_ids": item.episode_ids,
+        "size": item.size,
+        "trashed_at": _iso(item.trashed_at),
+        "expires_at": _iso(item.expires_at),
+        "expires_in_s": (item.expires_at - now).total_seconds(),
+    }
+
+
+@router.get("/trash")
+def list_trash(request: Request, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+    page_size = min(page_size, MAX_PAGE_SIZE)
+    with _session_factory(request)() as session:
+        base_where = [TrashItem.deleted_at.is_(None)]
+        total = session.execute(
+            select(func.count(TrashItem.id)).where(*base_where)
+        ).scalar_one()
+        items = (
+            session.execute(
+                select(TrashItem)
+                .where(*base_where)
+                .order_by(TrashItem.trashed_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            .scalars()
+            .all()
+        )
+        now = datetime.now(UTC)
+        return {
+            "total": total,
+            "page_size": page_size,
+            "items": [_trash_item_out(item, now) for item in items],
+        }
+
+
+def _get_active_trash_item(session, trash_id: int) -> TrashItem:
+    item = session.get(TrashItem, trash_id)
+    if item is None:
+        raise HTTPException(404, "trash item not found")
+    if item.deleted_at is not None:
+        raise HTTPException(409, f"trash item {trash_id} already {item.outcome}")
+    return item
+
+
+@router.delete("/trash/{trash_id}")
+def delete_trash_item(trash_id: int, request: Request) -> dict:
+    with _session_factory(request)() as session:
+        item = _get_active_trash_item(session, trash_id)
+        trash.delete_now(session, item)
+        return {"result": "deleted"}
+
+
+@router.post("/trash/{trash_id}/restore")
+def restore_trash_item(trash_id: int, request: Request) -> dict:
+    with _session_factory(request)() as session:
+        item = _get_active_trash_item(session, trash_id)
+        try:
+            trash.restore(session, item)
+        except RestoreConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "result": "restored",
+            "original_path": item.original_path,
+            "note": "not re-imported into Sonarr; a manual rescan/import is required",
+        }
 
 
 # -- SSE ----------------------------------------------------------------

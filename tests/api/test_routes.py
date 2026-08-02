@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 from unittest.mock import AsyncMock
 
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from impostarr import jobs
-from impostarr.config import Settings, SonarrInstance, WorkersConfig
+from impostarr.config import Settings, SonarrInstance, TrashConfig, WorkersConfig
 from impostarr.discovery import Discoverer
 from impostarr.jobs import claim_next
 from impostarr.main import create_app
@@ -25,6 +26,7 @@ from impostarr.models import (
     Instance,
     Job,
     PhashCorpusEntry,
+    TrashItem,
     Verdict,
 )
 from impostarr.models import PluginResult as PluginResultRow
@@ -61,6 +63,10 @@ def app(tmp_path, monkeypatch):
             )
         ],
         workers=WorkersConfig(pool_size=0),
+        # Settings.trash defaults to /trash (real, unwritable in tests) —
+        # anything that reaches Remediator.replace needs a trash dir it can
+        # actually write to.
+        trash=TrashConfig(dir=tmp_path / "trash"),
     )
     return create_app(settings)
 
@@ -119,6 +125,37 @@ def _make_verdict(session_factory, job_id: int, **overrides) -> int:
 def _get_job(session_factory, job_id: int) -> Job:
     with session_factory() as session:
         return session.get(Job, job_id)
+
+
+def _make_trash_item(session_factory, tmp_path, **overrides) -> int:
+    trash_path = overrides.pop("trash_path", None)
+    original_path = overrides.pop("original_path", None)
+    if trash_path is None:
+        trash_path = tmp_path / "trash" / "main" / "S01E01.mkv-1"
+        trash_path.parent.mkdir(parents=True, exist_ok=True)
+        trash_path.write_bytes(b"trashed content")
+    if original_path is None:
+        original_path = tmp_path / "media" / "Show" / "S01E01.mkv"
+    defaults = {
+        "instance": "main",
+        "original_path": str(original_path),
+        "trash_path": str(trash_path),
+        "size": 16,
+        "series_id": 42,
+        "episode_ids": [101],
+        "expires_at": datetime.now(UTC) + timedelta(days=14),
+    }
+    defaults.update(overrides)
+    with session_factory() as session:
+        item = TrashItem(**defaults)
+        session.add(item)
+        session.commit()
+        return item.id
+
+
+def _get_trash_item(session_factory, item_id: int) -> TrashItem:
+    with session_factory() as session:
+        return session.get(TrashItem, item_id)
 
 
 def episodes_json(series_id=42):
@@ -266,6 +303,22 @@ def test_status_dry_run_reflects_settings(tmp_path, monkeypatch):
     with TestClient(app) as client:
         response = client.get(f"{API_PREFIX}/status")
     assert response.json()["dry_run"] is True
+
+
+def test_status_trash_count_reflects_active_items_only(app, tmp_path):
+    session_factory = _session_factory(app)
+    _make_trash_item(session_factory, tmp_path)
+    deleted_id = _make_trash_item(session_factory, tmp_path, trash_path=tmp_path / "trash/main/x-2")
+    with session_factory() as session:
+        item = session.get(TrashItem, deleted_id)
+        item.deleted_at = datetime.now(UTC)
+        item.outcome = "deleted"
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/status")
+
+    assert response.json()["trash_count"] == 1
 
 
 # -- logs -------------------------------------------------------------------
@@ -760,7 +813,7 @@ def test_verdict_double_submission_second_409s_single_verdict_row(app):
 class FakeRemediator:
     calls: ClassVar[list[tuple]] = []
 
-    def __init__(self, client, cfg, session_factory, dry_run: bool = False) -> None:
+    def __init__(self, client, cfg, session_factory, dry_run: bool = False, trash_cfg=None) -> None:
         self.session_factory = session_factory
 
     async def replace(self, job, worker_id) -> None:
@@ -989,3 +1042,125 @@ async def test_sse_event_stream_periodic_stats_and_heartbeat(app, monkeypatch):
         "hold", "pending", "active", "matched", "quarantine", "inconclusive", "error", "remediated",
     }
     assert heartbeat_chunk == ": heartbeat\n\n"
+
+
+# -- trash --------------------------------------------------------------
+
+
+def test_list_trash_returns_active_items_newest_first(app, tmp_path):
+    session_factory = _session_factory(app)
+    older_id = _make_trash_item(
+        session_factory, tmp_path, trash_path=tmp_path / "trash/main/a-1", series_id=1,
+    )
+    newer_id = _make_trash_item(
+        session_factory, tmp_path, trash_path=tmp_path / "trash/main/b-2", series_id=2,
+    )
+    with session_factory() as session:
+        older = session.get(TrashItem, older_id)
+        older.trashed_at = datetime.now(UTC) - timedelta(hours=1)
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/trash")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert [item["id"] for item in body["items"]] == [newer_id, older_id]
+    first = body["items"][0]
+    assert set(first) == {
+        "id", "instance", "original_path", "trash_path", "series_id", "episode_ids",
+        "size", "trashed_at", "expires_at", "expires_in_s",
+    }
+    assert first["instance"] == "main"
+    assert first["expires_in_s"] > 0
+
+
+def test_list_trash_excludes_already_deleted_items(app, tmp_path):
+    session_factory = _session_factory(app)
+    active_id = _make_trash_item(session_factory, tmp_path)
+    deleted_id = _make_trash_item(
+        session_factory, tmp_path, trash_path=tmp_path / "trash/main/x-2",
+    )
+    with session_factory() as session:
+        item = session.get(TrashItem, deleted_id)
+        item.deleted_at = datetime.now(UTC)
+        item.outcome = "deleted"
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/trash")
+
+    ids = [item["id"] for item in response.json()["items"]]
+    assert ids == [active_id]
+
+
+def test_delete_trash_item_unlinks_and_marks_deleted(app, tmp_path):
+    session_factory = _session_factory(app)
+    item_id = _make_trash_item(session_factory, tmp_path)
+    trash_path = _get_trash_item(session_factory, item_id).trash_path
+
+    with TestClient(app) as client:
+        response = client.delete(f"{API_PREFIX}/trash/{item_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"result": "deleted"}
+    assert not os.path.exists(trash_path)
+    item = _get_trash_item(session_factory, item_id)
+    assert item.outcome == "deleted"
+    assert item.deleted_at is not None
+
+
+def test_delete_trash_item_404_when_missing(app):
+    with TestClient(app) as client:
+        response = client.delete(f"{API_PREFIX}/trash/999999")
+    assert response.status_code == 404
+
+
+def test_delete_trash_item_409_when_already_deleted(app, tmp_path):
+    session_factory = _session_factory(app)
+    item_id = _make_trash_item(session_factory, tmp_path)
+    with session_factory() as session:
+        item = session.get(TrashItem, item_id)
+        item.deleted_at = datetime.now(UTC)
+        item.outcome = "deleted"
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.delete(f"{API_PREFIX}/trash/{item_id}")
+
+    assert response.status_code == 409
+
+
+def test_restore_trash_item_copies_file_back_and_marks_restored(app, tmp_path):
+    session_factory = _session_factory(app)
+    original_path = tmp_path / "media" / "Show" / "S01E01.mkv"
+    item_id = _make_trash_item(session_factory, tmp_path, original_path=original_path)
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/trash/{item_id}/restore")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"] == "restored"
+    assert body["original_path"] == str(original_path)
+    assert "not re-imported into Sonarr" in body["note"]
+    assert original_path.exists()
+    item = _get_trash_item(session_factory, item_id)
+    assert item.outcome == "restored"
+    assert item.deleted_at is not None
+
+
+def test_restore_trash_item_409_when_original_path_occupied(app, tmp_path):
+    session_factory = _session_factory(app)
+    original_path = tmp_path / "media" / "Show" / "S01E01.mkv"
+    original_path.parent.mkdir(parents=True, exist_ok=True)
+    original_path.write_bytes(b"already there")
+    item_id = _make_trash_item(session_factory, tmp_path, original_path=original_path)
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/trash/{item_id}/restore")
+
+    assert response.status_code == 409
+    item = _get_trash_item(session_factory, item_id)
+    assert item.outcome is None  # restore never partially applied

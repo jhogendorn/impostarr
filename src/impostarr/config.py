@@ -84,6 +84,12 @@ class DbConfig(BaseModel):
     dsn: str | None = None  # absent -> SQLite
 
 
+class TrashConfig(BaseModel):
+    enabled: bool = True
+    dir: Path = Path("/trash")
+    retention_days: int = 14
+
+
 class WorkersConfig(BaseModel):
     pool_size: int = 2
     # Transcriber backend selection: entry-point name in the
@@ -117,6 +123,7 @@ class Settings(BaseSettings):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     db: DbConfig = Field(default_factory=DbConfig)
     workers: WorkersConfig = Field(default_factory=WorkersConfig)
+    trash: TrashConfig = Field(default_factory=TrashConfig)
 
     # Strongly recommended for first runs against a real library: no files
     # are touched, no Sonarr state is changed; every action is logged as

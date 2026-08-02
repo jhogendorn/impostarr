@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import inspect
@@ -14,6 +14,7 @@ from impostarr.models import (
     Job,
     PhashCorpusEntry,
     PluginResult,
+    TrashItem,
     Verdict,
 )
 
@@ -26,6 +27,7 @@ EXPECTED_TABLES = {
     "verdicts",
     "frame_hashes",
     "phash_corpus",
+    "trash_items",
 }
 
 
@@ -375,6 +377,75 @@ def test_json_mutable_list_in_place_mutation_persists(engine):
     with session_factory() as session:
         reloaded = session.get(File, file_id)
         assert reloaded.episode_ids == [1, 2]
+
+
+def test_trash_item_round_trip_and_nullable_outcome(engine):
+    session_factory = make_session_factory(engine)
+    with session_factory() as session:
+        instance = Instance(name="main", url="http://sonarr:8989")
+        session.add(instance)
+        session.flush()
+        file = File(
+            instance_id=instance.id,
+            sonarr_path="/tv/Show/S01E01.mkv",
+            local_path="/media/tv/Show/S01E01.mkv",
+            size=1,
+            content_hash="hash",
+            series_id=1,
+            episode_ids=[1],
+            episode_file_id=1,
+            quality={},
+            languages=[],
+        )
+        session.add(file)
+        session.flush()
+        job = Job(file_id=file.id, status="pending")
+        session.add(job)
+        session.flush()
+
+        now = datetime.now(UTC)
+        item = TrashItem(
+            file_id=file.id,
+            job_id=job.id,
+            instance="main",
+            original_path="/media/tv/Show/S01E01.mkv",
+            trash_path="/trash/main/S01E01.mkv-1",
+            size=123,
+            series_id=1,
+            episode_ids=[1],
+            expires_at=now + timedelta(days=14),
+        )
+        session.add(item)
+        session.commit()  # outcome/deleted_at left None: must not violate the check constraint
+        item_id = item.id
+
+    with session_factory() as session:
+        reloaded = session.get(TrashItem, item_id)
+        assert reloaded.outcome is None
+        assert reloaded.deleted_at is None
+        assert reloaded.episode_ids == [1]
+        assert reloaded.expires_at.tzinfo is not None
+
+
+def test_trash_item_outcome_check_constraint_rejects_invalid_value(engine):
+    session_factory = make_session_factory(engine)
+    with session_factory() as session:
+        instance = Instance(name="main", url="http://sonarr:8989")
+        session.add(instance)
+        session.flush()
+        item = TrashItem(
+            instance="main",
+            original_path="/x",
+            trash_path="/trash/x",
+            size=1,
+            series_id=1,
+            episode_ids=[1],
+            expires_at=datetime.now(UTC),
+            outcome="bogus",
+        )
+        session.add(item)
+        with pytest.raises(IntegrityError):
+            session.commit()
 
 
 def test_file_size_accepts_values_beyond_32_bit_int(engine):

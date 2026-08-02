@@ -5,7 +5,13 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from impostarr.config import DEFAULT_CONFIG_PATH, PathMapping, PluginConfig, Settings, load_settings
+from impostarr.config import (
+    DEFAULT_CONFIG_PATH,
+    PathMapping,
+    PluginConfig,
+    Settings,
+    load_settings,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +39,9 @@ def test_defaults_applied_when_sections_omitted(tmp_path):
     assert settings.state_dir == Path("/config")
     assert settings.assets_dir == Path("/assets")
     assert settings.models_dir == Path("/models")
+    assert settings.trash.enabled is True
+    assert settings.trash.dir == Path("/trash")
+    assert settings.trash.retention_days == 14
 
 
 def test_missing_file_returns_defaults_only_settings(tmp_path):
@@ -134,3 +143,16 @@ def test_duplicate_sonarr_instance_names_rejected():
 def test_plugin_config_negative_weight_rejected():
     with pytest.raises(ValidationError):
         PluginConfig(weight=-1.0)
+
+
+def test_trash_config_round_trip_from_yaml(tmp_path):
+    config_path = tmp_path / "impostarr.yml"
+    config_path.write_text(
+        yaml.safe_dump({"trash": {"enabled": False, "dir": "/mnt/trash", "retention_days": 3}})
+    )
+
+    settings = load_settings(config_path)
+
+    assert settings.trash.enabled is False
+    assert settings.trash.dir == Path("/mnt/trash")
+    assert settings.trash.retention_days == 3

@@ -25,7 +25,7 @@ compose() { (cd "$DEMO_DIR" && docker compose "$@"); }
 log "tearing down any previous stack"
 compose down -v --remove-orphans >/dev/null 2>&1 || true
 rm -rf "$DEMO_DIR/volumes"
-mkdir -p "$DEMO_DIR/volumes"/{media/tv,sonarr-config,config,assets,models,manifest,staging/refsubs}
+mkdir -p "$DEMO_DIR/volumes"/{media/tv,sonarr-config,config,assets,models,manifest,staging/refsubs,trash}
 touch "$DEMO_DIR/volumes/.gitkeep"
 
 # -- 2. build images -----------------------------------------------------------

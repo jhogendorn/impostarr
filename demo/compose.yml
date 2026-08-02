@@ -36,6 +36,7 @@ services:
       - ./volumes/assets:/assets
       - ./volumes/models:/models
       - ./volumes/media:/media:ro
+      - ./volumes/trash:/trash
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}

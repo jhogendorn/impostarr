@@ -29,15 +29,15 @@ import errno
 import logging
 import os
 import shutil
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from impostarr import jobs
-from impostarr.config import SonarrInstance
-from impostarr.models import File, Job, Verdict
+from impostarr.config import SonarrInstance, TrashConfig
+from impostarr.models import File, Job, TrashItem, Verdict
 from impostarr.sonarr import SonarrClient, SonarrError
 
 logger = logging.getLogger(__name__)
@@ -77,11 +77,16 @@ class Remediator:
         instance_cfg: SonarrInstance,
         session_factory: sessionmaker[Session],
         dry_run: bool = False,
+        trash_cfg: TrashConfig | None = None,
     ) -> None:
         self.client = client
         self.instance_cfg = instance_cfg
         self.session_factory = session_factory
         self.dry_run = dry_run
+        # None (the default) behaves like a disabled TrashConfig: callers
+        # that don't pass one (e.g. existing tests) get the pre-trash
+        # replace() behavior unchanged.
+        self.trash_cfg = trash_cfg
 
     def _log(self, session: Session, verdict: Verdict, step: str, ok: bool, detail: str) -> None:
         """Wraps `_log_step`, prefixing `detail` with "DRY-RUN: " whenever
@@ -95,13 +100,22 @@ class Remediator:
     # -- replace ----------------------------------------------------------
 
     async def replace(self, job: Job, worker_id: str) -> None:
-        """Blocklist (if grab history is known) + delete + re-search.
+        """Blocklist (if grab history is known) + trash (if enabled) +
+        delete + re-search.
 
         Step 1: `mark_history_failed` when `file.history_id` is set;
-        otherwise logs an "unblocklistable" note with no API call. Step 2:
-        `delete_episode_file`. Step 3: `EpisodeSearch` command. A `SonarrError`
-        at any step stops the sequence and quarantines the job with the
-        partial log preserved.
+        otherwise logs an "unblocklistable" note with no API call. Step 2
+        (only when `trash_cfg.enabled`): hardlink (EXDEV -> copy2) the media
+        file into `<trash_cfg.dir>/<instance>/` and insert a `TrashItem`
+        row, *before* asking Sonarr to delete anything — a trash
+        copy/DB failure here quarantines the job without touching Sonarr,
+        the same safety ordering `remap` uses for its staging hardlink (fail
+        before mutating, never after). Step 3: `delete_episode_file` — its
+        logged detail notes the trash retention date when trash is enabled,
+        and is unchanged otherwise. Step 4: `EpisodeSearch` command. A
+        `SonarrError` (or, for the trash step, an `OSError`) at any step
+        stops the sequence and quarantines the job with the partial log
+        preserved.
         """
         with self.session_factory() as session:
             db_job = session.get(Job, job.id)
@@ -143,6 +157,62 @@ class Remediator:
                     "blocklisted — deleting and re-searching only",
                 )
 
+            delete_detail_suffix = ""
+            if self.trash_cfg is not None and self.trash_cfg.enabled:
+                local_path = Path(file.local_path)
+                trash_dir = Path(self.trash_cfg.dir) / self.instance_cfg.name
+                trash_path = trash_dir / f"{local_path.name}-{db_job.id}"
+                expires_at = datetime.now(UTC) + timedelta(days=self.trash_cfg.retention_days)
+
+                if self.dry_run:
+                    # No trash dir created, no hardlink/copy, no TrashItem
+                    # row: nothing on disk or in the DB records a copy that
+                    # was never actually made.
+                    self._log(
+                        session,
+                        verdict,
+                        "trash",
+                        True,
+                        f"would copy file to trash: {trash_path} (expires {expires_at.isoformat()})",
+                    )
+                else:
+                    try:
+                        trash_dir.mkdir(parents=True, exist_ok=True)
+                        try:
+                            os.link(local_path, trash_path)
+                        except OSError as exc:
+                            if exc.errno == errno.EXDEV:
+                                shutil.copy2(local_path, trash_path)
+                            else:
+                                raise
+                    except OSError as exc:
+                        self._log(
+                            session, verdict, "trash", False, f"{exc}; trash_path={trash_path}"
+                        )
+                        jobs.release(session, db_job, "quarantine", worker_id)
+                        return
+                    session.add(
+                        TrashItem(
+                            file_id=file.id,
+                            job_id=db_job.id,
+                            instance=self.instance_cfg.name,
+                            original_path=str(local_path),
+                            trash_path=str(trash_path),
+                            size=file.size,
+                            series_id=file.series_id,
+                            episode_ids=list(file.episode_ids),
+                            expires_at=expires_at,
+                        )
+                    )
+                    self._log(
+                        session,
+                        verdict,
+                        "trash",
+                        True,
+                        f"copied file to trash: {trash_path} (expires {expires_at.isoformat()})",
+                    )
+                delete_detail_suffix = f"; copy retained in trash until {expires_at.isoformat()}"
+
             try:
                 await self.client.delete_episode_file(file.episode_file_id)
             except SonarrError as exc:
@@ -154,7 +224,8 @@ class Remediator:
                 verdict,
                 "delete_episode_file",
                 True,
-                f"removed file via Sonarr (episode_file_id={file.episode_file_id})",
+                f"removed file via Sonarr (episode_file_id={file.episode_file_id}"
+                f"{delete_detail_suffix})",
             )
 
             try:
