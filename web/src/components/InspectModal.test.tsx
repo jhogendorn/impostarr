@@ -414,4 +414,14 @@ describe('InspectModal', () => {
 
     expect(onClose).toHaveBeenCalled()
   })
+
+  it('the dialog panel carries the elevated indigo glow treatment', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    await screen.findByText(/whisper-transcript/)
+    // HeadlessUI renders the dialog in a portal, outside the render container.
+    const panel = document.body.querySelector('.max-w-3xl')
+    expect(panel).toHaveClass('glow-elevated')
+  })
 })

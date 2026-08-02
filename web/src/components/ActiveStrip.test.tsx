@@ -21,13 +21,20 @@ describe('ActiveStrip', () => {
     expect(screen.getByText('MEM 61%')).toBeInTheDocument()
   })
 
-  it('renders as its own bordered section with an "Active" title, not a bar', () => {
+  it('renders as its own section with an "Active" title, not a bar', () => {
     render(<ActiveStrip activeJobs={[]} system={statusFixture.system} />)
 
     const title = screen.getByRole('heading', { name: 'Active' })
     expect(title).toBeInTheDocument()
     const panel = title.parentElement!
-    expect(panel).toHaveClass('rounded-lg', 'border', 'border-slate-800')
+    expect(panel).toHaveClass('rounded-lg')
+  })
+
+  it('the container carries the indigo glow-live treatment (live/actionable section)', () => {
+    render(<ActiveStrip activeJobs={[]} system={statusFixture.system} />)
+
+    const panel = screen.getByRole('heading', { name: 'Active' }).parentElement!
+    expect(panel).toHaveClass('glow-live')
   })
 
   it('renders a card per active job with instance, path, claimed_by, and elapsed', () => {

@@ -60,7 +60,7 @@ function LogDrawer({ open }: LogDrawerProps) {
   if (!open) return null
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-40 flex h-[40vh] flex-col border-t border-slate-800 bg-slate-900">
+    <div className="glow-panel fixed inset-x-0 bottom-0 z-40 flex h-[40vh] flex-col bg-slate-900">
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2">
         <span className="text-sm font-medium text-slate-200">Logs</span>
         <div className="flex items-center gap-2">

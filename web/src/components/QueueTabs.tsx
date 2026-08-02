@@ -42,7 +42,7 @@ function QueueTabs({ status, active, onChange }: QueueTabsProps) {
 
   return (
     <TabGroup selectedIndex={selectedIndex} onChange={(index) => onChange(ALL_TABS[index])}>
-      <TabList className="flex flex-wrap items-end gap-6 border-b border-slate-800 px-6 pt-3 pb-2">
+      <TabList className="flex flex-wrap items-end gap-6 px-6 pt-3 pb-2">
         <div>
           <div className={GROUP_LABEL_CLASS}>Queued</div>
           <div className="flex flex-wrap gap-1">

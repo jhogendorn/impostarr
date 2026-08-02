@@ -150,26 +150,34 @@ function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <StatusHeader status={status} connected={connected} onToggleLogs={() => setLogsOpen((open) => !open)} />
       <ActiveStrip activeJobs={status?.active_jobs ?? []} system={status?.system} />
-      <QueueTabs status={status} active={activeTab} onChange={handleTabChange} />
-      {activeTab === 'trash' ? (
-        <TrashTable />
-      ) : (
-        <QueueTable
-          page={queuePage}
-          pageIndex={pageIndex}
-          pageSize={pageSize}
-          onPageChange={setPageIndex}
-          onPageSizeChange={handlePageSizeChange}
-          onInspect={setInspectJobId}
-          instances={status?.instances ?? []}
-          selectedInstance={instanceFilter}
-          onInstanceChange={handleInstanceChange}
-          sortField={sortField}
-          sortDir={sortDir}
-          onSortChange={handleSortChange}
-          onChanged={handleModalChanged}
-        />
-      )}
+      {/* One inset rounded card for the whole queue area — tab bar, filter
+       * row, table, and pagination together — matching the Active section's
+       * inset. Each child keeps its own internal padding; only the shared
+       * card carries the ring, so nothing inside re-glows its own edges. */}
+      <section className="px-6 pt-4">
+        <div className="glow-panel rounded-xl bg-slate-900/40">
+          <QueueTabs status={status} active={activeTab} onChange={handleTabChange} />
+          {activeTab === 'trash' ? (
+            <TrashTable />
+          ) : (
+            <QueueTable
+              page={queuePage}
+              pageIndex={pageIndex}
+              pageSize={pageSize}
+              onPageChange={setPageIndex}
+              onPageSizeChange={handlePageSizeChange}
+              onInspect={setInspectJobId}
+              instances={status?.instances ?? []}
+              selectedInstance={instanceFilter}
+              onInstanceChange={handleInstanceChange}
+              sortField={sortField}
+              sortDir={sortDir}
+              onSortChange={handleSortChange}
+              onChanged={handleModalChanged}
+            />
+          )}
+        </div>
+      </section>
       <InspectModal
         jobId={inspectJobId}
         open={inspectJobId !== null}

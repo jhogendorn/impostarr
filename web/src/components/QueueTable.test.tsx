@@ -119,6 +119,7 @@ describe('QueueTable', () => {
 
     const bar = screen.getByRole('group', { name: 'Bulk actions' })
     expect(bar).toHaveClass('h-10')
+    expect(bar).not.toHaveClass('glow-live')
     expect(screen.queryByText(/selected/)).not.toBeInTheDocument()
 
     await user.click(screen.getByLabelText('Select job 1'))
@@ -126,6 +127,7 @@ describe('QueueTable', () => {
     const barAfterSelect = screen.getByRole('group', { name: 'Bulk actions' })
     expect(barAfterSelect).toBe(bar) // same node, never unmounted/remounted
     expect(barAfterSelect).toHaveClass('h-10')
+    expect(barAfterSelect).toHaveClass('glow-live') // indigo glow only once something's selected
     expect(screen.getByText('1 selected')).toBeInTheDocument()
   })
 

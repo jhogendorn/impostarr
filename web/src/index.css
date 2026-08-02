@@ -13,6 +13,39 @@ body {
   margin: 0;
 }
 
+/* Edge-glow section system — plain CSS classes (not Tailwind utilities)
+ * since these compose multi-layer box-shadows. Hue semantics: indigo =
+ * live/interactive (something is happening, or is actionable right now),
+ * slate = structure (a section boundary, no implied state), amber remains
+ * exclusively dry-run/warning — never used for a glow. */
+
+/* Structural sections: table panel, tab-group containers, trash table, log
+ * drawer. A neutral slate ring + a faint cool bloom, just enough to read as
+ * a distinct region without competing for attention. */
+.glow-panel {
+  box-shadow:
+    0 0 0 1px rgb(51 65 85 / 0.6),
+    0 0 18px -8px rgb(148 163 184 / 0.18);
+}
+
+/* The Active section, and the bulk-action bar once it has a selection —
+ * indigo, the "something is happening / actionable" hue. */
+.glow-live {
+  box-shadow:
+    0 0 0 1px rgb(99 102 241 / 0.35),
+    0 0 22px -6px rgb(99 102 241 / 0.3);
+}
+
+/* The inspect modal panel: indigo ring + a soft bloom, plus a real drop
+ * shadow for depth since it floats above a backdrop rather than sitting
+ * inline in the page flow. */
+.glow-elevated {
+  box-shadow:
+    0 0 0 1px rgb(99 102 241 / 0.3),
+    0 0 40px -10px rgb(99 102 241 / 0.35),
+    0 24px 48px -24px rgb(0 0 0 / 0.8);
+}
+
 /* ActiveStrip's indeterminate progress bar — no per-stage progress exists
  * backend-side, so this is an honest "work is happening" signal, not a
  * fake completion percentage. */
