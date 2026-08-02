@@ -1,0 +1,51 @@
+{
+  "page": 2,
+  "pageSize": 100,
+  "sortKey": "id",
+  "sortDirection": "ascending",
+  "totalRecords": 2,
+  "records": [
+    {
+      "id": 103,
+      "episodeId": 557,
+      "seriesId": 42,
+      "sourceTitle": "Show.Name.S01E04.1080p.WEB-DL",
+      "downloadId": "1122334455667788",
+      "eventType": "downloadFolderImported",
+      "date": "2026-07-30T12:25:00Z",
+      "quality": {
+        "quality": {"id": 7, "name": "WEBDL-1080p"},
+        "revision": {"version": 1, "real": 0, "isRepack": false}
+      },
+      "languages": [{"id": 1, "name": "English"}],
+      "data": {
+        "droppedPath": "/downloads/Show.Name.S01E04.1080p.WEB-DL/show.name.s01e04.mkv",
+        "importedPath": "/tv/Show Name/Season 01/Show Name - S01E04 - Title.mkv",
+        "fileId": "9003",
+        "guid": "1122334455667788",
+        "indexer": "NZBgeek"
+      }
+    },
+    {
+      "id": 104,
+      "episodeId": 558,
+      "seriesId": 42,
+      "sourceTitle": "Show.Name.S01E05.1080p.WEB-DL",
+      "downloadId": "8877665544332211",
+      "eventType": "downloadFolderImported",
+      "date": "2026-07-30T13:30:00Z",
+      "quality": {
+        "quality": {"id": 7, "name": "WEBDL-1080p"},
+        "revision": {"version": 1, "real": 0, "isRepack": false}
+      },
+      "languages": [{"id": 1, "name": "English"}],
+      "data": {
+        "droppedPath": "/downloads/Show.Name.S01E05.1080p.WEB-DL/show.name.s01e05.mkv",
+        "importedPath": "/tv/Show Name/Season 01/Show Name - S01E05 - Title.mkv",
+        "fileId": "9004",
+        "guid": "8877665544332211",
+        "indexer": "NZBgeek"
+      }
+    }
+  ]
+}
