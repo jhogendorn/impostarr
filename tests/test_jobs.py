@@ -9,6 +9,8 @@ from impostarr.config import Settings
 from impostarr.db import init_db, make_session_factory
 from impostarr.jobs import (
     InvalidTransition,
+    LeaseLost,
+    _utcnow,
     claim_next,
     create_job,
     heartbeat,
@@ -175,18 +177,28 @@ def test_heartbeat_bumps_heartbeat_at_on_active_job(session_factory):
         job = claim_next(session, "worker-1")
         original_heartbeat = job.heartbeat_at
 
-        heartbeat(session, job)
+        heartbeat(session, job, "worker-1")
 
         assert job.heartbeat_at >= original_heartbeat
 
 
-def test_heartbeat_on_pending_job_raises_invalid_transition(session_factory):
+def test_heartbeat_on_pending_job_raises_lease_lost(session_factory):
     with session_factory() as session:
         file_id = _make_file(session)
         job = create_job(session, file_id)
 
-        with pytest.raises(InvalidTransition):
-            heartbeat(session, job)
+        with pytest.raises(LeaseLost):
+            heartbeat(session, job, "worker-1")
+
+
+def test_heartbeat_with_wrong_worker_id_raises_lease_lost(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        create_job(session, file_id)
+        job = claim_next(session, "worker-1")
+
+        with pytest.raises(LeaseLost):
+            heartbeat(session, job, "worker-2")
 
 
 def test_release_active_to_terminal_status_clears_lease(session_factory):
@@ -195,7 +207,7 @@ def test_release_active_to_terminal_status_clears_lease(session_factory):
         create_job(session, file_id)
         job = claim_next(session, "worker-1")
 
-        released = release(session, job, "matched")
+        released = release(session, job, "matched", "worker-1")
 
         assert released.status == "matched"
         assert released.claimed_by is None
@@ -209,7 +221,7 @@ def test_release_active_back_to_pending_for_requeue(session_factory):
         create_job(session, file_id)
         job = claim_next(session, "worker-1")
 
-        released = release(session, job, "pending")
+        released = release(session, job, "pending", "worker-1")
 
         assert released.status == "pending"
         assert released.claimed_by is None
@@ -221,7 +233,69 @@ def test_release_on_hold_job_raises_invalid_transition(session_factory):
         job = create_job(session, file_id, parked=True)
 
         with pytest.raises(InvalidTransition):
-            release(session, job, "matched")
+            release(session, job, "matched", "worker-1")
+
+
+def test_release_on_terminal_status_job_raises_invalid_transition(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        create_job(session, file_id)
+        job = claim_next(session, "worker-1")
+        released = release(session, job, "matched", "worker-1")
+
+        with pytest.raises(InvalidTransition):
+            release(session, released, "quarantine", "worker-1")
+
+
+def test_release_with_wrong_worker_id_raises_lease_lost(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        create_job(session, file_id)
+        job = claim_next(session, "worker-1")
+
+        with pytest.raises(LeaseLost):
+            release(session, job, "matched", "worker-2")
+
+
+def test_w1_release_after_reap_and_w2_reclaim_raises_lease_lost(session_factory):
+    # Regression for the demonstrated clobber: W1 claims, stalls past the
+    # lease timeout, reap_stale requeues the job, W2 claims it, then W1
+    # wakes up and calls release() on its now-stale handle. Must raise
+    # LeaseLost, not silently steal the job back out from under W2.
+    with session_factory() as setup_session:
+        file_id = _make_file(setup_session)
+        create_job(setup_session, file_id)
+
+    session_w1 = session_factory()
+    reaper_session = session_factory()
+    session_w2 = session_factory()
+    try:
+        job_w1 = claim_next(session_w1, "worker-1")
+        job_id = job_w1.id
+
+        # W1 stalls; its heartbeat goes stale and reap_stale requeues it.
+        stale = reaper_session.get(Job, job_id)
+        stale.heartbeat_at = datetime.now(UTC) - timedelta(seconds=120)
+        reaper_session.commit()
+        assert reap_stale(reaper_session, lease_timeout_s=60) == 1
+
+        # W2 claims the requeued job.
+        job_w2 = claim_next(session_w2, "worker-2")
+        assert job_w2.id == job_id
+
+        # W1 wakes up, unaware of the reap/reclaim, and tries to release
+        # the same job object it originally claimed.
+        with pytest.raises(LeaseLost):
+            release(session_w1, job_w1, "matched", "worker-1")
+    finally:
+        session_w1.close()
+        reaper_session.close()
+        session_w2.close()
+
+    with session_factory() as verify_session:
+        current = verify_session.get(Job, job_id)
+        assert current.status == "active"
+        assert current.claimed_by == "worker-2"
 
 
 def test_reap_stale_requeues_and_increments_attempts(session_factory):
@@ -299,3 +373,20 @@ def test_unpark_on_pending_job_raises_invalid_transition(session_factory):
 
         with pytest.raises(InvalidTransition):
             unpark(session, job)
+
+
+def test_job_datetimes_are_tz_aware_in_a_fresh_session(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        create_job(session, file_id)
+        claimed = claim_next(session, "worker-1")
+        job_id = claimed.id
+
+    with session_factory() as fresh_session:
+        reloaded = fresh_session.get(Job, job_id)
+
+        assert reloaded.created_at.tzinfo is not None
+        assert reloaded.heartbeat_at.tzinfo is not None
+        # Would raise TypeError (naive vs aware) if UTCDateTime didn't
+        # attach tzinfo on load.
+        assert (_utcnow() - reloaded.created_at).total_seconds() >= 0

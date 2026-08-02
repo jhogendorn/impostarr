@@ -19,11 +19,40 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.types import JSON
+from sqlalchemy.types import JSON, TypeDecorator
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+class UTCDateTime(TypeDecorator):
+    """Timezone-aware UTC datetime, round-trip safe on SQLite.
+
+    SQLite has no native tz-aware timestamp type, so a plain
+    `DateTime(timezone=True)` silently hands back naive datetimes on read
+    even though it accepted aware ones on write. This decorator requires
+    aware input on bind (converted to UTC) and always attaches UTC tzinfo
+    on load, so every datetime column behaves consistently regardless of
+    backend. Same wire type as `DateTime(timezone=True)` — no DDL change.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("UTCDateTime requires a timezone-aware datetime")
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 def _enum_check(column: str, values: tuple[str, ...]) -> str:
@@ -110,12 +139,10 @@ class Job(Base):
     status: Mapped[str] = mapped_column(default="pending")
     attempts: Mapped[int] = mapped_column(default=0)
     claimed_by: Mapped[str | None] = mapped_column(default=None)
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
-    )
+    claimed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow, onupdate=_utcnow)
 
     __table_args__ = (
         CheckConstraint(_enum_check("status", JOB_STATUSES), name="status_valid"),
@@ -135,7 +162,7 @@ class Asset(Base):
     payload: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON), default=None)
     input_fingerprint: Mapped[str] = mapped_column()
     tool_meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSON), default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 
     __table_args__ = (CheckConstraint(_enum_check("type", ASSET_TYPES), name="type_valid"),)
 
@@ -154,7 +181,7 @@ class PluginResult(Base):
     candidates: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list)
     normalized: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list)
     input_fingerprint: Mapped[str] = mapped_column()
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 
     __table_args__ = (
         CheckConstraint(_enum_check("status", PLUGIN_RESULT_STATUSES), name="status_valid"),
@@ -176,7 +203,7 @@ class Verdict(Base):
     remediation_log: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list)
     source: Mapped[str] = mapped_column()
     human_ident: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 
     __table_args__ = (CheckConstraint(_enum_check("source", VERDICT_SOURCES), name="source_valid"),)
 
@@ -192,7 +219,7 @@ class FrameHash(Base):
     version: Mapped[int] = mapped_column()
     timestamps: Mapped[list] = mapped_column(MutableList.as_mutable(JSON))
     hashes: Mapped[list] = mapped_column(MutableList.as_mutable(JSON))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 
 
 class PhashCorpusEntry(Base):
@@ -207,6 +234,6 @@ class PhashCorpusEntry(Base):
     episodes: Mapped[list] = mapped_column(MutableList.as_mutable(JSON))
     confidence: Mapped[float] = mapped_column()
     source: Mapped[str] = mapped_column()
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 
     __table_args__ = (CheckConstraint(_enum_check("source", VERDICT_SOURCES), name="source_valid"),)

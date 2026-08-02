@@ -16,6 +16,20 @@ the next-oldest still-pending job. SQLite serializes writers at the
 database level (WAL, single writer; `db.make_engine` sets a 30s busy
 timeout), so the UPDATE's rowcount is a reliable arbiter of exactly one
 winner even under concurrent sessions.
+
+Lease fencing: `heartbeat` and `release` require the caller's `worker_id`
+and only touch a row via `WHERE id=:id AND status='active' AND
+claimed_by=:worker_id`. A stale worker (its lease already reaped and
+re-claimed by someone else) gets rowcount 0 and `LeaseLost` instead of
+silently clobbering the new claimant. `park`/`unpark` have no claimant to
+fence on but are still conditioned on their expected source status via
+rowcount, so a concurrent claim racing a park can't be silently overwritten
+either (raises `InvalidTransition` in that case).
+
+Commit semantics: every function in this module commits the session itself
+(or rolls back on a lost race/lease) before returning. Do not share a
+session across one of these calls and other uncommitted, unrelated work —
+that work will be committed or rolled back as a side effect.
 """
 
 from __future__ import annotations
@@ -33,7 +47,8 @@ TERMINAL_STATUSES = frozenset(
     {"matched", "quarantine", "inconclusive", "error", "remediated"}
 )
 
-# Allowed `from status -> {to statuses}` for the queue state machine.
+# Allowed `from status -> {to statuses}` for the queue state machine. Single
+# source of truth for every status change in this module.
 VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "hold": frozenset({"pending"}),
     "pending": frozenset({"hold", "active"}),
@@ -45,17 +60,26 @@ class InvalidTransition(Exception):
     """Raised when a job status change doesn't match the queue state machine."""
 
 
+class LeaseLost(Exception):
+    """Raised when a worker no longer holds the active lease it thinks it does
+    (reaped for a stale heartbeat and possibly re-claimed by another worker)."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _transition(job: Job, new_status: str) -> None:
-    allowed = VALID_TRANSITIONS.get(job.status, frozenset())
+def _check_transition(from_status: str, new_status: str, job_id: int) -> None:
+    """Validate `from_status -> new_status` against `VALID_TRANSITIONS`.
+
+    Pure validation, no mutation — callers apply the status themselves once
+    the corresponding DB write (fenced or not) has actually succeeded.
+    """
+    allowed = VALID_TRANSITIONS.get(from_status, frozenset())
     if new_status not in allowed:
         raise InvalidTransition(
-            f"cannot transition job {job.id} from {job.status!r} to {new_status!r}"
+            f"cannot transition job {job_id} from {from_status!r} to {new_status!r}"
         )
-    job.status = new_status
 
 
 def create_job(session: Session, file_id: int, *, parked: bool = False) -> Job:
@@ -70,12 +94,6 @@ def claim_next(session: Session, worker_id: str) -> Job | None:
     """Atomically claim the oldest pending job. See module docstring for the
     chosen SELECT-then-conditional-UPDATE mechanism and its concurrency
     guarantee.
-
-    The SELECT loads the full ORM entity (not just its id) so that on a win
-    we can set the lease fields on that same in-memory object rather than
-    re-reading the row from SQLite — SQLite's DateTime storage does not
-    round-trip `tzinfo`, so re-reading would hand back naive datetimes
-    while every other timestamp in this codebase stays timezone-aware.
     """
     while True:
         job = session.execute(
@@ -87,6 +105,7 @@ def claim_next(session: Session, worker_id: str) -> Job | None:
         if job is None:
             return None
 
+        _check_transition(job.status, "active", job.id)
         now = _utcnow()
         result = session.execute(
             update(Job)
@@ -104,22 +123,51 @@ def claim_next(session: Session, worker_id: str) -> Job | None:
         session.rollback()
 
 
-def heartbeat(session: Session, job: Job) -> None:
-    """Bump `heartbeat_at`. Only valid while the job is `active`."""
-    if job.status != "active":
-        raise InvalidTransition(f"cannot heartbeat job {job.id} in status {job.status!r}")
-    job.heartbeat_at = _utcnow()
+def heartbeat(session: Session, job: Job, worker_id: str) -> None:
+    """Bump `heartbeat_at`. Requires `worker_id` to still hold the active
+    lease (`status='active' AND claimed_by=worker_id` in the DB); otherwise
+    the lease was reaped or stolen and `LeaseLost` is raised."""
+    now = _utcnow()
+    result = session.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status == "active", Job.claimed_by == worker_id)
+        .values(heartbeat_at=now)
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise LeaseLost(f"job {job.id} lease lost (heartbeat) for worker {worker_id!r}")
+    job.heartbeat_at = now
     session.commit()
 
 
-def release(session: Session, job: Job, new_status: str, **result_fields: object) -> Job:
+def release(
+    session: Session, job: Job, new_status: str, worker_id: str, **result_fields: object
+) -> Job:
     """Move an `active` job to a terminal status, or back to `pending` to requeue.
+
+    `new_status` is validated against `VALID_TRANSITIONS` for the job's
+    current (in-memory) status first, so a job that's terminal or was never
+    active raises `InvalidTransition` regardless of who's asking. Only once
+    that passes is the lease-fenced UPDATE attempted
+    (`status='active' AND claimed_by=worker_id`); a zero-row match there
+    means the lease was reaped or stolen out from under `worker_id`, and
+    `LeaseLost` is raised instead of silently clobbering whoever holds it
+    now.
 
     Clears lease fields (`claimed_by`, `claimed_at`, `heartbeat_at`). Any
     `result_fields` are set as attributes on `job` for forward compatibility
     with future result-carrying columns.
     """
-    _transition(job, new_status)
+    _check_transition(job.status, new_status, job.id)
+    result = session.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status == "active", Job.claimed_by == worker_id)
+        .values(status=new_status, claimed_by=None, claimed_at=None, heartbeat_at=None)
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise LeaseLost(f"job {job.id} lease lost (release) for worker {worker_id!r}")
+    job.status = new_status
     job.claimed_by = None
     job.claimed_at = None
     job.heartbeat_at = None
@@ -143,7 +191,9 @@ def reap_stale(session: Session, lease_timeout_s: float) -> int:
     )
     for job in stale_jobs:
         job.attempts += 1
-        job.status = "error" if job.attempts > MAX_ATTEMPTS else "pending"
+        target_status = "error" if job.attempts > MAX_ATTEMPTS else "pending"
+        _check_transition(job.status, target_status, job.id)
+        job.status = target_status
         job.claimed_by = None
         job.claimed_at = None
         job.heartbeat_at = None
@@ -152,14 +202,29 @@ def reap_stale(session: Session, lease_timeout_s: float) -> int:
 
 
 def park(session: Session, job: Job) -> Job:
-    """`pending` -> `hold`."""
-    _transition(job, "hold")
+    """`pending` -> `hold`. Fenced on the job still being `pending` in the
+    DB, so a concurrent claim racing a park can't be silently overwritten."""
+    _check_transition(job.status, "hold", job.id)
+    result = session.execute(
+        update(Job).where(Job.id == job.id, Job.status == "pending").values(status="hold")
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise InvalidTransition(f"job {job.id} was no longer pending when parking")
+    job.status = "hold"
     session.commit()
     return job
 
 
 def unpark(session: Session, job: Job) -> Job:
-    """`hold` -> `pending`."""
-    _transition(job, "pending")
+    """`hold` -> `pending`. Fenced on the job still being `hold` in the DB."""
+    _check_transition(job.status, "pending", job.id)
+    result = session.execute(
+        update(Job).where(Job.id == job.id, Job.status == "hold").values(status="pending")
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise InvalidTransition(f"job {job.id} was no longer on hold when unparking")
+    job.status = "pending"
     session.commit()
     return job
