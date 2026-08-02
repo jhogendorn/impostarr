@@ -182,13 +182,35 @@ def test_create_app_with_empty_sonarr_boots_without_workers(app_no_instance):
     assert response.status_code == 200
 
 
-def test_static_mount_absent_api_still_up(app_no_instance, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # no web/dist under cwd
-    with TestClient(app_no_instance) as client:
+def test_static_mount_absent_api_still_up(tmp_path, monkeypatch):
+    # _resolve_web_dist anchors to the repo root (see main.py), so this
+    # can't be forced to "absent" via chdir isolation alone — a local
+    # `npm run build` leaving web/dist on disk would make that flaky.
+    # Monkeypatch the resolver directly, before create_app() runs (the
+    # app_no_instance fixture builds too early for that), to a path that
+    # genuinely doesn't exist.
+    monkeypatch.setattr("impostarr.main._resolve_web_dist", lambda: tmp_path / "nonexistent-dist")
+    app = create_app(Settings(state_dir=tmp_path / "state"))
+
+    with TestClient(app) as client:
         response = client.get(f"{API_PREFIX}/healthz")
         root_response = client.get("/")
     assert response.status_code == 200
     assert root_response.status_code == 404
+
+
+def test_static_mount_present_serves_index(tmp_path, monkeypatch):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "index.html").write_text("<html><body>hello from web/dist</body></html>")
+    monkeypatch.setattr("impostarr.main._resolve_web_dist", lambda: dist_dir)
+    app = create_app(Settings(state_dir=tmp_path / "state"))
+
+    with TestClient(app) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    assert "hello from web/dist" in response.text
 
 
 # -- queues -----------------------------------------------------------------
