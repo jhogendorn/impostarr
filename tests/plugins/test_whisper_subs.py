@@ -252,8 +252,93 @@ async def test_match_ratio_high_for_markup_srt_vs_clean_transcript(tmp_path):
     claimed = make_claimed(season=1, episodes=[1])
     assets = AssetBundle(transcript=transcript)
 
-    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3))
+    # min_compared=3 matches the SRT's line count, so the thin-refsub
+    # discount (tested separately) doesn't confound this markup assertion.
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3, min_compared=3))
     result = await plugin.identify(claimed, assets, ctx)
 
     assert result.status == "ok"
     assert result.candidates[0].confidence > 0.9
+
+
+async def test_thin_refsub_discounts_confidence(tmp_path):
+    pool = [
+        "the crew boards the ship at dawn",
+        "the captain gives the final order",
+        "engines ignite and they depart quietly",
+        "silence fills the bridge",
+        "stars streak past the viewport",
+        "the navigator checks the coordinates",
+        "warning lights flicker on the console",
+        "the first officer reports all clear",
+        "the ship enters hyperspace smoothly",
+        "the crew breathes a collective sigh",
+    ]
+    thin_path = tmp_path / "thin.srt"
+    full_path = tmp_path / "full.srt"
+    write_srt(thin_path, pool[:2])
+    write_srt(full_path, pool)
+    transcript = make_transcript(pool)
+
+    episodes = [make_episode(1, 1)]
+    claimed = make_claimed(season=1, episodes=[1])
+    assets = AssetBundle(transcript=transcript)
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=5, min_compared=10))
+
+    thin_ctx = make_ctx(make_series(), episodes, StubRefSubs({(1, 1): thin_path}))
+    full_ctx = make_ctx(make_series(), episodes, StubRefSubs({(1, 1): full_path}))
+
+    thin_result = await plugin.identify(claimed, assets, thin_ctx)
+    full_result = await plugin.identify(claimed, assets, full_ctx)
+
+    assert thin_result.status == "ok"
+    assert full_result.status == "ok"
+    thin_candidate = thin_result.candidates[0]
+    full_candidate = full_result.candidates[0]
+
+    assert thin_candidate.confidence < full_candidate.confidence
+    assert thin_candidate.evidence["thin_refsub_discount"] < 1.0
+    assert full_candidate.evidence["thin_refsub_discount"] == 1.0
+
+
+async def test_refsub_fetches_run_concurrently_and_stay_ordered(tmp_path):
+    srt_path = tmp_path / "shared.srt"
+    write_srt(srt_path, ["shared content line"])
+    episodes = [make_episode(1, n) for n in range(15, 21)]
+    refsubs = StubRefSubs({(1, n): srt_path for n in range(15, 21)})
+    ctx = make_ctx(make_series(), episodes, refsubs)
+    claimed = make_claimed(season=1, episodes=[17])
+    assets = AssetBundle(transcript=make_transcript(["shared content line", "extra"]))
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=2))
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "ok"
+    # Deterministic: candidates sorted by confidence, ties broken by the
+    # original distance-sorted (season_episodes) order, not fetch-completion
+    # order — with identical content every episode ties, so identifying the
+    # exact set is what matters here.
+    assert {c.ident.episodes[0] for c in result.candidates} == {15, 16, 17, 18, 19, 20}
+
+
+# -- parse_srt edge cases ----------------------------------------------------
+
+
+def test_parse_srt_strips_leading_bom():
+    text = "﻿1\n00:00:01,000 --> 00:00:02,000\nHello there\n"
+    assert whisper_subs.parse_srt(text) == ["Hello there"]
+
+
+def test_parse_srt_handles_crlf_line_endings():
+    text = "1\r\n00:00:01,000 --> 00:00:02,000\r\nHello there\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nSecond line\r\n"
+    assert whisper_subs.parse_srt(text) == ["Hello there", "Second line"]
+
+
+def test_parse_srt_skips_malformed_cue_without_arrow():
+    text = "1\nnot a timestamp\nGhost line\n\n2\n00:00:03,000 --> 00:00:04,000\nReal line\n"
+    assert whisper_subs.parse_srt(text) == ["Real line"]
+
+
+def test_parse_srt_handles_missing_index_line():
+    text = "00:00:01,000 --> 00:00:02,000\nHello there\n"
+    assert whisper_subs.parse_srt(text) == ["Hello there"]

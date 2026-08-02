@@ -32,6 +32,21 @@ Two signals are blended 50/50:
     dampens a false-positive driven by one long shared phrase.
   `ratio = 0.5 * full_ratio + 0.5 * hit_rate`.
 
+Thin-reference discount: a reference SRT with very few compared lines can
+spuriously score high (e.g. a 2-line SRT that happens to match well isn't
+strong evidence). `WhisperSubsConfig.min_compared` (default 10) sets the
+line count below which confidence is discounted proportionally:
+`discount = min(1.0, compared_lines / min_compared)`,
+`confidence = ratio * discount`. The discount factor is recorded in
+evidence as `thin_refsub_discount`.
+
+Reference subtitle fetches for the candidate window are issued concurrently
+via `asyncio.gather` — `RefSubService` is designed for concurrent use (its
+quota reservation guards concurrent `get()` calls with an internal lock).
+Results are zipped back against the window list in its original,
+distance-sorted order, so candidate ordering stays deterministic regardless
+of fetch completion order.
+
 Plugin config wiring: the loader (`plugins/loader.py`) validates
 `Settings.plugins.identifiers["whisper-subs"].options` into `WhisperSubsConfig`
 and passes it to the constructor as `config`, per the `IdentifierPlugin` base
@@ -43,12 +58,13 @@ in tests), rather than leaving it `None`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
 from .base import (
@@ -72,7 +88,8 @@ _WS_RE = re.compile(r"\s+")
 
 
 class WhisperSubsConfig(BaseModel):
-    min_lines: int = 20
+    min_lines: int = Field(default=20, ge=1)
+    min_compared: int = Field(default=10, ge=1)
 
 
 def _normalize(text: str) -> str:
@@ -89,7 +106,11 @@ def _normalize(text: str) -> str:
 def parse_srt(text: str) -> list[str]:
     """Parse SRT text into cue line texts (index/timestamp lines discarded;
     multi-line cues joined with a space). A minimal regex/state-machine
-    parser — no subtitle-parsing dependency."""
+    parser — no subtitle-parsing dependency. Tolerates a leading UTF-8 BOM,
+    CRLF line endings, a missing/malformed index line (only the `-->` line
+    is required to locate a cue), and skips blocks with no timestamp line
+    at all (malformed cues) rather than raising."""
+    text = text.lstrip("\ufeff")
     lines: list[str] = []
     for block in re.split(r"\n\s*\n", text.strip()):
         block_lines = block.splitlines()
@@ -164,19 +185,30 @@ class WhisperSubsPlugin(IdentifierPlugin):
         candidates: list[Candidate] = []
         claimed_covered = False
         try:
-            for ep in season_episodes:
-                ep_num = ep["episode_number"]
-                srt_path = await ctx.refsubs.get(ext_ids, claimed.season, ep_num)
+            # Fetched concurrently — RefSubService's quota reservation is
+            # lock-guarded for exactly this. gather() preserves per-input
+            # result order, so zipping back against season_episodes (already
+            # distance-sorted) keeps candidate ordering deterministic.
+            srt_paths = await asyncio.gather(
+                *(
+                    ctx.refsubs.get(ext_ids, claimed.season, ep["episode_number"])
+                    for ep in season_episodes
+                )
+            )
+            for ep, srt_path in zip(season_episodes, srt_paths, strict=True):
                 if srt_path is None:
                     continue
+                ep_num = ep["episode_number"]
                 srt_text = Path(srt_path).read_text(encoding="utf-8", errors="replace")
                 srt_lines = parse_srt(srt_text)
                 ratio, compared = _match_ratio(segments, srt_lines)
+                discount = min(1.0, compared / self.config.min_compared)
+                discounted_ratio = ratio * discount
                 if ep_num in claimed.episodes:
                     claimed_covered = True
                 candidates.append(
                     Candidate(
-                        confidence=ratio,
+                        confidence=discounted_ratio,
                         ident=CandidateIdent(
                             series="claimed", season=claimed.season, episodes=[ep_num]
                         ),
@@ -185,6 +217,7 @@ class WhisperSubsPlugin(IdentifierPlugin):
                             "match_ratio": ratio,
                             "compared_lines": compared,
                             "refsub_path": str(srt_path),
+                            "thin_refsub_discount": discount,
                         },
                     )
                 )
