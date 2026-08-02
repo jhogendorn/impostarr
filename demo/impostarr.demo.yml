@@ -23,6 +23,10 @@ thresholds:
   auto: 0.4
   alt: 0.8
   alt_margin: 0.2
+  # 1, not the Thresholds default of 2: not every file in this demo's
+  # library has both plugins applicable (S01E02 has neither — see the
+  # inconclusive scenario), so a lower bar keeps auto-remediation reachable
+  # without depending on every file having full plugin coverage.
   auto_min_evidence: 1
   phash_store: 0.9
 
@@ -32,7 +36,12 @@ plugins:
       enabled: true
       weight: 1.0
     subs-llm:
-      enabled: false
+      enabled: true
+      weight: 1.0
+      options:
+        base_url: http://stub-services:8000/v1
+        model: stub
+        api_key: ""
 
 refsubs:
   manual_dir: /config/refsubs_manual
@@ -41,13 +50,22 @@ workers:
   pool_size: 2
   transcriber: remote
   transcriber_options:
-    base_url: http://stub-transcriber:8000/v1
+    base_url: http://stub-services:8000/v1
     model: stub
 
 # Strongly recommended for first runs against a real library, and how this
 # demo proves the remediation path is safe to exercise: every action logs
 # "DRY-RUN: would ..." instead of mutating Sonarr or the library.
 dry_run: true
+
+# Demo-only retention (minutes' worth of days would be silly to wait on) —
+# small enough for e2e.sh to observe the trash tab's countdown without
+# actually exercising the sweep (dry_run above means no replace ever
+# copies a file into /trash in the first place).
+trash:
+  enabled: true
+  dir: /trash
+  retention_days: 1
 
 state_dir: /config
 assets_dir: /assets

@@ -3,25 +3,50 @@
 everything produced locally by ffmpeg.
 
 Six "content sets" (1..6) are invented, each with its own duration and its
-own ~24 lines of made-up dialogue. `stub_transcriber.py` fingerprints a
-transcription request purely by the (offset-adjusted) audio slice duration
-it receives, so each content set's duration must be distinct: `duration =
-60 + 6*c` seconds. `impostarr.assets.extract.extract_audio` slices from
-offset 60s (for any file longer than that) up to 900s, so the slice length
-the stub transcriber actually sees is `duration - 60 = 6*c` seconds — the
-manifest below is keyed on that slice length, not the file's own duration.
+own ~24 lines of made-up dialogue (one of which is a deterministic "Log
+entry episode <N>" marker — see `dialogue_lines()` — parsed by
+`demo/stub_services.py`'s stub LLM to answer "which episode is this
+really", the same way `_match_ratio` answers it for whisper-subs).
+`stub_services.py`'s transcription endpoint fingerprints a transcription
+request purely by the (offset-adjusted) audio slice duration it receives,
+so each content set's duration must be distinct: `duration = 60 + 6*c`
+seconds. `impostarr.assets.extract.extract_audio` slices from offset 60s
+(for any file longer than that) up to 900s, so the slice length the stub
+transcriber actually sees is `duration - 60 = 6*c` seconds — the manifest
+below is keyed on that slice length, not the file's own duration.
 
-Only four content sets (1, 2, 3, 5) are ever written into an actual episode
-file — see ASSIGNMENTS. Content 4 and 6 exist only as reference subtitles
-(content 4 is what a *correctly* labelled S01E04 would contain — never
-generated as a file, so its slot is free for content 5's real home;
-content 6 has no file at all, included purely for realism per the demo
-spec). File slot 4 is deliberately mislabeled: it holds content 5's audio/
-subs, which is how the demo's one "impostor" file is manufactured.
+Five files are written into the library (ASSIGNMENTS), exercising a full
+scenario matrix across both identifier plugins — whisper-subs (transcribed
+audio vs. reference subs) and subs-llm (embedded subs vs. an LLM):
+
+  S01E01 <- content 1, honest             -> matched (both plugins agree)
+  S01E02 <- content 2, no embedded subs   -> inconclusive (subs-llm: no
+            (audio kept — Sonarr's own       embedded subs; whisper-subs:
+             HasAudioTrackSpecification       its audio is real but
+             permanently rejects import       deliberately excluded from
+             of an audio-less file — see      the manifest below, so the
+             NO_SUBS_SLOT)                    stub transcriber returns zero
+                                              segments — neither plugin has
+                                              any evidence to work with)
+  S01E03 <- content 6, mislabeled         -> remediated (dry-run remap to
+            (S01E06 left empty on disk)      S01E06 — no competing file)
+  S01E04 <- content 5, mislabeled         -> quarantine (auto-remap proposes
+            (S01E05 also honestly           S01E05 but refuses: target
+             holds content 5)                already occupied); also
+                                              triggers dupe_info (near-
+                                              identical to S01E05)
+  S01E05 <- content 5, honest             -> matched (the competitor E04's
+                                              remap can't take)
+
+Content 3 and 4 exist only as reference subtitles, never embedded into a
+file: content 4 is what a *correctly* labelled S01E04 would have contained
+(its slot is occupied by S01E05 instead); content 3's honest home (S01E03)
+is where the S01E03 mislabel lives instead.
 
 Outputs (relative to this file's directory):
-  volumes/media/tv/<title>/Season 01/<Dotted.Title>.S01E0N.720p.mkv (4 files)
-  volumes/manifest/manifest.json          (stub_transcriber's lookup table)
+  volumes/media/tv/<title>/Season 01/<Dotted.Title>.S01E0N.720p.mkv (5 files)
+  volumes/manifest/manifest.json          (stub_services' transcription
+                                            lookup table)
   volumes/staging/refsubs/S01E0{1..6}.srt (seed.sh places these under
                                             Impostarr's refsubs manual_dir
                                             once the TVDB id is known)
@@ -127,8 +152,24 @@ CONTENT_TEMPLATES: dict[int, list[str]] = {
 }
 
 # file slot (season-1 episode number as Sonarr will see it) -> content index.
-# Slot 4 is the mislabel: it's really content 5's dialogue/duration.
-ASSIGNMENTS = {1: 1, 2: 2, 3: 3, 4: 5}
+# Slot 3 and slot 4 are the mislabels: slot 3 really holds content 6's
+# dialogue/duration (its honest home, S01E06, is left empty on disk so the
+# remap has a free slot to land in); slot 4 really holds content 5's — but
+# so does slot 5 (content 5's honest home), creating an occupied-target
+# remap competition. Slot 2 has no embedded subs (see NO_SUBS_SLOT) — the
+# inconclusive case.
+ASSIGNMENTS = {1: 1, 2: 2, 3: 6, 4: 5, 5: 5}
+
+# File slot with no embedded subtitle stream muxed in (see
+# `build_episode_file`'s `include_subs`) — the inconclusive case. Its
+# audio track is kept real (Sonarr's own `HasAudioTrackSpecification`
+# permanently rejects import of any file with no audio track at all — a
+# genuinely video-only mkv can never reach Impostarr in the first place),
+# but its content index is deliberately excluded from the manifest below,
+# so the stub transcriber returns zero segments for it: whisper-subs
+# abstains ("transcript too short") the same as if there were no audio,
+# and subs-llm abstains ("no embedded subtitles") for real.
+NO_SUBS_SLOT = 2
 
 
 def content_duration(content_idx: int) -> int:
@@ -138,8 +179,16 @@ def content_duration(content_idx: int) -> int:
 def dialogue_lines(content_idx: int) -> list[str]:
     name, loc = CONTENT_INFO[content_idx]
     templates = CONTENT_TEMPLATES[content_idx]
-    lines = []
-    for i in range(1, LINES_PER_EPISODE + 1):
+    # Deterministically parseable episode marker for the subs-llm stub
+    # (demo/stub_services.py: `_EPISODE_CUE_RE`) — every content set states
+    # its own canonical episode number this way, so the stub can answer
+    # "which episode is this really" straight from the transcribed/embedded
+    # dialogue text, the same way whisper-subs' fuzzy match does via
+    # content-distinct vocabulary. Counts toward LINES_PER_EPISODE (total
+    # line count unchanged), so whisper-subs' min_lines threshold is
+    # unaffected.
+    lines = [f"Log entry episode {content_idx}: {name} status update from {loc}."]
+    for i in range(1, LINES_PER_EPISODE):
         template = templates[(i - 1) % len(templates)]
         lines.append(template.format(name=name, loc=loc, i=i))
     return lines
@@ -164,49 +213,50 @@ def write_srt(lines: list[str], duration_s: float, out_path: Path) -> None:
     out_path.write_text("\n".join(blocks), encoding="utf-8")
 
 
-def build_episode_file(content_idx: int, out_path: Path) -> None:
+def build_episode_file(
+    content_idx: int, out_path: Path, *, include_audio: bool = True, include_subs: bool = True
+) -> None:
+    """`include_audio=False` produces a video-only mkv — unused by any
+    slot in practice (Sonarr's `HasAudioTrackSpecification` permanently
+    rejects importing one), kept only because it's the natural symmetric
+    counterpart to `include_subs=False`, which `NO_SUBS_SLOT` does use to
+    produce a file with no muxed subtitle stream."""
     duration = content_duration(content_idx)
-    srt_path = out_path.with_suffix(".embedded.srt")
-    write_srt(dialogue_lines(content_idx), duration, srt_path)
+    srt_path = out_path.with_suffix(".embedded.srt") if include_subs else None
+    if srt_path is not None:
+        write_srt(dialogue_lines(content_idx), duration, srt_path)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"testsrc2=size={VIDEO_SIZE}:rate={VIDEO_RATE}:duration={duration}",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency={AUDIO_HZ}:duration={duration}",
-            "-i",
-            str(srt_path),
-            "-map",
-            "0:v",
-            "-map",
-            "1:a",
-            "-map",
-            "2:s",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-c:s",
-            "srt",
-            "-t",
-            str(duration),
-            "-shortest",
-            str(out_path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    srt_path.unlink()
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc2=size={VIDEO_SIZE}:rate={VIDEO_RATE}:duration={duration}",
+    ]
+    if include_audio:
+        cmd += ["-f", "lavfi", "-i", f"sine=frequency={AUDIO_HZ}:duration={duration}"]
+    if srt_path is not None:
+        cmd += ["-i", str(srt_path)]
+
+    cmd += ["-map", "0:v"]
+    if include_audio:
+        cmd += ["-map", "1:a"]
+    if srt_path is not None:
+        sub_input = 2 if include_audio else 1
+        cmd += ["-map", f"{sub_input}:s"]
+
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    if include_audio:
+        cmd += ["-c:a", "aac"]
+    if srt_path is not None:
+        cmd += ["-c:s", "srt"]
+    cmd += ["-t", str(duration), "-shortest", str(out_path)]
+
+    subprocess.run(cmd, check=True, capture_output=True)
+    if srt_path is not None:
+        srt_path.unlink()
 
 
 def main() -> None:
@@ -217,11 +267,18 @@ def main() -> None:
     dotted_title = args.title.replace(" ", ".")
     series_dir = MEDIA_ROOT / args.title / "Season 01"
 
+    # NO_SUBS_SLOT's content is deliberately excluded from the manifest —
+    # its audio is real (so Sonarr will import the file) but the stub
+    # transcriber must never recognize its duration, so whisper-subs sees
+    # zero transcript segments (see NO_SUBS_SLOT's comment above).
+    no_subs_content = ASSIGNMENTS[NO_SUBS_SLOT]
+
     manifest: dict[str, list[str]] = {}
     for content_idx in range(1, 7):
         lines = dialogue_lines(content_idx)
         slice_duration = content_duration(content_idx) - 60
-        manifest[str(slice_duration)] = lines
+        if content_idx != no_subs_content:
+            manifest[str(slice_duration)] = lines
         write_srt(
             lines,
             content_duration(content_idx),
@@ -234,9 +291,11 @@ def main() -> None:
 
     for file_ep, content_idx in ASSIGNMENTS.items():
         out_path = series_dir / f"{dotted_title}.S01E{file_ep:02d}.720p.mkv"
-        build_episode_file(content_idx, out_path)
+        has_subs = file_ep != NO_SUBS_SLOT
+        build_episode_file(content_idx, out_path, include_audio=True, include_subs=has_subs)
         mislabel = f" (MISLABELED: really content {content_idx})" if content_idx != file_ep else ""
-        print(f"built S01E{file_ep:02d} <- content {content_idx}{mislabel}: {out_path}")
+        stripped = " (no embedded subs, unmatched audio)" if not has_subs else ""
+        print(f"built S01E{file_ep:02d} <- content {content_idx}{mislabel}{stripped}: {out_path}")
 
 
 if __name__ == "__main__":

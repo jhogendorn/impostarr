@@ -1,9 +1,16 @@
 /** Shared fixtures for component tests. Not itself a test file. */
-import type { JobDetail, LogRecord, QueuePage, StatusResponse } from '../api/types'
+import type { ActiveJob, JobDetail, LogRecord, QueuePage, StatusResponse, TrashItem, TrashPage } from '../api/types'
 
 export const statusFixture: StatusResponse = {
   instances: [
-    { name: 'main', url: 'http://sonarr.local', history_watermark: '2026-08-01T00:00:00Z', backfill_cursor: null },
+    {
+      name: 'main',
+      url: 'http://sonarr.local',
+      history_watermark: '2026-08-01T00:00:00Z',
+      backfill_cursor: null,
+      last_polled_at: '2026-08-02T23:55:00Z',
+      last_backfilled_at: '2026-08-01T12:00:00Z',
+    },
   ],
   queues: {
     hold: 1,
@@ -15,11 +22,42 @@ export const statusFixture: StatusResponse = {
     error: 7,
     remediated: 8,
   },
+  summary: { unprocessed: 6, processed: 30 },
+  system: { cpu_percent: 42.5, mem_percent: 61.2 },
+  approval_required: false,
+  active_jobs: [],
   workers: { pool_size: 2 },
   dry_run: false,
+  trash_count: 2,
 }
 
 export const dryRunStatusFixture: StatusResponse = { ...statusFixture, dry_run: true }
+
+export const activeJobsFixture: ActiveJob[] = [
+  {
+    job_id: 101,
+    instance: 'main',
+    series_id: 10,
+    sonarr_path: '/media/Show/Season 01/Show.S01E01.mkv',
+    claimed_by: 'worker-1',
+    claimed_at: '2026-08-02T23:59:00Z',
+    elapsed_s: 45,
+  },
+  {
+    job_id: 102,
+    instance: 'main',
+    series_id: 11,
+    sonarr_path: '/media/Show2/Season 02/Show2.S02E02.mkv',
+    claimed_by: 'worker-2',
+    claimed_at: '2026-08-02T23:58:00Z',
+    elapsed_s: 105,
+  },
+]
+
+export const statusWithActiveJobsFixture: StatusResponse = {
+  ...statusFixture,
+  active_jobs: activeJobsFixture,
+}
 
 export const logRecordsFixture: LogRecord[] = [
   { ts: '2026-08-02T00:00:00Z', level: 'INFO', logger: 'impostarr.worker', message: 'claimed job 42' },
@@ -34,10 +72,12 @@ export const logRecordsFixture: LogRecord[] = [
 
 export const queuePageFixture: QueuePage = {
   total: 4,
+  page_size: 50,
   items: [
     {
       job_id: 1,
       status: 'quarantine',
+      instance: 'main',
       file: { series_id: 10, sonarr_path: '/media/Show/Season 01/Show.S01E01.mkv', episode_ids: [100] },
       verdict: { s_claimed: 0.92, s_alt: 0.05, outcome: 'quarantine' },
       created_at: '2026-08-01T00:00:00Z',
@@ -46,6 +86,7 @@ export const queuePageFixture: QueuePage = {
     {
       job_id: 2,
       status: 'quarantine',
+      instance: 'main',
       file: { series_id: 11, sonarr_path: '/media/Show2/Season 02/Show2.S02E02.mkv', episode_ids: [200, 201] },
       verdict: { s_claimed: 0.5, s_alt: 0.3, outcome: 'quarantine' },
       created_at: '2026-08-01T00:00:00Z',
@@ -54,6 +95,7 @@ export const queuePageFixture: QueuePage = {
     {
       job_id: 3,
       status: 'quarantine',
+      instance: 'backup',
       file: { series_id: 12, sonarr_path: '/media/Show3/Season 03/Show3.S03E03.mkv', episode_ids: [300] },
       verdict: { s_claimed: 0.1, s_alt: 0.05, outcome: 'quarantine' },
       created_at: '2026-08-01T00:00:00Z',
@@ -62,6 +104,7 @@ export const queuePageFixture: QueuePage = {
     {
       job_id: 4,
       status: 'quarantine',
+      instance: 'main',
       file: { series_id: 13, sonarr_path: '/media/Show4/Season 04/Show4.S04E04.mkv', episode_ids: [400] },
       verdict: null,
       created_at: '2026-08-01T00:00:00Z',
@@ -72,6 +115,8 @@ export const queuePageFixture: QueuePage = {
 
 export const jobDetailFixture: JobDetail = {
   job: { id: 42, status: 'quarantine', attempts: 1, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-02T00:00:00Z' },
+  instance: 'main',
+  external_ids: { title: 'Test Show', tvdb_id: 81189, imdb_id: 'tt0903747', tmdb_id: 1396 },
   file: {
     series_id: 10,
     episode_ids: [100],
@@ -123,6 +168,7 @@ export const jobDetailFixture: JobDetail = {
     ],
     source: 'auto',
     human_ident: null,
+    dupe_info: null,
   },
   assets: [
     {
@@ -139,8 +185,22 @@ export const jobDetailFixture: JobDetail = {
         language: 'en',
       },
     },
-    { id: 2, type: 'frames', path: '/assets/frame1.jpg', has_path: true, tool_meta: null, payload: null },
-    { id: 3, type: 'frames', path: '/assets/frame2.jpg', has_path: true, tool_meta: null, payload: null },
+    {
+      id: 2,
+      type: 'frames',
+      path: '/assets/frame1.jpg',
+      has_path: true,
+      tool_meta: { timestamp_s: 65 },
+      payload: null,
+    },
+    {
+      id: 3,
+      type: 'frames',
+      path: '/assets/frame2.jpg',
+      has_path: true,
+      tool_meta: { timestamp_s: 130 },
+      payload: null,
+    },
     {
       id: 4,
       type: 'probe',
@@ -169,5 +229,64 @@ export const jobDetailHumanIdentFixture: JobDetail = {
     remediation_log: null,
     source: 'human',
     human_ident: { season: 2, episodes: [3, 4] },
+    dupe_info: null,
   },
+}
+
+/** matched job with no remediation/proposal, for plain-language outcome mapping tests. */
+export const jobDetailMatchedFixture: JobDetail = {
+  ...jobDetailFixture,
+  job: { ...jobDetailFixture.job, status: 'matched' },
+  verdict: {
+    s_claimed: 0.97,
+    s_alt: 0.02,
+    outcome: 'matched',
+    proposed_action: null,
+    remediation_log: null,
+    source: 'auto',
+    human_ident: null,
+    dupe_info: null,
+  },
+}
+
+/** job with a dupe_info hit on its verdict. */
+export const jobDetailDupeFixture: JobDetail = {
+  ...jobDetailFixture,
+  verdict: {
+    ...jobDetailFixture.verdict!,
+    dupe_info: { duplicate_of_file_id: 999, similarity: 0.93, sonarr_path: '/media/Other/Season 01/Other.S01E01.mkv' },
+  },
+}
+
+export const trashItemsFixture: TrashItem[] = [
+  {
+    id: 1,
+    instance: 'main',
+    original_path: '/media/Show/Season 01/Show.S01E01.mkv',
+    trash_path: '/trash/main/Show.S01E01.mkv-1',
+    series_id: 10,
+    episode_ids: [100],
+    size: 123456,
+    trashed_at: '2026-08-01T00:00:00Z',
+    expires_at: '2026-08-15T00:00:00Z',
+    expires_in_s: 1209600,
+  },
+  {
+    id: 2,
+    instance: 'main',
+    original_path: '/media/Show2/Season 02/Show2.S02E02.mkv',
+    trash_path: '/trash/main/Show2.S02E02.mkv-2',
+    series_id: 11,
+    episode_ids: [200, 201],
+    size: 654321,
+    trashed_at: '2026-07-01T00:00:00Z',
+    expires_at: '2026-08-02T23:00:00Z',
+    expires_in_s: -3600,
+  },
+]
+
+export const trashPageFixture: TrashPage = {
+  total: 2,
+  page_size: 50,
+  items: trashItemsFixture,
 }

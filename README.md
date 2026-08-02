@@ -55,7 +55,7 @@ list/object-valued keys) — env always wins over the file.
 `dry_run: true` (top-level in `impostarr.yml`) is strongly recommended for
 first runs against a real library: no files are touched, no Sonarr state
 is changed. Every action that would otherwise mutate something is instead
-logged as `DRY-RUN: would ...` — visible live in the [log viewer](#log-viewer)
+logged as `DRY-RUN: would ...` — visible live via `GET /api/v1/logs`
 (lines highlighted amber) and, for remediation, in the job's
 `remediation_log` audit trail.
 
@@ -69,13 +69,6 @@ end-to-end; the audit trail marks what would have happened instead of
 actually happening. When active, the UI shows an amber "DRY RUN" badge in
 the header.
 
-## Log viewer
-
-The "Logs" button in the header opens a bottom drawer with a live tail of
-the last 1000 log records (`GET /api/v1/logs`), filterable by level
-(INFO/WARNING/ERROR), polling every 3 seconds while open. DRY-RUN lines are
-highlighted amber.
-
 ## Volumes
 
 | Volume    | Contents                                                        | Notes |
@@ -84,6 +77,7 @@ highlighted amber.
 | `/assets` | Extracted artifact blobs: transcripts, framegrabs, refsub cache | Backup-relevant; can grow large — mountable separately (e.g. longhorn/NFS). |
 | `/models` | Whisper/LLM model caches                                        | Multi-GB; disposable — mountable separately, no backup needed. |
 | `/media`  | Library mount                                                    | Read-only unless remap staging (hardlink + manual import) is used. |
+| `/trash`  | Files trashed by the replace action (see `trash` config)         | Backup-optional (a retention buffer, not primary storage). Must be on the SAME filesystem as `/media` for cheap hardlinks — otherwise Impostarr falls back to a full copy. |
 
 ## Database
 
@@ -163,7 +157,7 @@ endpoint and asks it which episode the cues belong to.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `base_url` | `https://api.openai.com/v1` | OpenAI-compatible endpoint; point this at a local [Ollama](https://ollama.com/) instance to run without a paid API. |
+| `base_url` | `https://api.openai.com/v1` | OpenAI-compatible endpoint — any OpenAI-compatible server works (e.g. [Ollama](https://ollama.com/), LocalAI, llama.cpp server, vLLM); point this at one to run without a paid API. |
 | `model` | `gpt-4o-mini` | Model name passed to the endpoint. |
 | `api_key` | `""` | Bearer token; leave empty for endpoints that don't require one (e.g. local Ollama). |
 | `max_cues` | 80 | Max subtitle cues sent per request. |
@@ -223,17 +217,33 @@ involved, everything is generated locally by ffmpeg:
 bash demo/e2e.sh
 ```
 
-What it builds: Sonarr + Impostarr (`dry_run: true`) + a stub
-OpenAI-compatible transcription server, via `demo/compose.yml`. It
-generates a synthetic 4-episode library (`demo/generate_media.py`, testsrc2
-video + sine audio + embedded/reference subtitles — a TVDB-real series,
-"Pioneer One" by default, falling back to another well-known title if
-SkyHook lookup fails), seeds it into Sonarr (`demo/seed.sh`), then triggers
-an Impostarr backfill and polls until every file is verified. One file
-(`S01E04`) is deliberately mislabeled — it's really episode 5's content —
-so the run asserts 3 files come back `matched` and 1 comes back
-`remediated` with a `DRY-RUN`-prefixed remediation log proposing the
-correct remap to `S01E05`.
+What it builds: Sonarr + Impostarr (`dry_run: true`, both bundled
+identifier plugins enabled) + a stub OpenAI-compatible transcription/chat-
+completions server (`demo/stub_services.py`), via `demo/compose.yml`. It
+generates a synthetic library (`demo/generate_media.py`, testsrc2 video +
+sine audio + embedded/reference subtitles — a TVDB-real series, "Pioneer
+One" by default, falling back to another well-known title if SkyHook
+lookup fails), seeds it into Sonarr (`demo/seed.sh`), then triggers an
+Impostarr backfill and polls until every file is verified.
+
+Five files are placed across a 6-episode season, exercising both plugins
+(`whisper-subs` against transcribed audio, `subs-llm` against embedded
+subs) through the full outcome matrix:
+
+| File | Contains | Outcome | Demonstrates |
+| --- | --- | --- | --- |
+| `S01E01` | content 1 (honest) | `matched` | both plugins agree on a correctly-labelled file |
+| `S01E02` | content 2, no embedded subs, audio the stub transcriber won't recognize | `inconclusive` | neither plugin has any evidence — zero applicable results |
+| `S01E03` | content 6 (mislabeled; `S01E06` left empty on disk) | `remediated` | dry-run auto-remap to the correct, unoccupied slot |
+| `S01E04` | content 5 (mislabeled; `S01E05` also honestly holds content 5) | `quarantine` | auto-remap proposes `S01E05` but refuses — the target is already occupied by a competing honest file; also produces `dupe_info` (near-identical phash) against `S01E05` |
+| `S01E05` | content 5 (honest) | `matched` | the competitor `S01E04`'s remap can't displace |
+
+The `S01E04`/`S01E03` cases assert a `DRY-RUN`-prefixed remediation log:
+the `S01E03` job's `manual_import` step names `S01E06`, and the `S01E04`
+job's `occupied_check` step names `S01E05` and leaves a `proposed_action`
+(`remap` → `S01E05`) on the verdict even though it was refused. The
+`S01E01` job additionally asserts both `whisper-subs` and `subs-llm`
+produced an `ok` `plugin_results` entry, proving `subs-llm` actually ran.
 
 The stack is left running afterwards for interactive inspection at
 `http://localhost:8484` — open the queue, click into the remediated job,

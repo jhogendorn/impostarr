@@ -1,12 +1,16 @@
 import type {
   ApproveResponse,
   BackfillResponse,
+  DeleteTrashResponse,
+  GetQueueOptions,
   JobDetail,
   JobStatus,
   LogsResponse,
   QueuePage,
+  RestoreTrashResponse,
   StatusResponse,
   TransitionResponse,
+  TrashPage,
   VerdictRequest,
   VerdictResponse,
 } from './types'
@@ -48,8 +52,12 @@ export function getStatus(): Promise<StatusResponse> {
   return api<StatusResponse>('/status')
 }
 
-export function getQueue(status: JobStatus, page = 1, pageSize = 50): Promise<QueuePage> {
+export function getQueue(status: JobStatus, opts: GetQueueOptions = {}): Promise<QueuePage> {
+  const { page = 1, pageSize = 50, instance, sort, dir } = opts
   const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  if (instance) params.set('instance', instance)
+  if (sort) params.set('sort', sort)
+  if (dir) params.set('dir', dir)
   return api<QueuePage>(`/queues/${status}?${params}`)
 }
 
@@ -101,4 +109,17 @@ export function getLogs(level?: string, limit = 200): Promise<LogsResponse> {
   const params = new URLSearchParams({ limit: String(limit) })
   if (level) params.set('level', level)
   return api<LogsResponse>(`/logs?${params}`)
+}
+
+export function getTrash(page = 1, pageSize = 50): Promise<TrashPage> {
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  return api<TrashPage>(`/trash?${params}`)
+}
+
+export function deleteTrashItem(id: number): Promise<DeleteTrashResponse> {
+  return api<DeleteTrashResponse>(`/trash/${id}`, { method: 'DELETE' })
+}
+
+export function restoreTrashItem(id: number): Promise<RestoreTrashResponse> {
+  return api<RestoreTrashResponse>(`/trash/${id}/restore`, { method: 'POST' })
 }

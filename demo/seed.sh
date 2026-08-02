@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Seeds the demo: waits for Sonarr, decides the series (with a SkyHook-down
 # fallback), generates the synthetic library for that series, adds it to
-# Sonarr, waits for the 4 on-disk files to be imported, places reference
+# Sonarr, waits for the 5 on-disk files to be imported, places reference
 # subtitles, and renders volumes/config/impostarr.yml with Sonarr's API key.
 #
 # Expects Sonarr already up (docker compose up -d sonarr) on SONARR_URL.
@@ -103,7 +103,7 @@ if [ -z "$SERIES_ID" ]; then
 fi
 log "series id=$SERIES_ID"
 
-# -- wait for the 4 files to be imported --------------------------------------
+# -- wait for the 5 files to be imported --------------------------------------
 #
 # Adding a series whose path already has matching files triggers Sonarr's
 # own automatic disk scan as part of the add — no explicit RescanSeries
@@ -123,7 +123,7 @@ trigger_rescan() {
     -d "{\"name\": \"RescanSeries\", \"seriesId\": $SERIES_ID}" "$SONARR_URL/api/v3/command" >/dev/null
 }
 
-log "waiting for 4 episode files to be imported and settle"
+log "waiting for 5 episode files to be imported and settle"
 stable_polls=0
 prev_signature=""
 manual_rescan_done=0
@@ -131,7 +131,7 @@ for i in $(seq 1 90); do
   episodes_json="$(curl_sonarr "$SONARR_URL/api/v3/episode?seriesId=$SERIES_ID")"
   signature="$(echo "$episodes_json" | jq -c '[.[] | select(.hasFile == true) | .episodeFileId] | sort')"
   count="$(echo "$signature" | jq 'length')"
-  if [ "$count" -ge 4 ] && [ "$signature" = "$prev_signature" ]; then
+  if [ "$count" -ge 5 ] && [ "$signature" = "$prev_signature" ]; then
     stable_polls=$((stable_polls + 1))
   else
     stable_polls=0
@@ -146,10 +146,10 @@ for i in $(seq 1 90); do
   sleep 2
 done
 if [ "$stable_polls" -lt 2 ]; then
-  log "FAIL: episode files never settled at 4 imported (last signature: $prev_signature)"
+  log "FAIL: episode files never settled at 5 imported (last signature: $prev_signature)"
   exit 1
 fi
-log "4 episode files imported and stable"
+log "5 episode files imported and stable"
 
 # Belt-and-suspenders: delete any /episodefile row for this series no
 # longer referenced by any episode (see comment above).

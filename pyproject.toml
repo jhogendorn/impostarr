@@ -16,6 +16,7 @@ dependencies = [
     "imagehash>=4.3",
     "pillow>=10",
     "rapidfuzz==3.14.5",
+    "psutil>=7.2.2",
 ]
 
 [project.optional-dependencies]

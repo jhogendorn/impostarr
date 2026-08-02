@@ -17,10 +17,19 @@ from impostarr.assets.transcribe import (
     Transcriber,
     TranscriptResult,
 )
-from impostarr.config import Settings, SonarrInstance, Thresholds
+from impostarr.config import Settings, SonarrInstance, Thresholds, TrashConfig
 from impostarr.db import init_db, make_session_factory
 from impostarr.jobs import LeaseLost, claim_next, reap_stale, release
-from impostarr.models import Asset, File, Instance, Job, PhashCorpusEntry, Verdict
+from impostarr.models import (
+    Asset,
+    File,
+    FrameHash,
+    Instance,
+    Job,
+    PhashCorpusEntry,
+    TrashItem,
+    Verdict,
+)
 from impostarr.models import PluginResult as PluginResultRow
 from impostarr.pipeline import PipelineDeps, process_job
 from impostarr.plugins.base import (
@@ -71,12 +80,19 @@ def make_deps(
     instance_cfg: SonarrInstance | None = None,
     thresholds: Thresholds | None = None,
     transcriber: Transcriber | None = None,
+    approval_required: bool = False,
 ) -> PipelineDeps:
     cfg = instance_cfg or make_instance_cfg(tmp_path)
     settings = Settings(
         state_dir=tmp_path / "state",
         assets_dir=tmp_path / "assets",
         thresholds=thresholds or Thresholds(),
+        approval_required=approval_required,
+        # Settings.trash defaults to /trash (real, unwritable in tests) —
+        # every pipeline test that reaches Remediator.replace needs a
+        # trash dir it can actually write to, same as state_dir/assets_dir
+        # above.
+        trash=TrashConfig(dir=tmp_path / "trash"),
     )
     client = SonarrClient(BASE_URL, API_KEY, backoff=(0, 0, 0))
     return PipelineDeps(
@@ -477,6 +493,39 @@ async def test_auto_replace_invokes_remediator(tmp_path, session_factory):
 
 
 @respx.mock
+async def test_approval_required_demotes_otherwise_auto_replace_to_quarantine(tmp_path, session_factory):
+    # Same fixture as test_auto_replace_invokes_remediator (auto_replace=True,
+    # two low-confidence plugins clearing auto_min_evidence), minus
+    # approval_required. With approval_required=True the pipeline must never
+    # invoke the remediator: outcome demotes to quarantine with the proposed
+    # replace action queued for human approval instead.
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path, history_id=None)
+
+    delete_route = respx.delete(f"{API_URL}/episodefile/9001")
+    command_route = respx.post(f"{API_URL}/command")
+
+    plugins = [
+        loaded(ConfigurablePlugin("fake-a", claimed_only(0.05))),
+        loaded(ConfigurablePlugin("fake-b", claimed_only(0.05))),
+    ]
+    cfg = make_instance_cfg(tmp_path, auto_replace=True, auto_remap=False)
+    deps = make_deps(session_factory, tmp_path, plugins, instance_cfg=cfg, approval_required=True)
+
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    assert not delete_route.called
+    assert not command_route.called
+    job = get_job(session_factory, job_id)
+    assert job.status == "quarantine"
+    verdict = get_verdicts(session_factory, job_id)[0]
+    assert verdict.outcome == "quarantine"
+    assert verdict.proposed_action is not None
+    assert verdict.proposed_action["kind"] == "replace"
+
+
+@respx.mock
 async def test_proposed_remap_when_auto_remap_disabled(tmp_path, session_factory):
     mock_series_and_episodes(
         42,
@@ -592,6 +641,74 @@ async def test_phash_corpus_not_written_below_threshold(tmp_path, session_factor
     assert entries == []
 
 
+# -- dupe check -------------------------------------------------------------
+
+
+@respx.mock
+async def test_dupe_info_persisted_on_verdict_when_similar_frame_hash_exists(tmp_path, session_factory):
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+
+    # The fake frame extractor (install_fake_extractors) always produces the
+    # same deterministic hashes ("0000000000000000".."000000000000000f"), so
+    # any other file's stored FrameHash with the same hash sequence hits the
+    # dupe threshold (hamming_similarity == 1.0) deterministically.
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        this_file = session.get(File, job.file_id)
+        other_file = File(
+            instance_id=this_file.instance_id,
+            sonarr_path="/tv/Other/S01E09.mkv",
+            local_path="/media/tv/Other/S01E09.mkv",
+            size=1,
+            content_hash="other-hash",
+            series_id=42,
+            episode_ids=[999],
+            episode_file_id=8888,
+            quality={},
+            languages=[],
+        )
+        session.add(other_file)
+        session.flush()
+        session.add(
+            FrameHash(
+                file_id=other_file.id,
+                algo="phash",
+                version=1,
+                timestamps=[(i + 0.5) / 16 * DURATION_S for i in range(16)],
+                hashes=[f"{i:016x}" for i in range(16)],
+            )
+        )
+        session.commit()
+        other_file_id = other_file.id
+
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(session_factory, tmp_path, [loaded(plugin)])
+
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    verdict = get_verdicts(session_factory, job_id)[0]
+    assert verdict.dupe_info is not None
+    assert verdict.dupe_info["duplicate_of_file_id"] == other_file_id
+    assert verdict.dupe_info["similarity"] == pytest.approx(1.0)
+    assert verdict.dupe_info["sonarr_path"] == "/tv/Other/S01E09.mkv"
+
+
+@respx.mock
+async def test_dupe_info_absent_when_no_similar_frame_hash(tmp_path, session_factory):
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(session_factory, tmp_path, [loaded(plugin)])
+
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    verdict = get_verdicts(session_factory, job_id)[0]
+    assert verdict.dupe_info is None
+
+
 # -- worker pool ------------------------------------------------------------
 
 
@@ -623,6 +740,47 @@ async def test_worker_pool_processes_seeded_job_end_to_end(tmp_path, session_fac
         await deps.sonarr_client.close()
 
     assert get_job(session_factory, job_id).status == "matched"
+
+
+async def test_worker_pool_sweeps_expired_trash_at_startup(tmp_path, session_factory):
+    """Regression: the trash sweep must run immediately when the pool
+    starts (not only after its first hourly sleep) — otherwise an
+    already-expired item sits around for up to an hour on a freshly
+    (re)started pool."""
+    with session_factory() as session:
+        instance = Instance(name="main", url=BASE_URL)
+        session.add(instance)
+        session.commit()
+        item = TrashItem(
+            instance="main",
+            original_path=str(tmp_path / "orig.mkv"),
+            trash_path=str(tmp_path / "trash.mkv"),
+            size=1,
+            series_id=1,
+            episode_ids=[1],
+            expires_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(item)
+        session.commit()
+        item_id = item.id
+
+    deps = make_deps(session_factory, tmp_path, [])
+    pool = WorkerPool({"main": deps}, {}, pool_size=0, lease_timeout_s=5.0)
+    await pool.start()
+    try:
+        for _ in range(100):
+            with session_factory() as session:
+                if session.get(TrashItem, item_id).deleted_at is not None:
+                    break
+            await asyncio.sleep(0.05)
+    finally:
+        await pool.stop()
+        await deps.sonarr_client.close()
+
+    with session_factory() as session:
+        swept = session.get(TrashItem, item_id)
+    assert swept.deleted_at is not None
+    assert swept.outcome == "expired"
 
 
 @respx.mock

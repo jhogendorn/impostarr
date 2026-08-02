@@ -12,15 +12,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import psutil
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from impostarr import jobs
+from impostarr import jobs, trash
 from impostarr.jobs import InvalidTransition
 from impostarr.models import (
     JOB_STATUSES,
@@ -30,10 +32,12 @@ from impostarr.models import (
     Instance,
     Job,
     PhashCorpusEntry,
+    TrashItem,
     Verdict,
 )
 from impostarr.models import PluginResult as PluginResultRow
 from impostarr.remediate import Remediator
+from impostarr.trash import RestoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,14 @@ def _queue_counts(session) -> dict[str, int]:
     return counts
 
 
+def _instance_names_by_id(session) -> dict[int, str]:
+    return dict(session.execute(select(Instance.id, Instance.name)).all())
+
+
+def _iso(dt: Any) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
 def _instance_runtime_for_file(request: Request, file: File):
     with _session_factory(request)() as session:
         instance = session.get(Instance, file.instance_id)
@@ -155,39 +167,101 @@ def get_status(request: Request) -> dict:
                 "url": i.url,
                 "history_watermark": i.history_watermark,
                 "backfill_cursor": i.backfill_cursor,
+                "last_polled_at": _iso(i.last_polled_at),
+                "last_backfilled_at": _iso(i.last_backfilled_at),
             }
             for i in instances
         ]
         queues = _queue_counts(session)
+        trash_count = session.execute(
+            select(func.count(TrashItem.id)).where(TrashItem.deleted_at.is_(None))
+        ).scalar_one()
+
+        instance_names = _instance_names_by_id(session)
+        active_jobs = []
+        active_job_rows = session.execute(select(Job).where(Job.status == "active")).scalars().all()
+        now = datetime.now(UTC)
+        for job in active_job_rows:
+            file = session.get(File, job.file_id)
+            active_jobs.append(
+                {
+                    "job_id": job.id,
+                    "instance": instance_names.get(file.instance_id) if file else None,
+                    "series_id": file.series_id if file else None,
+                    "sonarr_path": file.sonarr_path if file else None,
+                    "claimed_by": job.claimed_by,
+                    "claimed_at": _iso(job.claimed_at),
+                    "elapsed_s": (now - job.claimed_at).total_seconds() if job.claimed_at else None,
+                }
+            )
+
+    summary = {
+        "unprocessed": queues["hold"] + queues["pending"] + queues["active"],
+        "processed": (
+            queues["matched"]
+            + queues["quarantine"]
+            + queues["inconclusive"]
+            + queues["error"]
+            + queues["remediated"]
+        ),
+    }
+    system = {
+        "cpu_percent": psutil.cpu_percent(interval=None),
+        "mem_percent": psutil.virtual_memory().percent,
+    }
     return {
         "instances": instances_out,
         "queues": queues,
+        "summary": summary,
+        "system": system,
+        "approval_required": request.app.state.settings.approval_required,
+        "active_jobs": active_jobs,
         "workers": {"pool_size": request.app.state.pool_size},
         "dry_run": request.app.state.settings.dry_run,
+        "trash_count": trash_count,
     }
 
 
 # -- queues / job detail --------------------------------------------------
 
 
+QUEUE_SORT_FIELDS = {"updated_at": Job.updated_at, "created_at": Job.created_at}
+
+
 @router.get("/queues/{status}")
-def get_queue(status: str, request: Request, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+def get_queue(
+    status: str,
+    request: Request,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    instance: str | None = None,
+    sort: Literal["updated_at", "created_at"] = "updated_at",
+    dir: Literal["asc", "desc"] = "desc",
+) -> dict:
     if status not in JOB_STATUSES:
         raise HTTPException(400, f"invalid status: {status!r}")
     page_size = min(page_size, MAX_PAGE_SIZE)
+    sort_column = QUEUE_SORT_FIELDS[sort]
+    order = sort_column.asc() if dir == "asc" else sort_column.desc()
     with _session_factory(request)() as session:
-        total = session.execute(select(func.count(Job.id)).where(Job.status == status)).scalar_one()
-        job_rows = (
-            session.execute(
-                select(Job)
-                .where(Job.status == status)
-                .order_by(Job.updated_at.desc())
-                .offset((page - 1) * page_size)
-                .limit(page_size)
-            )
-            .scalars()
-            .all()
-        )
+        base_where = [Job.status == status]
+        joins: list = []
+        if instance is not None:
+            joins = [(File, Job.file_id == File.id), (Instance, File.instance_id == Instance.id)]
+            base_where.append(Instance.name == instance)
+
+        count_query = select(func.count(Job.id))
+        job_query = select(Job)
+        for target, on_clause in joins:
+            count_query = count_query.join(target, on_clause)
+            job_query = job_query.join(target, on_clause)
+        count_query = count_query.where(*base_where)
+        job_query = job_query.where(*base_where).order_by(order).offset((page - 1) * page_size).limit(page_size)
+
+        total = session.execute(count_query).scalar_one()
+        job_rows = session.execute(job_query).scalars().all()
+
+        instance_names = _instance_names_by_id(session)
         items = []
         for job in job_rows:
             file = session.get(File, job.file_id)
@@ -196,6 +270,7 @@ def get_queue(status: str, request: Request, page: int = 1, page_size: int = DEF
                 {
                     "job_id": job.id,
                     "status": job.status,
+                    "instance": instance_names.get(file.instance_id) if file else None,
                     "file": {
                         "series_id": file.series_id,
                         "sonarr_path": file.sonarr_path,
@@ -210,11 +285,33 @@ def get_queue(status: str, request: Request, page: int = 1, page_size: int = DEF
                     "updated_at": job.updated_at.isoformat(),
                 }
             )
-    return {"total": total, "items": items}
+    return {"total": total, "page_size": page_size, "items": items}
+
+
+async def _series_external_ids(request: Request, file: File) -> dict[str, Any] | None:
+    """Best-effort live lookup of the claimed series' cross-database ids
+    (for the inspect modal's TVDB/IMDB links + title), via the same
+    per-instance runtime `_instance_runtime_for_file` resolves for approve.
+    Broad except is deliberate: this is a non-critical enrichment of the
+    job-detail response — an unreachable/misconfigured instance, or the
+    file's instance having no runtime, should degrade to `None`, not fail
+    the whole job-detail request."""
+    try:
+        runtime = _instance_runtime_for_file(request, file)
+        series = await runtime.client.series(file.series_id)
+    except Exception:
+        logger.warning("series lookup failed for external_ids (series_id=%s)", file.series_id, exc_info=True)
+        return None
+    return {
+        "title": series.title,
+        "tvdb_id": series.tvdb_id,
+        "imdb_id": series.imdb_id,
+        "tmdb_id": series.tmdb_id,
+    }
 
 
 @router.get("/jobs/{job_id}")
-def get_job_detail(job_id: int, request: Request) -> dict:
+async def get_job_detail(job_id: int, request: Request) -> dict:
     with _session_factory(request)() as session:
         job = session.get(Job, job_id)
         if job is None:
@@ -230,6 +327,8 @@ def get_job_detail(job_id: int, request: Request) -> dict:
             .scalars()
             .first()
         )
+        instance_row = session.get(Instance, file.instance_id)
+        external_ids = await _series_external_ids(request, file)
         return {
             "job": {
                 "id": job.id,
@@ -238,6 +337,8 @@ def get_job_detail(job_id: int, request: Request) -> dict:
                 "created_at": job.created_at.isoformat(),
                 "updated_at": job.updated_at.isoformat(),
             },
+            "instance": instance_row.name if instance_row is not None else None,
+            "external_ids": external_ids,
             "file": {
                 "series_id": file.series_id,
                 "episode_ids": file.episode_ids,
@@ -274,6 +375,7 @@ def get_job_detail(job_id: int, request: Request) -> dict:
                     "remediation_log": verdict.remediation_log,
                     "source": verdict.source,
                     "human_ident": verdict.human_ident,
+                    "dupe_info": verdict.dupe_info,
                 }
                 if verdict is not None
                 else None
@@ -450,7 +552,10 @@ async def approve_job(job_id: int, request: Request) -> dict:
 
     runtime = _instance_runtime_for_file(request, file)
     dry_run = request.app.state.settings.dry_run
-    remediator = Remediator(runtime.client, runtime.cfg, session_factory, dry_run=dry_run)
+    remediator = Remediator(
+        runtime.client, runtime.cfg, session_factory,
+        dry_run=dry_run, trash_cfg=request.app.state.settings.trash,
+    )
     if action["kind"] == "remap":
         await remediator.remap(job, frozenset(action["target_episode_ids"]), worker_id)
     else:
@@ -521,6 +626,83 @@ async def backfill_instance(name: str, body: BackfillRequest, request: Request) 
         raise HTTPException(404, f"unknown instance: {name!r}")
     created = await runtime.discoverer.backfill_step(body.batch_size)
     return {"created": created}
+
+
+# -- trash --------------------------------------------------------------
+
+
+def _trash_item_out(item: TrashItem, now: datetime) -> dict:
+    return {
+        "id": item.id,
+        "instance": item.instance,
+        "original_path": item.original_path,
+        "trash_path": item.trash_path,
+        "series_id": item.series_id,
+        "episode_ids": item.episode_ids,
+        "size": item.size,
+        "trashed_at": _iso(item.trashed_at),
+        "expires_at": _iso(item.expires_at),
+        "expires_in_s": (item.expires_at - now).total_seconds(),
+    }
+
+
+@router.get("/trash")
+def list_trash(request: Request, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+    page_size = min(page_size, MAX_PAGE_SIZE)
+    with _session_factory(request)() as session:
+        base_where = [TrashItem.deleted_at.is_(None)]
+        total = session.execute(
+            select(func.count(TrashItem.id)).where(*base_where)
+        ).scalar_one()
+        items = (
+            session.execute(
+                select(TrashItem)
+                .where(*base_where)
+                .order_by(TrashItem.trashed_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            .scalars()
+            .all()
+        )
+        now = datetime.now(UTC)
+        return {
+            "total": total,
+            "page_size": page_size,
+            "items": [_trash_item_out(item, now) for item in items],
+        }
+
+
+def _get_active_trash_item(session, trash_id: int) -> TrashItem:
+    item = session.get(TrashItem, trash_id)
+    if item is None:
+        raise HTTPException(404, "trash item not found")
+    if item.deleted_at is not None:
+        raise HTTPException(409, f"trash item {trash_id} already {item.outcome}")
+    return item
+
+
+@router.delete("/trash/{trash_id}")
+def delete_trash_item(trash_id: int, request: Request) -> dict:
+    with _session_factory(request)() as session:
+        item = _get_active_trash_item(session, trash_id)
+        trash.delete_now(session, item)
+        return {"result": "deleted"}
+
+
+@router.post("/trash/{trash_id}/restore")
+def restore_trash_item(trash_id: int, request: Request) -> dict:
+    with _session_factory(request)() as session:
+        item = _get_active_trash_item(session, trash_id)
+        try:
+            trash.restore(session, item)
+        except RestoreConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "result": "restored",
+            "original_path": item.original_path,
+            "note": "not re-imported into Sonarr; a manual rescan/import is required",
+        }
 
 
 # -- SSE ----------------------------------------------------------------

@@ -9,8 +9,9 @@ interface VerdictActionsProps {
 
 // No remediated→pending edge exists in the backend transition table (a
 // remediated job's replacement file arrives as a new discovery instead),
-// so Rerun would always 409 there — omit it.
-const RERUN_STATUSES = new Set(['matched', 'error', 'quarantine', 'inconclusive'])
+// so Rerun would always 409 there — omit it. Exported for QueueTable's
+// per-row action column and bulk-action eligibility gating.
+export const RERUN_STATUSES = new Set(['matched', 'error', 'quarantine', 'inconclusive'])
 
 const BUTTON_CLASS =
   'rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40'

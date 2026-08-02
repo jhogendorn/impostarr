@@ -21,7 +21,7 @@ echo "==> Building $IMAGE_TAG"
 docker build -f "$REPO_ROOT/docker/Dockerfile" -t "$IMAGE_TAG" "$REPO_ROOT"
 
 echo "==> Preparing throwaway config/volumes at $TMPDIR_SMOKE"
-mkdir -p "$TMPDIR_SMOKE/config" "$TMPDIR_SMOKE/assets" "$TMPDIR_SMOKE/models" "$TMPDIR_SMOKE/media"
+mkdir -p "$TMPDIR_SMOKE/config" "$TMPDIR_SMOKE/assets" "$TMPDIR_SMOKE/models" "$TMPDIR_SMOKE/media" "$TMPDIR_SMOKE/trash"
 cat > "$TMPDIR_SMOKE/config/impostarr.yml" <<'EOF'
 sonarr: []
 EOF
@@ -41,6 +41,7 @@ docker run -d --name "$CONTAINER_NAME" \
   -v "$TMPDIR_SMOKE/assets:/assets" \
   -v "$TMPDIR_SMOKE/models:/models" \
   -v "$TMPDIR_SMOKE/media:/media" \
+  -v "$TMPDIR_SMOKE/trash:/trash" \
   "$IMAGE_TAG" >/dev/null
 
 echo "==> Polling /api/v1/healthz (up to 60s)"

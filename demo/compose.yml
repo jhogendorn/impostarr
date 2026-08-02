@@ -1,7 +1,8 @@
-# Demo/e2e stack: real Sonarr + a synthetic library + a stub transcriber +
-# Impostarr itself (dry_run always on — see impostarr.demo.yml). Driven by
-# e2e.sh; see README "Demo / e2e" section. Run from this directory (`cd
-# demo && docker compose ...`) — e2e.sh does this for you.
+# Demo/e2e stack: real Sonarr + a synthetic library + a stub
+# transcription/chat-completions server (stub_services.py) + Impostarr
+# itself (dry_run always on — see impostarr.demo.yml). Driven by e2e.sh;
+# see README "Demo / e2e" section. Run from this directory (`cd demo &&
+# docker compose ...`) — e2e.sh does this for you.
 services:
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
@@ -16,7 +17,7 @@ services:
       - "8989:8989"
     restart: unless-stopped
 
-  stub-transcriber:
+  stub-services:
     build:
       context: .
       dockerfile: Dockerfile
@@ -30,12 +31,13 @@ services:
       dockerfile: docker/Dockerfile
     depends_on:
       - sonarr
-      - stub-transcriber
+      - stub-services
     volumes:
       - ./volumes/config:/config
       - ./volumes/assets:/assets
       - ./volumes/models:/models
       - ./volumes/media:/media:ro
+      - ./volumes/trash:/trash
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}

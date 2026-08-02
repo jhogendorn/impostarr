@@ -50,7 +50,51 @@ export function formatScore(score: number | null): string {
   return score === null ? '—' : score.toFixed(2)
 }
 
+/** Percentage, 0 decimal places, e.g. "34%". */
+export function formatPercent(score: number | null): string {
+  return score === null ? '—' : `${Math.round(score * 100)}%`
+}
+
 export function pathBasename(path: string): string {
   const parts = path.split('/')
   return parts[parts.length - 1] || path
+}
+
+/** Capitalizes a lowercase status/word for display, e.g. "quarantine" -> "Quarantine". */
+export function capitalize(word: string): string {
+  return word[0].toUpperCase() + word.slice(1)
+}
+
+/** "125s" -> "2m 05s"; used for the active strip's ticking elapsed time. */
+export function formatElapsed(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}m ${String(s).padStart(2, '0')}s`
+}
+
+/** ISO timestamp -> "hh:mm:ss" in the viewer's local time, for the log drawer. */
+export function formatClock(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleTimeString('en-GB', { hour12: false })
+}
+
+/** Seconds until expiry -> "3d 04h" / "02h 15m" / "expired", ticking countdown for trash items. */
+export function formatCountdown(seconds: number): string {
+  if (seconds <= 0) return 'expired'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days > 0) return `${days}d ${String(hours).padStart(2, '0')}h`
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  return `${minutes}m`
+}
+
+/** mm:ss timestamp badge for a framegrab, from its `tool_meta.timestamp_s`. */
+export function formatTimestampS(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
 }

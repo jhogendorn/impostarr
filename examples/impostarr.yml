@@ -79,6 +79,12 @@ plugins:
         base_url: http://ollama:11434/v1
         model: llama3
         api_key: CHANGE_ME
+        # Example: any OpenAI-compatible endpoint works here (Ollama,
+        # LocalAI, llama.cpp server, vLLM) — no API key needed for a local
+        # Ollama instance.
+        # base_url: http://ollama:11434/v1
+        # model: llama3.1
+        # api_key: ""
 
 # Reference subtitle service (OpenSubtitles), shared by identifier plugins.
 refsubs:
@@ -166,6 +172,19 @@ workers:
 # `remediated` in dry-run (queue flow observable end-to-end); the
 # remediation_log audit trail records what would have happened.
 dry_run: false
+
+# Never take automatic actions; every proposed fix waits in the quarantine
+# queue for human approval. Overrides the per-instance auto_remap/
+# auto_replace flags.
+approval_required: false
+
+# When enabled, files removed by the replace action are first
+# copied/hardlinked into the trash directory and kept for retention_days
+# before being deleted permanently. Disable to delete immediately.
+trash:
+  enabled: true
+  dir: /trash
+  retention_days: 14
 
 # Volumes (see README).
 state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay

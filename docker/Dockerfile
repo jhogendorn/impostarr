@@ -85,7 +85,7 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     IMPOSTARR_CONFIG=/config/impostarr.yml \
     UV_NO_CACHE=1
 
-VOLUME ["/config", "/assets", "/models", "/media"]
+VOLUME ["/config", "/assets", "/models", "/media", "/trash"]
 EXPOSE 8484
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

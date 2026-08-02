@@ -314,7 +314,7 @@ async def sample_frames(
                 type="frames",
                 path=str(out_path),
                 input_fingerprint=fp,
-                tool_meta={"ffmpeg_version": version, "index": i, "timestamp": ts},
+                tool_meta={"ffmpeg_version": version, "index": i, "timestamp_s": ts},
             )
         )
 

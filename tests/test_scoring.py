@@ -59,6 +59,7 @@ JUNK = JunkCandidate()
 DEFAULT_THRESHOLDS = Thresholds()  # quarantine=0.8 auto=0.4 alt=0.8 alt_margin=0.2 auto_min_evidence=2
 FLAGS_ON = InstanceFlags(auto_remap=True, auto_replace=True)
 FLAGS_OFF = InstanceFlags(auto_remap=False, auto_replace=False)
+FLAGS_ON_APPROVAL_REQUIRED = InstanceFlags(auto_remap=True, auto_replace=True, approval_required=True)
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +409,24 @@ def test_route_boundary_s_claimed_equals_auto_is_quarantine():
     assert sheet.s_claimed == pytest.approx(DEFAULT_THRESHOLDS.auto)
     decision = route(sheet, DEFAULT_THRESHOLDS, FLAGS_ON)
     assert decision.outcome == "quarantine"
+
+
+def test_route_approval_required_demotes_otherwise_auto_remap_to_quarantine():
+    # Same fixture as test_route_low_credible_same_series_alt_both_flags_on_
+    # remediate_remap, which asserts auto=True/remediate with these flags
+    # minus approval_required. approval_required=True must short-circuit
+    # auto to False regardless of auto_remap/auto_replace/evidence.
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.1, IN(CLAIMED)), (0.9, IN(ALT))]),
+        outcome("p2", 1.0, pairs=[(0.05, IN(CLAIMED)), (0.85, IN(ALT))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED)
+    decision = route(sheet, DEFAULT_THRESHOLDS, FLAGS_ON_APPROVAL_REQUIRED)
+    assert decision.outcome == "quarantine"
+    assert decision.auto is False
+    assert isinstance(decision.action, Remap)
+    assert decision.action.target_episode_ids == ALT
+    assert "approval_required" in decision.reason
 
 
 def test_route_boundary_alt_margin_exact_is_credible():

@@ -18,6 +18,14 @@ apart. Distinct per-task ids close that gap; `claim_next`'s atomic UPDATE
 already prevents two tasks (same or different ids) from claiming the same
 job in the first place.
 
+Trash sweep: `_trash_sweep_loop` runs `trash.sweep_expired` hourly, first run
+at startup (unlike `_reaper_loop`, which sleeps before its first pass — the
+sweep runs immediately so a long-idle pool doesn't leave expired trash
+sitting around until the first hour mark). It runs unconditionally,
+independent of `Settings.dry_run`: see `trash.py`'s module docstring for why
+(short version: it's Impostarr sweeping its own trash mount, not a
+media-library mutation).
+
 Shutdown cancellation: `_run_job` awaits `process_task` directly, so
 cancelling the enclosing worker-loop task also cancels `process_task` (task
 cancellation propagates to whatever a task is currently awaiting) and
@@ -38,7 +46,7 @@ import asyncio
 import logging
 from dataclasses import replace
 
-from impostarr import jobs
+from impostarr import jobs, trash
 from impostarr.discovery import Discoverer
 from impostarr.jobs import LeaseLost
 from impostarr.models import Job
@@ -48,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 POLL_EMPTY_SLEEP_S = 5.0
 REAP_INTERVAL_S = 60.0
+TRASH_SWEEP_INTERVAL_S = 3600.0
 
 
 def _mint_worker_id(base_worker_id: str, task_index: int) -> str:
@@ -88,6 +97,7 @@ class WorkerPool:
             }
             self._tasks.append(asyncio.create_task(self._worker_loop(per_task_deps)))
         self._tasks.append(asyncio.create_task(self._reaper_loop()))
+        self._tasks.append(asyncio.create_task(self._trash_sweep_loop()))
         for name, discoverer in self.discoverers.items():
             interval = self.deps_per_instance[name].instance_cfg.poll_interval_s
             self._tasks.append(asyncio.create_task(self._discovery_loop(name, discoverer, interval)))
@@ -169,6 +179,15 @@ class WorkerPool:
             await asyncio.sleep(REAP_INTERVAL_S)
             with self._session_factory() as session:
                 await asyncio.to_thread(jobs.reap_stale, session, self.lease_timeout_s)
+
+    async def _trash_sweep_loop(self) -> None:
+        # Runs immediately (first sweep at startup), then hourly — see the
+        # module docstring's "Trash sweep" note for why this differs from
+        # `_reaper_loop`'s sleep-first shape.
+        while True:
+            with self._session_factory() as session:
+                await asyncio.to_thread(trash.sweep_expired, session)
+            await asyncio.sleep(TRASH_SWEEP_INTERVAL_S)
 
     async def _discovery_loop(self, name: str, discoverer: Discoverer, interval_s: float) -> None:
         while True:
