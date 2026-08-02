@@ -370,6 +370,23 @@ def test_verdict_is_claimed_matches_and_writes_phash_corpus(app):
         assert corpus_entries[0].source == "human"
 
 
+def test_verdict_is_claimed_with_no_frame_hash_writes_no_corpus_entry(app):
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id, episode_ids=[101])
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    _make_verdict(session_factory, job_id, outcome="quarantine")
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/jobs/{job_id}/verdict", json={"verdict": "is_claimed"})
+
+    assert response.status_code == 200
+    assert response.json()["job_status"] == "matched"
+    with session_factory() as session:
+        corpus_entries = session.execute(select(PhashCorpusEntry)).scalars().all()
+        assert corpus_entries == []
+
+
 def test_verdict_on_active_job_409(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
@@ -384,6 +401,37 @@ def test_verdict_on_active_job_409(app):
         response = client.post(f"{API_PREFIX}/jobs/{job_id}/verdict", json={"verdict": "ignore"})
 
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"verdict": "is_claimed"},
+        {"verdict": "is_other", "ident": {"season": 1, "episodes": [2]}},
+        {"verdict": "ignore"},
+    ],
+    ids=["is_claimed", "is_other", "ignore"],
+)
+def test_verdict_on_hold_job_409(app, body):
+    # Regression: the 409 gate must allowlist {quarantine, inconclusive},
+    # not blocklist {active, pending} — a blocklist lets `hold` jobs
+    # through, where is_claimed would leave the job stuck in `hold` with an
+    # orphaned matched-verdict, and is_other/ignore would force
+    # hold -> quarantine/inconclusive via the unfenced direct status write,
+    # bypassing jobs.py's transition table entirely.
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="hold")
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/jobs/{job_id}/verdict", json=body)
+
+    assert response.status_code == 409
+    assert _get_job(session_factory, job_id).status == "hold"
+    with session_factory() as session:
+        verdicts = session.execute(select(Verdict).where(Verdict.job_id == job_id)).scalars().all()
+        assert verdicts == []
 
 
 def test_verdict_ignore_sets_inconclusive(app):

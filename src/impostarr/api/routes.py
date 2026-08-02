@@ -42,7 +42,12 @@ router = APIRouter(prefix="/api/v1")
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 STATS_INTERVAL_S = 15.0
-SETTLED_BLOCK_STATUSES = frozenset({"active", "pending"})
+# Human verdicts only apply to jobs actually awaiting human review (spec:
+# "Human verdicts from quarantine/inconclusive"). Allowlist, not a
+# blocklist of active/pending: hold/matched/error/remediated must also be
+# rejected — a blocklist that only named active/pending let `hold` jobs
+# through, producing orphaned verdicts and evidence-free quarantine shells.
+VERDICT_ALLOWED_STATUSES = frozenset({"quarantine", "inconclusive"})
 
 _MEDIA_TYPES = {
     ".jpg": "image/jpeg",
@@ -350,8 +355,10 @@ async def post_verdict(job_id: int, body: VerdictRequest, request: Request) -> d
         job = session.get(Job, job_id)
         if job is None:
             raise HTTPException(404, "job not found")
-        if job.status in SETTLED_BLOCK_STATUSES:
-            raise HTTPException(409, f"job is {job.status!r}; verdicts only apply to settled queues")
+        if job.status not in VERDICT_ALLOWED_STATUSES:
+            raise HTTPException(
+                409, f"job is {job.status!r}; verdicts only apply to quarantine/inconclusive jobs"
+            )
         file = session.get(File, job.file_id)
 
         proposed_remap: dict[str, Any] | None = None
