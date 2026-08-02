@@ -57,6 +57,25 @@ class InstanceRuntime:
     discoverer: Discoverer
 
 
+class CacheAwareStaticFiles(StaticFiles):
+    """StaticFiles with explicit cache semantics for a hashed-asset SPA.
+
+    Vite emits content-hashed filenames under assets/ (safe to cache forever);
+    index.html is the un-hashed entrypoint that references them. Without an
+    explicit Cache-Control, browsers heuristically cache index.html and can
+    keep serving a stale HTML+bundle pair after the container is rebuilt.
+    """
+
+    def file_response(self, *args, **kwargs):  # type: ignore[override]
+        response = super().file_response(*args, **kwargs)
+        path = getattr(response, "path", "") or ""
+        if "/assets/" in str(path).replace("\\", "/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _resolve_web_dist() -> Path:
     """Locate `web/dist` (Task 16's frontend build output).
 
@@ -174,7 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     web_dist = _resolve_web_dist()
     if web_dist.is_dir():
-        fastapi_app.mount("/", StaticFiles(directory=web_dist, html=True), name="static")
+        fastapi_app.mount("/", CacheAwareStaticFiles(directory=web_dist, html=True), name="static")
 
     return fastapi_app
 
