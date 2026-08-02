@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for the CPU docker image: builds it, runs it with
+# End-to-end smoke test for the docker image: builds it, runs it with
 # throwaway volumes and a minimal config, and checks that it comes up
 # healthy and serves the UI. Runnable locally and in CI.
 #

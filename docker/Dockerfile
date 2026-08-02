@@ -1,9 +1,20 @@
 # syntax=docker/dockerfile:1
 #
-# CPU image. See docker/Dockerfile.cuda for the GPU-transcription variant
-# (same structure, adds the `whisper` extra) and docker/compose.yml for a
-# runnable example. Build from the repo root:
+# Single image for all deployments. See docker/compose.yml for a runnable
+# example. Build from the repo root:
 #   docker build -f docker/Dockerfile -t impostarr:latest .
+#
+# The `whisper` extra (faster-whisper + ctranslate2) is always installed:
+# without it, transcription-based identifier plugins would fall back to a
+# dead no-op transcriber whenever no GPU is present, silently disabling
+# them. With it always present, transcription instead degrades to slow CPU
+# decoding when there's no GPU — CUDA acceleration is opportunistic, not
+# required. ctranslate2's GPU wheels bundle the CUDA runtime libraries they
+# need, so no separate CUDA base image is required; acceleration kicks in
+# automatically when the host has an NVIDIA GPU, the nvidia-container-toolkit
+# installed, and the container is run with `--gpus all`. Non-NVIDIA GPUs
+# (e.g. Intel iGPUs) are NOT accelerated by this image — the CPU path is
+# used regardless. See README GPU section.
 
 # ---- Stage 1: web build ---------------------------------------------------
 FROM node:24-slim AS web
@@ -30,13 +41,13 @@ WORKDIR /app
 # The cache mount persists uv's wheel cache across builds (BuildKit-only).
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra postgres
+    uv sync --frozen --no-dev --no-install-project --extra whisper --extra postgres
 
 # Project layer: install the project itself as a real (non-editable)
 # package now that src/ is present.
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable --extra postgres
+    uv sync --frozen --no-dev --no-editable --extra whisper --extra postgres
 
 # ---- Stage 3: runtime -------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime

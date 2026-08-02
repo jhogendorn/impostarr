@@ -5,7 +5,7 @@
 # the environment level: IMPOSTARR__SECTION__KEY=value for scalars,
 # IMPOSTARR__SECTION=<json> for list/object-valued keys (e.g.
 # IMPOSTARR__SONARR='[{"name": "main", ...}]'). Env always wins over this
-# file. See docs/specs/2026-08-02-impostarr-poc-design.md#configuration.
+# file.
 
 # One entry per Sonarr instance to watch. Default: [] (no instances).
 sonarr:
@@ -30,15 +30,34 @@ sonarr:
     auto_remap: false
     auto_replace: false
 
-# Score bands driving routing decisions (spec Scoring & routing section).
-# All values below are the PoC defaults.
+# Every file gets a confidence score 0..1 that it really is the episode
+# it's labelled as. These thresholds are a decision ladder that score sorts
+# into an action. All values below are the defaults.
 thresholds:
-  quarantine: 0.8 # S_claimed >= this -> matched
-  auto: 0.4 # S_claimed < this -> auto-remediation eligible
-  alt: 0.8 # alternate candidate score must reach this to be "credible"
-  alt_margin: 0.2 # and beat S_claimed by at least this margin
-  auto_min_evidence: 2 # min applicable plugins required to auto-act
-  phash_store: 0.9 # min verdict confidence to store a phash corpus record
+  # Scores at or above this are considered verified ("matched") — no action
+  # taken.
+  quarantine: 0.8
+  # Scores below this trigger automatic remediation, if the sonarr
+  # instance's auto_remap/auto_replace flags allow it. Scores between
+  # `auto` and `quarantine` are neither verified nor low-confidence enough
+  # to auto-act on: they go to the quarantine queue for a human to review.
+  auto: 0.4
+  # Before remediating a low-confidence file, Impostarr checks whether the
+  # plugins agreed it's actually a *different* episode than labelled. That
+  # alternative candidate needs a score of at least `alt`...
+  alt: 0.8
+  # ...AND must beat the labelled episode's score by at least this margin
+  # to be trusted. Only then is the file re-mapped to the alternative
+  # instead of being deleted/replaced.
+  alt_margin: 0.2
+  # Automatic actions (remap/replace) additionally require at least this
+  # many plugins to have returned usable evidence (status "ok" — abstained
+  # or errored plugins don't count) — a single plugin's opinion is never
+  # enough to act automatically, even if very confident.
+  auto_min_evidence: 2
+  # Minimum verdict confidence before a file's visual fingerprint (phash)
+  # is added to the local corpus used for future frame-hash comparisons.
+  phash_store: 0.9
 
 # External identifier plugins.
 plugins:
@@ -51,7 +70,8 @@ plugins:
       enabled: true
       weight: 1.0
       options:
-        tmdb_api_key: CHANGE_ME
+        min_lines: 20 # minimum transcript segments required to attempt a comparison
+        min_compared: 10 # reference lines below which match confidence is discounted
     subs-llm:
       enabled: true
       weight: 1.0
@@ -71,8 +91,11 @@ refsubs:
   # <manual_dir>/<tvdb_id>/SxxEyy.srt
   manual_dir: /config/refsubs-manual
 
-# Identity/audit layer. Disabled (admin-for-everyone) by default; securing
-# the stack is the deployer's job (see spec Auth section).
+# Identity/audit layer. Impostarr does not currently have a requirement for
+# access control: all actions are admin actions. Users who need
+# authentication should deploy the app behind an auth service (e.g.
+# Authentik); Impostarr will attribute actions to the identity the proxy
+# passes through (trusted_header, below).
 auth:
   # Forward-auth header name (e.g. Authentik), attributes identity for audit.
   trusted_header: null
@@ -85,13 +108,16 @@ auth:
   # - name: automation
   #   key: CHANGE_ME
 
-# Database. Absent dsn -> SQLite at <state_dir>/impostarr.db.
-# Postgres requires the `postgres` extra (psycopg) — install with
-# `uv sync --extra postgres`, or use a docker image built from this repo
-# (both docker/Dockerfile and docker/Dockerfile.cuda include it).
-db:
-  dsn: null
-  # dsn: postgresql+psycopg://user:pass@postgres:5432/impostarr
+# Database. SQLite is the default and needs no configuration: with the
+# `db:` section absent, Impostarr uses a SQLite file at
+# <state_dir>/impostarr.db.
+#
+# PostgreSQL is optional, needed only for multi-replica deployments.
+# Uncomment below and set dsn to switch. Requires the `postgres` extra
+# (psycopg) — install with `uv sync --extra postgres`, or use the docker
+# image built from this repo (docker/Dockerfile includes it).
+# db:
+#   dsn: postgresql+psycopg://user:pass@postgres:5432/impostarr  # leave unset for SQLite (default)
 
 # Worker pool.
 workers:
@@ -99,7 +125,7 @@ workers:
   whisper_model: small
   whisper_device: auto # auto | cpu | cuda
 
-# Volumes (see spec Deployment section).
+# Volumes (see README).
 state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay
 assets_dir: /assets # extracted artifact blobs (transcripts, framegrabs, refsub cache)
 models_dir: /models # whisper/LLM model caches

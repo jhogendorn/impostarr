@@ -26,15 +26,14 @@ services:
 
   # Optional Postgres backend, for deployments needing more than one
   # replica (default is SQLite under /config, which is single-replica
-  # only — see spec Deployment section). Enable with:
+  # only). Enable with:
   #   docker compose --profile postgres up
   # and point impostarr.yml at it (values matching POSTGRES_USER/PASSWORD/DB
   # below), e.g.:
   #   db:
   #     dsn: postgresql+psycopg://impostarr:CHANGE_ME@postgres:5432/impostarr
-  # The `postgres` extra (psycopg) is included in both docker/Dockerfile and
-  # docker/Dockerfile.cuda, so the shipped images can talk to this out of
-  # the box.
+  # The `postgres` extra (psycopg) is included in docker/Dockerfile, so the
+  # shipped image can talk to this out of the box.
   postgres:
     image: postgres:17-alpine
     profiles: ["postgres"]
