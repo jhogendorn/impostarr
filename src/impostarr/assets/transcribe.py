@@ -69,9 +69,18 @@ class FasterWhisperTranscriber:
             download_root=str(self.models_dir) if self.models_dir else None,
         )
 
+    def _transcribe_sync(self, wav_path: str) -> tuple[list[Any], str]:
+        """Blocking: run the model AND fully materialize its segment
+        generator, in one call. faster-whisper's `transcribe()` returns
+        lazily — the actual decoding happens as the generator is iterated,
+        not when `transcribe()` is called — so the iteration must happen
+        inside this same `to_thread` call, not back on the event loop."""
+        segments, info = self._model.transcribe(wav_path)
+        return list(segments), info.language
+
     async def transcribe(self, wav_path: Path) -> TranscriptResult:
         if self._model is None:
             self._model = await asyncio.to_thread(self._load_model)
-        segments, info = await asyncio.to_thread(self._model.transcribe, str(wav_path))
+        segments, language = await asyncio.to_thread(self._transcribe_sync, str(wav_path))
         segs = [TranscriptSegment(start=s.start, end=s.end, text=s.text) for s in segments]
-        return TranscriptResult(segments=segs, language=info.language)
+        return TranscriptResult(segments=segs, language=language)

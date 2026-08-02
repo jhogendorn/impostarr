@@ -33,6 +33,7 @@ PHASH_ALGO = "phash"
 PHASH_VERSION = 1
 PHASH_BITS = 64  # imagehash.phash default hash_size=8 -> 8x8 = 64 bits
 THUMBNAIL_MAX_WIDTH = 480
+DEFAULT_TIMEOUT_S = 600.0
 
 
 class ExtractError(RuntimeError):
@@ -48,7 +49,7 @@ class ExtractedAsset(BaseModel):
     type: str
     path: str | None = None
     payload: dict[str, Any] | None = None
-    fingerprint: str
+    input_fingerprint: str
     tool_meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -64,13 +65,19 @@ class FrameHashSeq(BaseModel):
     hashes: list[str]
 
 
-async def _run(cmd: list[str]) -> bytes:
+async def _run(cmd: list[str], timeout_s: float = DEFAULT_TIMEOUT_S) -> bytes:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout_s)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise ExtractError(f"{cmd[0]} timed out after {timeout_s}s: {' '.join(cmd)}") from None
     if proc.returncode != 0:
         raise ExtractError(
             f"{cmd[0]} failed (exit {proc.returncode}): "
@@ -124,7 +131,7 @@ async def probe(path: Path) -> ExtractedAsset:
     return ExtractedAsset(
         type="probe",
         payload=payload,
-        fingerprint=fp,
+        input_fingerprint=fp,
         tool_meta={"ffprobe_version": version},
     )
 
@@ -134,10 +141,15 @@ async def extract_audio(
     out_dir: Path,
     offset_s: float = 60.0,
     duration_s: float = 900.0,
+    probe_result: ExtractedAsset | None = None,
 ) -> ExtractedAsset:
     """16kHz mono wav slice. Starts at `offset_s` unless the file is shorter
-    than that (then starts at 0); takes `min(duration_s, remaining)`."""
-    probe_asset = await probe(path)
+    than that (then starts at 0); takes `min(duration_s, remaining)`.
+
+    `probe_result`, when given, skips the internal `probe()` call (the
+    caller already has a fresh one — e.g. the pipeline probes once per job
+    and reuses it across extraction stages)."""
+    probe_asset = probe_result if probe_result is not None else await probe(path)
     total = _duration_s(probe_asset.payload or {})
     start = 0.0 if total <= offset_s else offset_s
     take = min(duration_s, total - start)
@@ -169,16 +181,20 @@ async def extract_audio(
     return ExtractedAsset(
         type="audio",
         path=str(out_path),
-        fingerprint=fp,
+        input_fingerprint=fp,
         tool_meta={"ffmpeg_version": version, "start_s": start, "duration_s": take},
     )
 
 
-async def extract_embedded_subs(path: Path, out_dir: Path) -> list[ExtractedAsset]:
+async def extract_embedded_subs(
+    path: Path, out_dir: Path, probe_result: ExtractedAsset | None = None
+) -> list[ExtractedAsset]:
     """Text-sub streams (subrip/ass/mov_text) extracted to .srt; image-sub
     streams (hdmv_pgs_subtitle/dvd_subtitle) raw-copied for the OCR plugin.
-    One asset per subtitle stream, in declared stream order."""
-    probe_asset = await probe(path)
+    One asset per subtitle stream, in declared stream order.
+
+    `probe_result`, when given, skips the internal `probe()` call."""
+    probe_asset = probe_result if probe_result is not None else await probe(path)
     streams = (probe_asset.payload or {}).get("streams", [])
     sub_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
 
@@ -236,25 +252,39 @@ async def extract_embedded_subs(path: Path, out_dir: Path) -> list[ExtractedAsse
             continue
 
         assets.append(
-            ExtractedAsset(type="subs", path=str(out_path), fingerprint=fp, tool_meta=tool_meta)
+            ExtractedAsset(
+                type="subs", path=str(out_path), input_fingerprint=fp, tool_meta=tool_meta
+            )
         )
 
     return assets
 
 
+def _hash_frames(paths: list[Path]) -> list[str]:
+    """Blocking: open + phash every frame. Run via `asyncio.to_thread` — one
+    call for the whole batch, not per-frame, to avoid thread-pool churn."""
+    hashes = []
+    for frame_path in paths:
+        with Image.open(frame_path) as img:
+            hashes.append(str(imagehash.phash(img)))
+    return hashes
+
+
 async def sample_frames(
-    path: Path, out_dir: Path, n: int = 16
+    path: Path, out_dir: Path, n: int = 16, probe_result: ExtractedAsset | None = None
 ) -> tuple[FrameHashSeq, list[ExtractedAsset]]:
     """`n` frames at deterministic timestamps `(i+0.5)/n * duration`, each
-    hashed with imagehash.phash and saved as a <=480px-wide jpeg thumbnail."""
-    probe_asset = await probe(path)
+    hashed with imagehash.phash and saved as a <=480px-wide jpeg thumbnail.
+
+    `probe_result`, when given, skips the internal `probe()` call."""
+    probe_asset = probe_result if probe_result is not None else await probe(path)
     total = _duration_s(probe_asset.payload or {})
     timestamps = [(i + 0.5) / n * total for i in range(n)]
 
     out_dir.mkdir(parents=True, exist_ok=True)
     version = await _tool_version(FFMPEG)
     assets: list[ExtractedAsset] = []
-    hashes: list[str] = []
+    out_paths: list[Path] = []
 
     for i, ts in enumerate(timestamps):
         params = f"n={n}:index={i}:ts={ts:.6f}"
@@ -278,19 +308,17 @@ async def sample_frames(
                 str(out_path),
             ]
         )
-        with Image.open(out_path) as img:
-            phash = imagehash.phash(img)
-        hashes.append(str(phash))
-
+        out_paths.append(out_path)
         assets.append(
             ExtractedAsset(
                 type="frames",
                 path=str(out_path),
-                fingerprint=fp,
+                input_fingerprint=fp,
                 tool_meta={"ffmpeg_version": version, "index": i, "timestamp": ts},
             )
         )
 
+    hashes = await asyncio.to_thread(_hash_frames, out_paths)
     seq = FrameHashSeq(timestamps=timestamps, hashes=hashes)
     return seq, assets
 

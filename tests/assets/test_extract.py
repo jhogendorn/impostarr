@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -92,7 +93,35 @@ def test_hamming_similarity_empty_sequence_is_zero() -> None:
 async def test_fingerprint_stable_and_changes_with_params(test_video: Path, tmp_path: Path) -> None:
     asset_a = await extract.extract_audio(test_video, tmp_path, offset_s=60.0, duration_s=900.0)
     asset_b = await extract.extract_audio(test_video, tmp_path, offset_s=60.0, duration_s=900.0)
-    assert asset_a.fingerprint == asset_b.fingerprint
+    assert asset_a.input_fingerprint == asset_b.input_fingerprint
 
     asset_c = await extract.extract_audio(test_video, tmp_path, offset_s=5.0, duration_s=900.0)
-    assert asset_c.fingerprint != asset_a.fingerprint
+    assert asset_c.input_fingerprint != asset_a.input_fingerprint
+
+
+async def test_run_timeout_kills_process_and_raises() -> None:
+    start = time.monotonic()
+    with pytest.raises(extract.ExtractError, match="timed out"):
+        await extract._run(["sleep", "5"], timeout_s=0.2)
+    elapsed = time.monotonic() - start
+    assert elapsed < 2.0  # proves the process was killed, not waited out
+
+
+async def test_extract_audio_probe_result_hint_avoids_extra_probe_call(
+    test_video: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe_result = await extract.probe(test_video)
+
+    calls: list[Path] = []
+    real_probe = extract.probe
+
+    async def counting_probe(path: Path) -> extract.ExtractedAsset:
+        calls.append(path)
+        return await real_probe(path)
+
+    monkeypatch.setattr(extract, "probe", counting_probe)
+
+    asset = await extract.extract_audio(test_video, tmp_path, probe_result=probe_result)
+    assert calls == []
+    assert asset.path is not None
+    assert Path(asset.path).exists()
