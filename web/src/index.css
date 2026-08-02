@@ -1,5 +1,14 @@
 @import 'tailwindcss';
 
+/* Root cause of native controls (checkboxes, selects, scrollbars) rendering
+ * as light/white on this dark-only theme: the page never told the browser
+ * it's dark, so it fell back to its light UA styling for form controls.
+ * `accent-color` (set per-input via Tailwind's `accent-*` utilities) still
+ * wins for the checked-state fill/tick regardless of color-scheme. */
+:root {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
 }

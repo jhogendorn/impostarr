@@ -82,11 +82,16 @@ function isCandidate(value: unknown): value is Candidate {
 }
 
 /** Plain-language translation of a normalized candidate's `kind`, so the
- * plugin-results table never leaks raw in_series/cross_series/junk tokens. */
-function describeNormalized(entry: unknown): string {
+ * plugin-results table never leaks raw in_series/cross_series/junk tokens.
+ * `in_series` returns `null` (rendered nowhere) rather than an annotation —
+ * the episode label (SxxEyy) is already shown by the candidate itself, so
+ * "matches this series" would just be a leaked restatement of the internal
+ * tag with no added information. Annotations are kept only where they
+ * carry information the candidate line doesn't already show. */
+function describeNormalized(entry: unknown): string | null {
   if (typeof entry !== 'object' || entry === null) return String(entry)
   const record = entry as Record<string, unknown>
-  if (record.kind === 'in_series') return `matches this series: episodes ${(record.episode_ids as number[]).join(', ')}`
+  if (record.kind === 'in_series') return null
   if (record.kind === 'cross_series') return `different series: ${JSON.stringify(record.external_ids)}`
   if (record.kind === 'junk') return 'no match'
   if (typeof record.reason === 'string') return `could not map: ${record.reason}`
@@ -521,13 +526,20 @@ function InspectModal({ jobId, open, onClose, onChanged, dryRun = false }: Inspe
                           ) : (
                             '—'
                           )}
-                          {Array.isArray(result.normalized) && result.normalized.length > 0 && (
-                            <ul className="mt-1 space-y-0.5 text-slate-500">
-                              {result.normalized.map((entry, i) => (
-                                <li key={i}>{describeNormalized(entry)}</li>
-                              ))}
-                            </ul>
-                          )}
+                          {(() => {
+                            const annotations = Array.isArray(result.normalized)
+                              ? result.normalized.map(describeNormalized).filter((text) => text !== null)
+                              : []
+                            return (
+                              annotations.length > 0 && (
+                                <ul className="mt-1 space-y-0.5 text-slate-500">
+                                  {annotations.map((text, i) => (
+                                    <li key={i}>{text}</li>
+                                  ))}
+                                </ul>
+                              )
+                            )
+                          })()}
                         </td>
                       </tr>
                     ))}

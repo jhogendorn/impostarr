@@ -101,6 +101,34 @@ describe('QueueTable', () => {
     expect(checkbox).toHaveClass('h-4', 'w-4')
   })
 
+  it('the select-all checkbox is disabled when the table has zero rows', () => {
+    render(<QueueTable page={{ total: 0, page_size: 50, items: [] }} {...defaultProps} />)
+
+    expect(screen.getByLabelText('Select all')).toBeDisabled()
+  })
+
+  it('the select-all checkbox is enabled when there are rows', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    expect(screen.getByLabelText('Select all')).toBeEnabled()
+  })
+
+  it('the bulk-action bar slot is always rendered at a fixed height, selected or not (no layout shift)', async () => {
+    const user = userEvent.setup()
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    const bar = screen.getByRole('group', { name: 'Bulk actions' })
+    expect(bar).toHaveClass('h-10')
+    expect(screen.queryByText(/selected/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Select job 1'))
+
+    const barAfterSelect = screen.getByRole('group', { name: 'Bulk actions' })
+    expect(barAfterSelect).toBe(bar) // same node, never unmounted/remounted
+    expect(barAfterSelect).toHaveClass('h-10')
+    expect(screen.getByText('1 selected')).toBeInTheDocument()
+  })
+
   it('changing the page size fires onPageSizeChange', async () => {
     const user = userEvent.setup()
     const onPageSizeChange = vi.fn()
