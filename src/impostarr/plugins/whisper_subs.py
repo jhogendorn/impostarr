@@ -28,12 +28,13 @@ whitespace. Two signals are blended 50/50:
     dampens a false-positive driven by one long shared phrase.
   `ratio = 0.5 * full_ratio + 0.5 * hit_rate`.
 
-Plugin config wiring note: the loader (`plugins/loader.py`) currently
-instantiates plugins with no constructor arguments (`plugin_cls()`); per
-loaded-plugin config is stored on `LoadedPlugin.config` for the caller (a
-pipeline stage) to apply, not injected automatically. This plugin accepts an
-optional `config: WhisperSubsConfig` constructor argument, defaulting to
-`WhisperSubsConfig()`, so callers/tests can supply one explicitly.
+Plugin config wiring: the loader (`plugins/loader.py`) validates
+`Settings.plugins.identifiers["whisper-subs"].options` into `WhisperSubsConfig`
+and passes it to the constructor as `config`, per the `IdentifierPlugin` base
+class's `__init__(self, config=None)` convention (stored on `self.config`).
+This plugin overrides `__init__` only to default `self.config` to
+`WhisperSubsConfig()` when no config is supplied (e.g. direct instantiation
+in tests), rather than leaving it `None`.
 """
 
 from __future__ import annotations
@@ -130,7 +131,7 @@ class WhisperSubsPlugin(IdentifierPlugin):
     config_model = WhisperSubsConfig
 
     def __init__(self, config: WhisperSubsConfig | None = None) -> None:
-        self.config = config or WhisperSubsConfig()
+        super().__init__(config or WhisperSubsConfig())
 
     async def identify(
         self, claimed: ClaimedIdent, assets: AssetBundle, ctx: SeriesContext

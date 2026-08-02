@@ -108,11 +108,22 @@ class SeriesContext(BaseModel):
 
 class IdentifierPlugin(ABC):
     """Base class for identifier plugins, discovered via the
-    `impostarr.identifiers` entry-point group."""
+    `impostarr.identifiers` entry-point group.
+
+    Constructor accepts an optional validated `config` (an instance of the
+    subclass's `config_model`), stored on `self.config`. The loader
+    (`plugins/loader.py`) passes it through when `config_model` is set;
+    plugins with no `config_model` are instantiated bare (`self.config`
+    stays `None`). Subclasses that want a non-`None` default may override
+    `__init__` and call `super().__init__(config or MyConfig())`.
+    """
 
     name: str
     version: str
     config_model: type[BaseModel] | None = None
+
+    def __init__(self, config: BaseModel | None = None) -> None:
+        self.config = config
 
     @abstractmethod
     async def identify(

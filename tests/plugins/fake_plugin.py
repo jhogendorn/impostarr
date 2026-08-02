@@ -50,6 +50,32 @@ class FakePlugin(IdentifierPlugin):
         )
 
 
+class NoConfigFakePlugin(IdentifierPlugin):
+    """An `IdentifierPlugin` with no `config_model` — exercises the loader's
+    bare-instantiation path (`plugin_cls()`, no `config` kwarg)."""
+
+    name = "no-config-fake"
+    version = "1.0.0"
+
+    async def identify(
+        self, claimed: ClaimedIdent, assets: AssetBundle, ctx: SeriesContext
+    ) -> PluginResult:
+        del assets, ctx
+        return PluginResult(
+            status="ok",
+            candidates=[
+                Candidate(
+                    confidence=0.5,
+                    ident=CandidateIdent(
+                        series="claimed", season=claimed.season, episodes=claimed.episodes
+                    ),
+                    numbering="tvdb",
+                    evidence={},
+                )
+            ],
+        )
+
+
 class BrokenFakePlugin:
     """Not a real plugin — used to simulate an entry point whose `load()`
     raises (e.g. a missing third-party dependency)."""

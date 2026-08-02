@@ -9,7 +9,7 @@ from typing import Any
 
 from impostarr.config import PluginConfig, Settings
 from impostarr.plugins import loader
-from tests.plugins.fake_plugin import BrokenFakePlugin, FakePlugin
+from tests.plugins.fake_plugin import BrokenFakePlugin, FakePlugin, NoConfigFakePlugin
 
 
 @dataclass
@@ -117,6 +117,29 @@ def test_loader_skips_non_identifier_plugin_instance(monkeypatch, caplog):
 
     assert loaded == []
     assert any("wrong-type" in record.message for record in caplog.records)
+
+
+def test_loader_passes_validated_config_into_plugin_instance(monkeypatch):
+    _patch_entry_points(monkeypatch, [FakeEntryPoint("fake", FakePlugin)])
+    settings = Settings(
+        plugins={"identifiers": {"fake": PluginConfig(options={"confidence": 0.3})}}
+    )
+
+    loaded = loader.load_plugins(settings)
+
+    assert len(loaded) == 1
+    assert loaded[0].plugin.config.confidence == 0.3
+
+
+def test_loader_instantiates_bare_when_no_config_model(monkeypatch):
+    _patch_entry_points(monkeypatch, [FakeEntryPoint("no-config", NoConfigFakePlugin)])
+    settings = Settings()
+
+    loaded = loader.load_plugins(settings)
+
+    assert len(loaded) == 1
+    assert isinstance(loaded[0].plugin, NoConfigFakePlugin)
+    assert loaded[0].plugin.config is None
 
 
 def test_loader_warns_on_configured_name_with_no_entry_point(monkeypatch, caplog):

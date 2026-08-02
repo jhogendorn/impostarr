@@ -3,11 +3,14 @@
 `load_plugins` discovers `IdentifierPlugin` subclasses via the
 `impostarr.identifiers` entry-point group, applies per-plugin config from
 `Settings.plugins.identifiers` (keyed by entry point name), and skips
-disabled plugins. A single plugin's discovery/instantiation failure (import
-error, bad class, bad options, wrong type) is logged and skipped, never
-crashes the loader. Configured identifier names with no matching discovered
-entry point are logged as a warning (likely a typo or an external plugin
-that failed to install).
+disabled plugins. When a plugin declares `config_model`, its options are
+validated into that model and passed to the constructor as `plugin_cls(config=
+validated_config)`, landing on `IdentifierPlugin.config`; plugins with no
+`config_model` are instantiated bare (`plugin_cls()`). A single plugin's
+discovery/instantiation failure (import error, bad class, bad options, wrong
+type) is logged and skipped, never crashes the loader. Configured identifier
+names with no matching discovered entry point are logged as a warning
+(likely a typo or an external plugin that failed to install).
 
 `ensure_external_plugins` installs pinned external plugin distributions
 (`Settings.plugins.sources`) into a dedicated venv overlay (spec: "installed
@@ -74,7 +77,7 @@ def load_plugins(settings: Settings) -> list[LoadedPlugin]:
         try:
             config_model = getattr(plugin_cls, "config_model", None)
             config = config_model(**options) if config_model is not None else None
-            plugin = plugin_cls()
+            plugin = plugin_cls(config=config) if config_model is not None else plugin_cls()
         except Exception:
             logger.exception("failed to instantiate identifier plugin %r", ep.name)
             continue
