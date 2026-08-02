@@ -250,9 +250,14 @@ ctx) -> PluginResult` and `config_model` class attr.
 
 `loader.py` — discover via entry-point group `impostarr.identifiers`; apply
 per-plugin config/enable/weight from Settings; boot-time installer
-`ensure_external_plugins(specs)` runs `uv pip install` into the running env
-only when the lock-hash of pinned specs (stored in state dir) changes;
-install failure disables that plugin and logs, never crashes the app.
+`ensure_external_plugins(specs, state_dir, venv_dir)` installs into a
+persisted venv overlay (spec: `/config/plugins/venv`) via
+`uv pip install --python <venv>/bin/python`, creating the venv on first use,
+gated by a lock-hash of the pinned specs (stored in state dir); install
+failure disables that plugin and logs, never crashes the app.
+`activate_plugin_overlay(venv_dir)` appends the overlay site-packages to
+sys.path; the composition root (main.py, Task 15) calls it before
+`load_plugins`, and Task 18's entrypoint passes `/config/plugins/venv`.
 
 `normalize.py` — `normalize(candidate, series_ctx) -> NormalizedCandidate
 {episode_ids: list[int]} | Unnormalizable(reason)`. Mapping rules per spec:
