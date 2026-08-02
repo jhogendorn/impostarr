@@ -28,11 +28,15 @@ def resolve_dsn(settings: Settings) -> str:
 def _set_sqlite_pragma(dbapi_connection: Any, connection_record: Any) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 
 def make_engine(dsn: str) -> Engine:
-    engine = create_engine(dsn)
+    # timeout=30: headroom for worker contention on the SQLite file (Task 5's
+    # claim/lease queue) rather than immediate "database is locked" errors.
+    connect_args = {"timeout": 30} if dsn.startswith("sqlite") else {}
+    engine = create_engine(dsn, connect_args=connect_args)
     if dsn.startswith("sqlite"):
         event.listens_for(engine, "connect")(_set_sqlite_pragma)
     return engine

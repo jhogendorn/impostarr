@@ -256,3 +256,95 @@ def test_jobs_status_check_constraint_rejects_invalid_value(engine):
         session.add(job)
         with pytest.raises(IntegrityError):
             session.commit()
+
+
+def test_foreign_key_violation_is_enforced_on_sqlite(engine):
+    # PRAGMA foreign_keys=ON (set on every connection in db.py) must make
+    # SQLite actually enforce FKs — off by default otherwise.
+    session_factory = make_session_factory(engine)
+    with session_factory() as session:
+        job = Job(file_id=999999, status="pending")
+        session.add(job)
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+def test_json_mutable_dict_in_place_mutation_persists(engine):
+    session_factory = make_session_factory(engine)
+    with session_factory() as session:
+        instance = Instance(name="main", url="http://sonarr:8989", backfill_cursor={"a": 1})
+        session.add(instance)
+        session.commit()
+        instance_id = instance.id
+
+    with session_factory() as session:
+        instance = session.get(Instance, instance_id)
+        instance.backfill_cursor["b"] = 2  # in-place mutation, no reassignment
+        session.commit()
+
+    with session_factory() as session:
+        reloaded = session.get(Instance, instance_id)
+        assert reloaded.backfill_cursor == {"a": 1, "b": 2}
+
+
+def test_json_mutable_list_in_place_mutation_persists(engine):
+    session_factory = make_session_factory(engine)
+    with session_factory() as session:
+        instance = Instance(name="main", url="http://sonarr:8989")
+        session.add(instance)
+        session.flush()
+        file = File(
+            instance_id=instance.id,
+            sonarr_path="/tv/Show/S01E01.mkv",
+            local_path="/media/tv/Show/S01E01.mkv",
+            size=1,
+            content_hash="hash",
+            series_id=1,
+            episode_ids=[1],
+            episode_file_id=1,
+            quality={},
+            languages=[],
+        )
+        session.add(file)
+        session.commit()
+        file_id = file.id
+
+    with session_factory() as session:
+        file = session.get(File, file_id)
+        file.episode_ids.append(2)  # in-place mutation, no reassignment
+        session.commit()
+
+    with session_factory() as session:
+        reloaded = session.get(File, file_id)
+        assert reloaded.episode_ids == [1, 2]
+
+
+def test_file_size_accepts_values_beyond_32_bit_int(engine):
+    # File.size is BigInteger — Postgres INTEGER overflows at ~2.1GB, and
+    # media files routinely exceed that.
+    session_factory = make_session_factory(engine)
+    large_size = 8 * 1024**3  # 8 GiB, > 2^31 - 1
+
+    with session_factory() as session:
+        instance = Instance(name="main", url="http://sonarr:8989")
+        session.add(instance)
+        session.flush()
+        file = File(
+            instance_id=instance.id,
+            sonarr_path="/tv/Show/S01E01.mkv",
+            local_path="/media/tv/Show/S01E01.mkv",
+            size=large_size,
+            content_hash="hash",
+            series_id=1,
+            episode_ids=[1],
+            episode_file_id=1,
+            quality={},
+            languages=[],
+        )
+        session.add(file)
+        session.commit()
+        file_id = file.id
+
+    with session_factory() as session:
+        reloaded = session.get(File, file_id)
+        assert reloaded.size == large_size

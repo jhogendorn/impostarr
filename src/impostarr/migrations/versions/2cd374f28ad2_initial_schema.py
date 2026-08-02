@@ -1,8 +1,8 @@
 """initial schema
 
-Revision ID: 8f4629404241
+Revision ID: 2cd374f28ad2
 Revises: 
-Create Date: 2026-08-02 16:49:59.679063
+Create Date: 2026-08-02 16:59:41.851930
 
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = '8f4629404241'
+revision: str = '2cd374f28ad2'
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -26,15 +26,15 @@ def upgrade() -> None:
     sa.Column('url', sa.String(), nullable=False),
     sa.Column('history_watermark', sa.Integer(), nullable=True),
     sa.Column('backfill_cursor', sa.JSON(), nullable=True),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('name')
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_instances')),
+    sa.UniqueConstraint('name', name=op.f('uq_instances_name'))
     )
     op.create_table('files',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('instance_id', sa.Integer(), nullable=False),
     sa.Column('sonarr_path', sa.String(), nullable=False),
     sa.Column('local_path', sa.String(), nullable=False),
-    sa.Column('size', sa.Integer(), nullable=False),
+    sa.Column('size', sa.BigInteger(), nullable=False),
     sa.Column('content_hash', sa.String(), nullable=False),
     sa.Column('series_id', sa.Integer(), nullable=False),
     sa.Column('episode_ids', sa.JSON(), nullable=False),
@@ -46,8 +46,8 @@ def upgrade() -> None:
     sa.Column('source_title', sa.String(), nullable=True),
     sa.Column('indexer', sa.String(), nullable=True),
     sa.Column('guid', sa.String(), nullable=True),
-    sa.ForeignKeyConstraint(['instance_id'], ['instances.id'], ),
-    sa.PrimaryKeyConstraint('id'),
+    sa.ForeignKeyConstraint(['instance_id'], ['instances.id'], name=op.f('fk_files_instance_id_instances')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_files')),
     sa.UniqueConstraint('instance_id', 'episode_file_id', name='uq_files_instance_episode_file')
     )
     op.create_table('assets',
@@ -59,9 +59,9 @@ def upgrade() -> None:
     sa.Column('input_fingerprint', sa.String(), nullable=False),
     sa.Column('tool_meta', sa.JSON(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("type IN ('probe', 'audio', 'subs', 'frames', 'transcript')", name='ck_assets_type'),
-    sa.ForeignKeyConstraint(['file_id'], ['files.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.CheckConstraint("type IN ('probe', 'audio', 'subs', 'frames', 'transcript')", name=op.f('ck_assets_type_valid')),
+    sa.ForeignKeyConstraint(['file_id'], ['files.id'], name=op.f('fk_assets_file_id_files')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_assets'))
     )
     op.create_table('frame_hashes',
     sa.Column('id', sa.Integer(), nullable=False),
@@ -71,8 +71,8 @@ def upgrade() -> None:
     sa.Column('timestamps', sa.JSON(), nullable=False),
     sa.Column('hashes', sa.JSON(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['file_id'], ['files.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.ForeignKeyConstraint(['file_id'], ['files.id'], name=op.f('fk_frame_hashes_file_id_files')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_frame_hashes'))
     )
     op.create_table('jobs',
     sa.Column('id', sa.Integer(), nullable=False),
@@ -84,10 +84,11 @@ def upgrade() -> None:
     sa.Column('heartbeat_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("status IN ('hold', 'pending', 'active', 'matched', 'quarantine', 'inconclusive', 'error', 'remediated')", name='ck_jobs_status'),
-    sa.ForeignKeyConstraint(['file_id'], ['files.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.CheckConstraint("status IN ('hold', 'pending', 'active', 'matched', 'quarantine', 'inconclusive', 'error', 'remediated')", name=op.f('ck_jobs_status_valid')),
+    sa.ForeignKeyConstraint(['file_id'], ['files.id'], name=op.f('fk_jobs_file_id_files')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_jobs'))
     )
+    op.create_index('ix_jobs_status_created_at', 'jobs', ['status', 'created_at'], unique=False)
     op.create_table('phash_corpus',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('frame_hash_id', sa.Integer(), nullable=False),
@@ -97,9 +98,9 @@ def upgrade() -> None:
     sa.Column('confidence', sa.Float(), nullable=False),
     sa.Column('source', sa.String(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("source IN ('auto', 'human')", name='ck_phash_corpus_source'),
-    sa.ForeignKeyConstraint(['frame_hash_id'], ['frame_hashes.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.CheckConstraint("source IN ('auto', 'human')", name=op.f('ck_phash_corpus_source_valid')),
+    sa.ForeignKeyConstraint(['frame_hash_id'], ['frame_hashes.id'], name=op.f('fk_phash_corpus_frame_hash_id_frame_hashes')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_phash_corpus'))
     )
     op.create_table('plugin_results',
     sa.Column('id', sa.Integer(), nullable=False),
@@ -112,9 +113,9 @@ def upgrade() -> None:
     sa.Column('normalized', sa.JSON(), nullable=False),
     sa.Column('input_fingerprint', sa.String(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("status IN ('ok', 'abstain', 'error')", name='ck_plugin_results_status'),
-    sa.ForeignKeyConstraint(['job_id'], ['jobs.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.CheckConstraint("status IN ('ok', 'abstain', 'error')", name=op.f('ck_plugin_results_status_valid')),
+    sa.ForeignKeyConstraint(['job_id'], ['jobs.id'], name=op.f('fk_plugin_results_job_id_jobs')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_plugin_results'))
     )
     op.create_index('ix_plugin_results_input_fingerprint', 'plugin_results', ['input_fingerprint'], unique=False)
     op.create_table('verdicts',
@@ -128,9 +129,9 @@ def upgrade() -> None:
     sa.Column('source', sa.String(), nullable=False),
     sa.Column('human_ident', sa.JSON(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("source IN ('auto', 'human')", name='ck_verdicts_source'),
-    sa.ForeignKeyConstraint(['job_id'], ['jobs.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.CheckConstraint("source IN ('auto', 'human')", name=op.f('ck_verdicts_source_valid')),
+    sa.ForeignKeyConstraint(['job_id'], ['jobs.id'], name=op.f('fk_verdicts_job_id_jobs')),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_verdicts'))
     )
     # ### end Alembic commands ###
 
@@ -141,6 +142,7 @@ def downgrade() -> None:
     op.drop_index('ix_plugin_results_input_fingerprint', table_name='plugin_results')
     op.drop_table('plugin_results')
     op.drop_table('phash_corpus')
+    op.drop_index('ix_jobs_status_created_at', table_name='jobs')
     op.drop_table('jobs')
     op.drop_table('frame_hashes')
     op.drop_table('assets')
