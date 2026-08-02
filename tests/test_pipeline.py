@@ -14,7 +14,7 @@ from impostarr.assets import extract
 from impostarr.assets.transcribe import NullTranscriber
 from impostarr.config import Settings, SonarrInstance, Thresholds
 from impostarr.db import init_db, make_session_factory
-from impostarr.jobs import claim_next, reap_stale
+from impostarr.jobs import LeaseLost, claim_next, reap_stale, release
 from impostarr.models import File, Instance, Job, PhashCorpusEntry, Verdict
 from impostarr.models import PluginResult as PluginResultRow
 from impostarr.pipeline import PipelineDeps, process_job
@@ -29,7 +29,7 @@ from impostarr.plugins.base import (
 )
 from impostarr.plugins.loader import LoadedPlugin
 from impostarr.sonarr import SonarrClient
-from impostarr.worker import WorkerPool
+from impostarr.worker import WorkerPool, _mint_worker_id
 
 BASE_URL = "http://sonarr.test:8989"
 API_URL = f"{BASE_URL}/api/v3"
@@ -559,6 +559,101 @@ async def test_worker_pool_processes_seeded_job_end_to_end(tmp_path, session_fac
         await deps.sonarr_client.close()
 
     assert get_job(session_factory, job_id).status == "matched"
+
+
+@respx.mock
+async def test_stop_cancels_in_flight_job_promptly(tmp_path, session_factory, monkeypatch):
+    """Regression: stop() must not hang. Cancelling the worker-loop task
+    also cancels the process_job task it's awaiting (task cancellation
+    propagates to whatever a task is currently suspended on), and that
+    CancelledError must NOT be swallowed as if it were a lease-lost
+    cancellation, or the worker-loop task never actually finishes and
+    stop()'s gather() waits forever."""
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        job.status = "pending"
+        job.claimed_by = None
+        job.claimed_at = None
+        job.heartbeat_at = None
+        session.commit()
+
+    started = asyncio.Event()
+
+    async def slow_process_job(job_id, deps):
+        started.set()
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr("impostarr.worker.process_job", slow_process_job)
+
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(session_factory, tmp_path, [loaded(plugin)])
+    pool = WorkerPool({"main": deps}, {}, pool_size=1, lease_timeout_s=5.0)
+
+    await pool.start()
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        tasks_snapshot = list(pool._tasks)
+
+        await asyncio.wait_for(pool.stop(), timeout=2.0)
+    finally:
+        await deps.sonarr_client.close()
+
+    assert all(t.done() for t in tasks_snapshot)
+
+
+def test_shared_pool_worker_ids_prevent_lease_clobber_across_tasks(tmp_path, session_factory):
+    """Regression: two worker-loop tasks in one pool must use distinct
+    worker_ids (as minted by WorkerPool.start() via _mint_worker_id), or the
+    Task 5 clobber reopens *inside* a single pool: task A claims, stalls
+    past the lease timeout, gets reaped, task B reclaims the same job — with
+    a shared worker_id, A's later release() would pass the claimed_by fence
+    and clobber B. Driven directly against jobs.py with the pool's own
+    id-minting scheme, per the escalation note."""
+    content = b"x"
+    local_path = tmp_path / "media.mkv"
+    local_path.write_bytes(content)
+    with session_factory() as session:
+        instance = Instance(name="main", url=BASE_URL)
+        session.add(instance)
+        session.flush()
+        file = File(
+            instance_id=instance.id, sonarr_path="/tv/x.mkv", local_path=str(local_path),
+            size=len(content), content_hash="x", series_id=1, episode_ids=[1],
+            episode_file_id=1, quality={}, languages=[],
+        )
+        session.add(file)
+        session.flush()
+        job = Job(file_id=file.id, status="pending")
+        session.add(job)
+        session.commit()
+        job_id = job.id
+
+    worker_id_a = _mint_worker_id(WORKER_ID, 0)
+    worker_id_b = _mint_worker_id(WORKER_ID, 1)
+    assert worker_id_a != worker_id_b
+
+    with session_factory() as session:
+        job_a = claim_next(session, worker_id_a)
+        assert job_a is not None
+        job_a.heartbeat_at = datetime.now(UTC) - timedelta(seconds=120)
+        session.commit()
+        assert reap_stale(session, lease_timeout_s=60) == 1
+
+    with session_factory() as session:
+        job_b = claim_next(session, worker_id_b)
+        assert job_b.id == job_id
+        assert job_b.claimed_by == worker_id_b
+
+    with session_factory() as session:
+        stale_handle = session.get(Job, job_id)
+        with pytest.raises(LeaseLost):
+            release(session, stale_handle, "matched", worker_id_a)
+
+    final = get_job(session_factory, job_id)
+    assert final.claimed_by == worker_id_b
+    assert final.status == "active"
 
 
 # -- stale lease reap --------------------------------------------------------

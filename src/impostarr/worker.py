@@ -3,19 +3,40 @@ lease reaper, and per-instance discovery scheduling all live here as thin
 glue; the actual pipeline logic is in `pipeline.py` and the queue mechanics
 are in `jobs.py`.
 
-Worker identity: each `PipelineDeps` carries a fixed `worker_id` for its
-instance. All worker-loop tasks that claim/heartbeat/release jobs for that
-instance share that one `worker_id` (it is not per-asyncio-task) — the
-`jobs.py` lease fencing only needs `worker_id` to be *this pool's* identity
-for a job, not unique per concurrent coroutine; `claim_next`'s atomic UPDATE
-already guarantees two coroutines can never claim the same job regardless of
-whether they pass the same `worker_id` string.
+Worker identity: `start()` mints a distinct `worker_id` per worker-loop
+task (`_mint_worker_id(base, n)`), via a shallow `dataclasses.replace()` of
+each instance's `PipelineDeps` with only `worker_id` overridden — the
+`session_factory`/`sonarr_client`/`plugins`/`series_cache` (+ its lock)
+stay shared references across the copies, so the in-process series-context
+cache is still pooled per instance, not fragmented per task. Sharing one
+`worker_id` across concurrent worker-loop tasks would reopen the Task 5
+clobber *inside* a single pool: task A claims a job, stalls past the lease
+timeout, the reaper requeues it, task B (same `worker_id`) reclaims it, and
+A's later heartbeat/release would then pass the `claimed_by` fence — meant
+to catch exactly this — and clobber B, because the fence can't tell A and B
+apart. Distinct per-task ids close that gap; `claim_next`'s atomic UPDATE
+already prevents two tasks (same or different ids) from claiming the same
+job in the first place.
+
+Shutdown cancellation: `_run_job` awaits `process_task` directly, so
+cancelling the enclosing worker-loop task also cancels `process_task` (task
+cancellation propagates to whatever a task is currently awaiting) and
+raises `CancelledError` at that same `await` point — indistinguishable by
+type from the `CancelledError` `_heartbeat_loop` triggers on `LeaseLost`.
+The two must be told apart: swallowing the lease-lost cancellation is
+correct (the worker loop should carry on to its next job), but swallowing
+an external `stop()` cancellation would leave the worker-loop task running
+forever, and `stop()`'s `gather()` would hang waiting for it to finish. The
+`lease_lost` event, set only by `_heartbeat_loop` right before it cancels
+`process_task`, disambiguates: unset means the cancellation came from
+outside, so `_run_job` re-raises to let the worker-loop task actually die.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 from impostarr import jobs
 from impostarr.discovery import Discoverer
@@ -27,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 POLL_EMPTY_SLEEP_S = 5.0
 REAP_INTERVAL_S = 60.0
+
+
+def _mint_worker_id(base_worker_id: str, task_index: int) -> str:
+    return f"{base_worker_id}-{task_index}"
 
 
 class WorkerPool:
@@ -45,7 +70,13 @@ class WorkerPool:
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
-        self._tasks = [asyncio.create_task(self._worker_loop()) for _ in range(self.pool_size)]
+        self._tasks = []
+        for n in range(self.pool_size):
+            per_task_deps = {
+                name: replace(deps, worker_id=_mint_worker_id(deps.worker_id, n))
+                for name, deps in self.deps_per_instance.items()
+            }
+            self._tasks.append(asyncio.create_task(self._worker_loop(per_task_deps)))
         self._tasks.append(asyncio.create_task(self._reaper_loop()))
         for name, discoverer in self.discoverers.items():
             interval = self.deps_per_instance[name].instance_cfg.poll_interval_s
@@ -59,8 +90,8 @@ class WorkerPool:
 
     # -- worker loop -----------------------------------------------------
 
-    async def _worker_loop(self) -> None:
-        instance_names = list(self.deps_per_instance)
+    async def _worker_loop(self, deps_per_instance: dict[str, PipelineDeps]) -> None:
+        instance_names = list(deps_per_instance)
         idx = 0
         while True:
             if not instance_names:
@@ -70,7 +101,7 @@ class WorkerPool:
             for _ in range(len(instance_names)):
                 name = instance_names[idx]
                 idx = (idx + 1) % len(instance_names)
-                deps = self.deps_per_instance[name]
+                deps = deps_per_instance[name]
                 with deps.session_factory() as session:
                     job = await asyncio.to_thread(jobs.claim_next, session, deps.worker_id)
                 if job is not None:
@@ -82,11 +113,21 @@ class WorkerPool:
 
     async def _run_job(self, job_id: int, deps: PipelineDeps) -> None:
         process_task = asyncio.create_task(process_job(job_id, deps))
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id, deps, process_task))
+        lease_lost = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(job_id, deps, process_task, lease_lost)
+        )
         try:
             await process_task
         except asyncio.CancelledError:
-            logger.warning("job %s processing cancelled (lease lost)", job_id)
+            if lease_lost.is_set():
+                logger.warning("job %s processing cancelled (lease lost)", job_id)
+            else:
+                # Cancellation came from outside (pool shutdown, not a lost
+                # lease) — must propagate so the enclosing worker-loop task
+                # actually finishes instead of looping forever.
+                logger.warning("job %s processing cancelled (pool shutting down)", job_id)
+                raise
         except Exception:
             logger.exception("job %s failed unexpectedly", job_id)
         finally:
@@ -94,7 +135,11 @@ class WorkerPool:
             await asyncio.gather(heartbeat_task, return_exceptions=True)
 
     async def _heartbeat_loop(
-        self, job_id: int, deps: PipelineDeps, process_task: asyncio.Task
+        self,
+        job_id: int,
+        deps: PipelineDeps,
+        process_task: asyncio.Task,
+        lease_lost: asyncio.Event,
     ) -> None:
         interval = self.lease_timeout_s / 3
         while True:
@@ -105,6 +150,7 @@ class WorkerPool:
                     await asyncio.to_thread(jobs.heartbeat, session, job, deps.worker_id)
                 except LeaseLost:
                     logger.warning("lease lost for job %s; cancelling processing", job_id)
+                    lease_lost.set()
                     process_task.cancel()
                     return
 
