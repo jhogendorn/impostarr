@@ -159,8 +159,8 @@ plugin set with configured weights `w_i` and reported confidences `c_i`.
   every applicable plugin must score the claimed ident.
 - `S_alt` = max `S(c)` over non-claimed candidates reported by at least one
   identifying plugin. An alternate is **credible** when
-  `S_alt ≥ alt_threshold` AND `S_alt − S_claimed ≥ alt_margin` (both
-  configurable). Plugin authors are responsible for calibrating raw signal to
+  `S_alt ≥ thresholds.alt` AND `S_alt − S_claimed ≥ thresholds.alt_margin`
+  (both configurable). Plugin authors are responsible for calibrating raw signal to
   0–1; per-plugin weight is the operator's tuning knob.
 
 Routing (thresholds user-tunable; examples only):
@@ -168,16 +168,16 @@ Routing (thresholds user-tunable; examples only):
 | Condition | Outcome |
 |---|---|
 | `A` empty (all plugins abstained/errored — no evidence either way) | `inconclusive` — never auto-acted |
-| `S_claimed ≥ quarantine_threshold` (e.g. 0.8) | `matched` |
-| `auto_threshold ≤ S_claimed < quarantine_threshold` | `quarantine` (human review) |
-| `S_claimed < auto_threshold` (e.g. 0.4) | remediation, verb by credible-alternate rule |
+| `S_claimed ≥ thresholds.quarantine` (e.g. 0.8) | `matched` |
+| `thresholds.auto ≤ S_claimed < thresholds.quarantine` | `quarantine` (human review) |
+| `S_claimed < thresholds.auto` (e.g. 0.4) | remediation, verb by credible-alternate rule |
 
-Auto-remediation additionally requires `|A| ≥ auto_min_evidence` (default 2 —
+Auto-remediation additionally requires `|A| ≥ thresholds.auto_min_evidence` (default 2 —
 both PoC plugins); below that, the item routes to `quarantine` with the
 proposed action attached instead of acting. This separates negative evidence
 (plugins looked and disagreed with the label) from thin evidence.
 
-Remediation verb selection when `S_claimed < auto_threshold`:
+Remediation verb selection when `S_claimed < thresholds.auto`:
 
 - **Credible same-series alternate** → **remap** (choreography below). Never
   blocklists; this prevents refetch/blacklist loops caused by scene-vs-TVDB
@@ -238,8 +238,11 @@ ranks.)
   distance + alignment threshold) is the comparison primitive; a single
   whole-file hash is too weak at episode scale.
 - A corpus record `(frame_hash_seq_ref, external_ids, season, episodes,
-  confidence, source)` is stored **only when verdict confidence ≥
-  `phash_store_threshold`**; human verdicts are highest-signal.
+  confidence, source)` is stored **only when the verdict carries a positive
+  normalized ident with confidence ≥ `thresholds.phash_store`** — a match, a
+  remap target, or a human "is X". Negative verdicts ("isn't X",
+  replace-with-no-alternate) remain gold in `verdicts` but create no corpus
+  record. Human verdicts are highest-signal.
   `external_ids` is a JSON map (`{tvdb, tmdb, imdb, mal, anilist, ...}`)
   populated from what Sonarr exposes for the series — Sonarr does not expose
   AniDB ids, so AniDB mapping is a future provider, not a stored claim.
@@ -270,7 +273,9 @@ Tables (key fields, not exhaustive):
 - `plugin_results` — plugin name/version, status, raw candidate array,
   normalized candidates, and an **input fingerprint** (hash of plugin
   version, plugin config, model identifiers, asset hashes, reference-sub
-  cache state) — results are reused only on fingerprint match.
+  cache state, claimed ident, and the relevant series context — external ids
+  + episode list including scene numbering) — results are reused only on
+  fingerprint match.
 - `verdicts` — S_claimed, S_alt, routing outcome, remediation steps +
   results, human overrides, `source: auto|human`.
 - `frame_hashes` / `phash_corpus` — as described in the flywheel section.
@@ -291,8 +296,9 @@ Contents:
 - `sonarr[]`: url, api key, container↔sonarr path mappings, staging dir,
   watch-dir path filters, poll interval, per-instance enable flags for auto
   verbs.
-- `thresholds`: quarantine, auto, alt_threshold, alt_margin,
-  auto_min_evidence, phash_store.
+- `thresholds`: `quarantine`, `auto`, `alt`, `alt_margin`,
+  `auto_min_evidence`, `phash_store` — the canonical key names used
+  throughout this spec as `thresholds.<key>`.
 - `plugins`: external pip specs (pinned), per-plugin enable + weight +
   plugin-specific config (TMDB key; LLM provider/base-url/model/key).
 - `refsubs`: OpenSubtitles credentials, quota budget, cache dir, manual SRT
