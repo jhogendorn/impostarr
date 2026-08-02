@@ -16,10 +16,12 @@ Mapping rules (spec "Plugin contract" / "Core normalizes..."):
   no separate tmdb-ordered episode list is available to map against).
 - numbering "absolute" -> match against `absolute_episode_number`; the
   candidate's `season` is ignored (absolute numbering is season-independent).
-- numbering "scene" -> match against `(scene_season_number,
-  scene_episode_number)`, falling back independently per-field to
-  `(season_number, episode_number)` when the scene field is absent (`None`)
-  on a given episode.
+- numbering "scene" -> three-tier precedence per episode number: exact
+  `(scene_season_number, scene_episode_number)` match first; then
+  `scene_absolute_episode_number` (season-independent, like absolute
+  numbering); then plain `(season_number, episode_number)` as the final
+  fallback. See `_match_scene` for why this replaced a naive per-field
+  fallback.
 - Multi-episode idents: every number in `ident.episodes` must resolve to an
   episode id; the result is the union of the resolved ids. If any number
   fails to resolve, the whole candidate is `Unnormalizable` (never a partial
@@ -74,14 +76,27 @@ def _match_absolute(episodes: list[EpisodeDict], season: int, epnum: int) -> int
 
 
 def _match_scene(episodes: list[EpisodeDict], season: int, epnum: int) -> int | None:
+    """Three-tier precedence, each tier a full pass over `episodes`:
+
+    1. `(scene_season_number, scene_episode_number) == (season, epnum)`.
+    2. `scene_absolute_episode_number == epnum` (season-independent).
+    3. plain `(season_number, episode_number) == (season, epnum)`.
+
+    Earlier tiers were a per-field independent fallback (missing
+    scene_season_number fell back to season_number independently of
+    scene_episode_number), but TheXEM populates the scene season/episode
+    pair together in practice — it's never partially set — so an explicit
+    three-tier precedence is both more correct and easier to reason about
+    than substituting fields individually.
+    """
     for ep in episodes:
-        scene_season = ep.get("scene_season_number")
-        effective_season = scene_season if scene_season is not None else ep.get("season_number")
-        scene_episode = ep.get("scene_episode_number")
-        effective_episode = (
-            scene_episode if scene_episode is not None else ep.get("episode_number")
-        )
-        if effective_season == season and effective_episode == epnum:
+        if ep.get("scene_season_number") == season and ep.get("scene_episode_number") == epnum:
+            return ep["id"]
+    for ep in episodes:
+        if ep.get("scene_absolute_episode_number") == epnum:
+            return ep["id"]
+    for ep in episodes:
+        if ep.get("season_number") == season and ep.get("episode_number") == epnum:
             return ep["id"]
     return None
 

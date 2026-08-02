@@ -8,7 +8,7 @@ from .base import (
     PluginResult,
     SeriesContext,
 )
-from .loader import LoadedPlugin, ensure_external_plugins, load_plugins
+from .loader import LoadedPlugin, activate_plugin_overlay, ensure_external_plugins, load_plugins
 
 __all__ = [
     "AssetBundle",
@@ -20,6 +20,7 @@ __all__ = [
     "LoadedPlugin",
     "PluginResult",
     "SeriesContext",
+    "activate_plugin_overlay",
     "ensure_external_plugins",
     "load_plugins",
 ]

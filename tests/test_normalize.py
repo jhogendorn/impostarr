@@ -26,6 +26,7 @@ def ep(
     absolute_episode_number: int | None = None,
     scene_season_number: int | None = None,
     scene_episode_number: int | None = None,
+    scene_absolute_episode_number: int | None = None,
 ) -> dict:
     return {
         "id": id,
@@ -34,6 +35,7 @@ def ep(
         "absolute_episode_number": absolute_episode_number,
         "scene_season_number": scene_season_number,
         "scene_episode_number": scene_episode_number,
+        "scene_absolute_episode_number": scene_absolute_episode_number,
     }
 
 
@@ -89,6 +91,41 @@ def test_scene_fallback_to_plain_when_absent():
     result = normalize(c, ctx, CLAIMED)
 
     assert result == InSeriesCandidate(episode_ids=frozenset({101}))
+
+
+def test_scene_absolute_hit():
+    ctx = make_ctx([ep(101, 1, 1, scene_absolute_episode_number=5)])  # no scene season/episode
+    c = candidate(season=1, episodes=[5], numbering="scene")
+
+    result = normalize(c, ctx, CLAIMED)
+
+    assert result == InSeriesCandidate(episode_ids=frozenset({101}))
+
+
+def test_scene_precedence_pair_beats_absolute_and_plain():
+    # ep 101 would match tier 2 (scene_absolute_episode_number == 5).
+    ep101 = ep(101, 1, 1, scene_absolute_episode_number=5)
+    # ep 102 matches tier 1 (scene season/episode pair) and must win.
+    ep102 = ep(102, 1, 6, scene_season_number=1, scene_episode_number=5)
+    ctx = make_ctx([ep101, ep102])
+    c = candidate(season=1, episodes=[5], numbering="scene")
+
+    result = normalize(c, ctx, CLAIMED)
+
+    assert result == InSeriesCandidate(episode_ids=frozenset({102}))
+
+
+def test_scene_precedence_absolute_beats_plain():
+    # ep 101 matches tier 3 (plain season/episode) for epnum 5.
+    ep101 = ep(101, 1, 5)
+    # ep 102 matches tier 2 (scene_absolute_episode_number) for epnum 5 and must win.
+    ep102 = ep(102, 1, 6, scene_absolute_episode_number=5)
+    ctx = make_ctx([ep101, ep102])
+    c = candidate(season=1, episodes=[5], numbering="scene")
+
+    result = normalize(c, ctx, CLAIMED)
+
+    assert result == InSeriesCandidate(episode_ids=frozenset({102}))
 
 
 def test_tmdb_treated_as_tvdb():
