@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -105,6 +106,17 @@ def get_remediation_log(session_factory, job_id: int) -> list[dict]:
     with session_factory() as session:
         verdict = session.query(Verdict).filter_by(job_id=job_id).one()
         return verdict.remediation_log
+
+
+def seed_remediation_log(session_factory, job_id: int) -> None:
+    """Pre-populate the job's verdict.remediation_log, simulating a prior
+    interrupted remediation attempt."""
+    with session_factory() as session:
+        verdict = session.query(Verdict).filter_by(job_id=job_id).one()
+        verdict.remediation_log.append(
+            {"step": "delete_episode_file", "ok": True, "detail": "prior attempt", "ts": "x"}
+        )
+        session.commit()
 
 
 def episode_json(id_, *, season_number=1, episode_number=1, episode_file_id=0, has_file=True):
@@ -422,7 +434,7 @@ async def test_remap_cross_device_fallback_uses_copy(tmp_path, session_factory, 
     respx.post(f"{API_URL}/command").mock(return_value=httpx.Response(200, json={}))
 
     def fake_link(*args, **kwargs):
-        raise OSError(18, "Invalid cross-device link")  # errno.EXDEV == 18 on Linux/macOS
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
 
     monkeypatch.setattr(os, "link", fake_link)
 
@@ -476,3 +488,208 @@ async def test_replace_raises_without_verdict_row(tmp_path, session_factory):
         remediator = Remediator(client, cfg, session_factory)
         with pytest.raises(ValueError):
             await remediator.replace(job, WORKER_ID)
+
+
+# -- interruption guard ---------------------------------------------------
+
+
+@respx.mock
+async def test_replace_interruption_guard_quarantines_with_zero_api_calls(
+    tmp_path, session_factory
+):
+    cfg = make_instance_cfg(tmp_path)
+    job_id, _ = make_active_job(session_factory, tmp_path, history_id=500)
+    seed_remediation_log(session_factory, job_id)
+
+    # No routes mocked at all: any API call would raise a respx "not mocked"
+    # error, which would fail the test just as surely as an explicit count
+    # assertion.
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory)
+        await remediator.replace(job, WORKER_ID)
+
+    assert respx.calls.call_count == 0
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 2  # seeded entry + guard entry
+    assert log[-1]["ok"] is False
+    assert "interrupted" in log[-1]["detail"]
+    assert get_job_status(session_factory, job_id) == "quarantine"
+
+
+@respx.mock
+async def test_remap_interruption_guard_quarantines_with_zero_api_calls(
+    tmp_path, session_factory
+):
+    cfg = make_instance_cfg(tmp_path)
+    job_id, _ = make_active_job(
+        session_factory, tmp_path, episode_ids=[555], series_id=42, episode_file_id=9001
+    )
+    seed_remediation_log(session_factory, job_id)
+    target_ids = frozenset({777})
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory)
+        await remediator.remap(job, target_ids, WORKER_ID)
+
+    assert respx.calls.call_count == 0
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 2
+    assert log[-1]["ok"] is False
+    assert "interrupted" in log[-1]["detail"]
+    assert get_job_status(session_factory, job_id) == "quarantine"
+
+
+# -- partial episode-id resolution -----------------------------------------
+
+
+@respx.mock
+async def test_remap_partial_episode_resolution_refuses_with_zero_mutating_calls(
+    tmp_path, session_factory
+):
+    cfg = make_instance_cfg(tmp_path)
+    job_id, _ = make_active_job(
+        session_factory, tmp_path, episode_ids=[555], series_id=42, episode_file_id=9001
+    )
+    # 9999 is not present in the episodes response below -> unresolvable.
+    target_ids = frozenset({777, 9999})
+
+    episodes_route = respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                episode_json(555, episode_number=2, episode_file_id=9001, has_file=True),
+                episode_json(
+                    777, season_number=1, episode_number=3, episode_file_id=0, has_file=False
+                ),
+            ],
+        )
+    )
+    delete_route = respx.delete(f"{API_URL}/episodefile/9001")
+    manualimport_route = respx.get(f"{API_URL}/manualimport")
+    command_route = respx.post(f"{API_URL}/command")
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory)
+        await remediator.remap(job, target_ids, WORKER_ID)
+
+    assert episodes_route.called
+    assert not delete_route.called
+    assert not manualimport_route.called
+    assert not command_route.called
+
+    staged_path = Path(cfg.staging_dir) / "S01E03.mkv"
+    assert not staged_path.exists()
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 1
+    assert log[0]["ok"] is False
+    assert "9999" in log[0]["detail"]
+    assert get_job_status(session_factory, job_id) == "quarantine"
+
+
+# -- staging directory / hardlink error handling ---------------------------
+
+
+@respx.mock
+async def test_remap_hardlink_non_exdev_failure_includes_staging_path(
+    tmp_path, session_factory, monkeypatch
+):
+    cfg = make_instance_cfg(tmp_path)
+    job_id, _ = make_active_job(
+        session_factory, tmp_path, episode_ids=[555], series_id=42, episode_file_id=9001
+    )
+    target_ids = frozenset({777})
+
+    respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                episode_json(555, episode_number=2, episode_file_id=9001, has_file=True),
+                episode_json(
+                    777, season_number=1, episode_number=3, episode_file_id=0, has_file=False
+                ),
+            ],
+        )
+    )
+    delete_route = respx.delete(f"{API_URL}/episodefile/9001")
+
+    def fake_link(*args, **kwargs):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(os, "link", fake_link)
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory)
+        await remediator.remap(job, target_ids, WORKER_ID)
+
+    assert not delete_route.called
+
+    staged_path = Path(cfg.staging_dir) / "S01E03.mkv"
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 1
+    assert log[0]["ok"] is False
+    assert str(staged_path) in log[0]["detail"]
+    assert get_job_status(session_factory, job_id) == "quarantine"
+
+
+@respx.mock
+async def test_remap_copy2_failure_after_exdev_quarantines_with_staging_path(
+    tmp_path, session_factory, monkeypatch
+):
+    cfg = make_instance_cfg(tmp_path)
+    job_id, _ = make_active_job(
+        session_factory, tmp_path, episode_ids=[555], series_id=42, episode_file_id=9001
+    )
+    target_ids = frozenset({777})
+
+    respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                episode_json(555, episode_number=2, episode_file_id=9001, has_file=True),
+                episode_json(
+                    777, season_number=1, episode_number=3, episode_file_id=0, has_file=False
+                ),
+            ],
+        )
+    )
+    delete_route = respx.delete(f"{API_URL}/episodefile/9001")
+
+    def fake_link(*args, **kwargs):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    def fake_copy2(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "link", fake_link)
+    monkeypatch.setattr("impostarr.remediate.shutil.copy2", fake_copy2)
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client() as client:
+        remediator = Remediator(client, cfg, session_factory)
+        await remediator.remap(job, target_ids, WORKER_ID)
+
+    assert not delete_route.called
+
+    staged_path = Path(cfg.staging_dir) / "S01E03.mkv"
+    assert not staged_path.exists()
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 1
+    assert log[0]["ok"] is False
+    assert str(staged_path) in log[0]["detail"]
+    assert get_job_status(session_factory, job_id) == "quarantine"

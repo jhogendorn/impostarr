@@ -9,6 +9,18 @@ step runs, so a crash mid-sequence leaves an accurate partial log. A step
 failure (`SonarrError`) stops the sequence and releases the job to
 `quarantine` via `jobs.release` (worker-fenced; `LeaseLost` propagates to the
 caller). Full success releases the job to `remediated`.
+
+Crash-retry semantics (decided for the PoC): remediation is non-resumable.
+`reap_stale` (Task 5) will happily requeue an `active` job whose worker died
+mid-remediation back to `pending`, and a future worker could then re-claim it
+and call `replace`/`remap` again — but re-running Sonarr side effects
+(blocklist, delete, search/import) against a job that already made partial
+progress would be silently wrong, not merely redundant. Both methods guard
+against this: if `verdict.remediation_log` is already non-empty on entry,
+no steps are (re-)run and no API calls are made — a single log entry
+records the interruption and the job is quarantined for operator review.
+This converts a reap-and-redrive into a clean quarantine instead of a
+misleading double-execution.
 """
 
 from __future__ import annotations
@@ -85,6 +97,17 @@ class Remediator:
             file = session.get(File, db_job.file_id)
             verdict = _latest_verdict(session, db_job.id)
 
+            if verdict.remediation_log:
+                _log_step(
+                    session,
+                    verdict,
+                    "interruption_guard",
+                    False,
+                    "remediation previously interrupted; operator review required",
+                )
+                jobs.release(session, db_job, "quarantine", worker_id)
+                return
+
             if file.history_id is not None:
                 try:
                     await self.client.mark_history_failed(file.history_id)
@@ -154,11 +177,36 @@ class Remediator:
             file = session.get(File, db_job.file_id)
             verdict = _latest_verdict(session, db_job.id)
 
+            if verdict.remediation_log:
+                _log_step(
+                    session,
+                    verdict,
+                    "interruption_guard",
+                    False,
+                    "remediation previously interrupted; operator review required",
+                )
+                jobs.release(session, db_job, "quarantine", worker_id)
+                return
+
             episodes = await self.client.episodes(file.series_id)
             target_episodes = sorted(
                 (ep for ep in episodes if ep.id in target_episode_ids),
                 key=lambda ep: ep.episode_number,
             )
+            resolved_ids = {ep.id for ep in target_episodes}
+            missing_ids = target_episode_ids - resolved_ids
+            if missing_ids:
+                _log_step(
+                    session,
+                    verdict,
+                    "episode_resolution",
+                    False,
+                    f"refusing remap: target episode ids not found in series "
+                    f"{file.series_id}: {sorted(missing_ids)}",
+                )
+                jobs.release(session, db_job, "quarantine", worker_id)
+                return
+
             occupied = [ep for ep in target_episodes if ep.has_file]
             if occupied:
                 _log_step(
@@ -171,16 +219,6 @@ class Remediator:
                 )
                 jobs.release(session, db_job, "quarantine", worker_id)
                 return
-            if not target_episodes:
-                _log_step(
-                    session,
-                    verdict,
-                    "occupied_check",
-                    False,
-                    f"no matching episodes found for target ids {sorted(target_episode_ids)}",
-                )
-                jobs.release(session, db_job, "quarantine", worker_id)
-                return
 
             local_path = Path(file.local_path)
             season = target_episodes[0].season_number
@@ -188,16 +226,33 @@ class Remediator:
             ep_part = "-".join(f"E{n:02d}" for n in ep_numbers)
             staged_name = f"S{season:02d}{ep_part}{local_path.suffix}"
             staging_dir = Path(self.instance_cfg.staging_dir)
-            staging_dir.mkdir(parents=True, exist_ok=True)
             staged_path = staging_dir / staged_name
 
             try:
+                staging_dir.mkdir(parents=True, exist_ok=True)
                 os.link(local_path, staged_path)
             except OSError as exc:
                 if exc.errno == errno.EXDEV:
-                    shutil.copy2(local_path, staged_path)
+                    try:
+                        shutil.copy2(local_path, staged_path)
+                    except OSError as copy_exc:
+                        _log_step(
+                            session,
+                            verdict,
+                            "hardlink",
+                            False,
+                            f"{copy_exc}; staging_path={staged_path}",
+                        )
+                        jobs.release(session, db_job, "quarantine", worker_id)
+                        return
                 else:
-                    _log_step(session, verdict, "hardlink", False, str(exc))
+                    _log_step(
+                        session,
+                        verdict,
+                        "hardlink",
+                        False,
+                        f"{exc}; staging_path={staged_path}",
+                    )
                     jobs.release(session, db_job, "quarantine", worker_id)
                     return
             _log_step(session, verdict, "hardlink", True, f"staged={staged_path}")
@@ -263,7 +318,7 @@ class Remediator:
                 {
                     "path": match.path,
                     "seriesId": file.series_id,
-                    "episodeIds": sorted(target_episode_ids),
+                    "episodeIds": sorted(resolved_ids),
                     "quality": match.quality,
                     "languages": match.languages,
                 }
@@ -285,7 +340,7 @@ class Remediator:
                 verdict,
                 "execute_manual_import",
                 True,
-                f"episode_ids={sorted(target_episode_ids)}",
+                f"episode_ids={sorted(resolved_ids)}",
             )
 
             jobs.release(session, db_job, "remediated", worker_id)
