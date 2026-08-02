@@ -26,11 +26,13 @@ function SystemMeter({ system }: { system: SystemStats | undefined }) {
   )
 }
 
-/** tdarr-style strip above the tabs: one card per currently-processing job
- * (`status.active_jobs`), with a ticking elapsed time and an indeterminate
- * progress bar — no per-stage progress exists in the backend, so an
- * animated bar + elapsed is the honest signal that work is happening.
- * Always shows a compact right-aligned system meter, even when idle. */
+/** A real section below the header, in its own bordered card — not a bar
+ * blending into the header — with a small "Active" title. One card per
+ * currently-processing job (`status.active_jobs`), with a ticking elapsed
+ * time and an indeterminate progress bar — no per-stage progress exists in
+ * the backend, so an animated bar + elapsed is the honest signal that work
+ * is happening. Always shows a compact right-aligned system meter, even
+ * when idle. */
 function ActiveStrip({ activeJobs, system }: ActiveStripProps) {
   const [now, setNow] = useState(() => Date.now())
 
@@ -40,40 +42,43 @@ function ActiveStrip({ activeJobs, system }: ActiveStripProps) {
     return () => clearInterval(timer)
   }, [activeJobs.length])
 
-  if (activeJobs.length === 0) {
-    return (
-      <div className="flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/60 px-6 py-2">
-        <span className="text-xs text-slate-600">idle — no jobs processing</span>
-        <SystemMeter system={system} />
-      </div>
-    )
-  }
-
   return (
-    <div className="flex items-center gap-4 border-b border-slate-800 bg-slate-900/60 px-6 py-2">
-      <div className="flex flex-1 flex-wrap gap-2 overflow-x-auto">
-        {activeJobs.map((job) => (
-          <div
-            key={job.job_id}
-            className="min-w-56 flex-1 rounded-lg border border-slate-800 bg-slate-800/50 px-3 py-2"
-          >
-            <div className="flex items-center justify-between gap-2 text-xs text-slate-300">
-              <span className="truncate font-medium">
-                {job.instance ?? '—'} · {job.sonarr_path ? pathBasename(job.sonarr_path) : '—'}
-              </span>
-              <span className="shrink-0 text-slate-500">{formatElapsed(elapsedSeconds(job, now))}</span>
-            </div>
-            <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
-              <span>{job.claimed_by ?? 'unclaimed'}</span>
-            </div>
-            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-700/70">
-              <div className="animate-indeterminate h-full w-1/3 rounded-full bg-indigo-500" />
-            </div>
+    <section className="px-6 pt-4">
+      <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
+        <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Active</h2>
+        {activeJobs.length === 0 ? (
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-xs text-slate-600">idle — no jobs processing</span>
+            <SystemMeter system={system} />
           </div>
-        ))}
+        ) : (
+          <div className="flex items-center gap-4">
+            <div className="flex flex-1 flex-wrap gap-2 overflow-x-auto">
+              {activeJobs.map((job) => (
+                <div
+                  key={job.job_id}
+                  className="min-w-56 flex-1 rounded-lg border border-slate-800 bg-slate-800/50 px-3 py-2"
+                >
+                  <div className="flex items-center justify-between gap-2 text-xs text-slate-300">
+                    <span className="truncate font-medium">
+                      {job.instance ?? '—'} · {job.sonarr_path ? pathBasename(job.sonarr_path) : '—'}
+                    </span>
+                    <span className="shrink-0 text-slate-500">{formatElapsed(elapsedSeconds(job, now))}</span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                    <span>{job.claimed_by ?? 'unclaimed'}</span>
+                  </div>
+                  <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-700/70">
+                    <div className="animate-indeterminate h-full w-1/3 rounded-full bg-indigo-500" />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <SystemMeter system={system} />
+          </div>
+        )}
       </div>
-      <SystemMeter system={system} />
-    </div>
+    </section>
   )
 }
 

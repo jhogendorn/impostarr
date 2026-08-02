@@ -214,6 +214,8 @@ export const jobDetailFixture: JobDetail = {
     },
   ],
   frame_hash_present: true,
+  frame_hash: { algo: 'phash', version: 1, n_frames: 16 },
+  phash_corpus: { confidence: 0.97, source: 'auto' },
 }
 
 /** quarantine job carrying a human `is_other` verdict — human_ident set,

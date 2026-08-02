@@ -225,7 +225,22 @@ def get_status(request: Request) -> dict:
 # -- queues / job detail --------------------------------------------------
 
 
-QUEUE_SORT_FIELDS = {"updated_at": Job.updated_at, "created_at": Job.created_at}
+# Latest-verdict s_claimed per job, as a correlated scalar subquery rather
+# than a JOIN: a job can have multiple verdicts (human re-verdicts), and a
+# JOIN restricted to "the latest one" would need this same subquery in its
+# ON clause anyway — the scalar-subquery form sidesteps any risk of
+# duplicate-row fan-out and is portable to both SQLite and Postgres.
+_LATEST_VERDICT_S_CLAIMED = (
+    select(Verdict.s_claimed).where(Verdict.job_id == Job.id).order_by(Verdict.id.desc()).limit(1).correlate(Job).scalar_subquery()
+)
+
+QUEUE_SORT_FIELDS = {
+    "updated_at": Job.updated_at,
+    "created_at": Job.created_at,
+    "confidence": _LATEST_VERDICT_S_CLAIMED,
+    "series": File.series_id,
+    "instance": Instance.name,
+}
 
 
 @router.get("/queues/{status}")
@@ -235,19 +250,30 @@ def get_queue(
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     instance: str | None = None,
-    sort: Literal["updated_at", "created_at"] = "updated_at",
+    sort: Literal["updated_at", "created_at", "confidence", "series", "instance"] = "updated_at",
     dir: Literal["asc", "desc"] = "desc",
 ) -> dict:
     if status not in JOB_STATUSES:
         raise HTTPException(400, f"invalid status: {status!r}")
     page_size = min(page_size, MAX_PAGE_SIZE)
     sort_column = QUEUE_SORT_FIELDS[sort]
-    order = sort_column.asc() if dir == "asc" else sort_column.desc()
+    # nulls_last unconditionally: a no-op for columns that are never null
+    # (updated_at/created_at/series/instance), correct for confidence (a job
+    # with no verdict yet, or a null s_claimed, sorts after every scored one).
+    order = sort_column.asc().nulls_last() if dir == "asc" else sort_column.desc().nulls_last()
     with _session_factory(request)() as session:
         base_where = [Job.status == status]
         joins: list = []
+        # File is needed whenever filtering or sorting touches it or Instance
+        # (Instance is only reachable via File.instance_id); Instance itself
+        # only when actually filtering/sorting by instance name.
+        needs_file = instance is not None or sort in ("series", "instance")
+        needs_instance = instance is not None or sort == "instance"
+        if needs_file:
+            joins.append((File, Job.file_id == File.id))
+        if needs_instance:
+            joins.append((Instance, File.instance_id == Instance.id))
         if instance is not None:
-            joins = [(File, Job.file_id == File.id), (Instance, File.instance_id == Instance.id)]
             base_where.append(Instance.name == instance)
 
         count_query = select(func.count(Job.id))
@@ -328,6 +354,13 @@ async def get_job_detail(job_id: int, request: Request) -> dict:
             .first()
         )
         instance_row = session.get(Instance, file.instance_id)
+        corpus_entry = (
+            session.execute(
+                select(PhashCorpusEntry).where(PhashCorpusEntry.frame_hash_id == frame_hash.id)
+            ).scalars().first()
+            if frame_hash is not None
+            else None
+        )
         external_ids = await _series_external_ids(request, file)
         return {
             "job": {
@@ -392,6 +425,16 @@ async def get_job_detail(job_id: int, request: Request) -> dict:
                 for a in assets
             ],
             "frame_hash_present": frame_hash is not None,
+            "frame_hash": (
+                {"algo": frame_hash.algo, "version": frame_hash.version, "n_frames": len(frame_hash.hashes)}
+                if frame_hash is not None
+                else None
+            ),
+            "phash_corpus": (
+                {"confidence": corpus_entry.confidence, "source": corpus_entry.source}
+                if corpus_entry is not None
+                else None
+            ),
         }
 
 

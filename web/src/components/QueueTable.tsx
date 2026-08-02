@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { parkJob, rerunJob, unparkJob } from '../api/client'
-import type { InstanceSummary, JobStatus, JobSummary, QueuePage, SortDir } from '../api/types'
+import type { InstanceSummary, JobStatus, JobSummary, QueuePage, QueueSortField, SortDir } from '../api/types'
 import { capitalize, formatPercent, pathBasename, relativeTime, scoreBandClass } from '../lib/format'
 import { RERUN_STATUSES } from './VerdictActions'
 
@@ -28,13 +28,13 @@ function isEligible(action: BulkAction, status: JobStatus): boolean {
 
 interface RowActionsProps {
   job: JobSummary
-  onInspect: (jobId: number) => void
   onChanged: () => void
 }
 
 /** Contextual per-row action buttons, same eligibility rules as
- * VerdictActions' park/unpark/rerun buttons in the inspect modal. */
-function RowActions({ job, onInspect, onChanged }: RowActionsProps) {
+ * VerdictActions' park/unpark/rerun buttons in the inspect modal. No Inspect
+ * button here — the row itself is already a click target for that. */
+function RowActions({ job, onChanged }: RowActionsProps) {
   const [pending, setPending] = useState(false)
 
   async function run(action: () => Promise<unknown>) {
@@ -54,9 +54,6 @@ function RowActions({ job, onInspect, onChanged }: RowActionsProps) {
 
   return (
     <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-      <button type="button" className={buttonClass} onClick={() => onInspect(job.job_id)}>
-        Inspect
-      </button>
       {RERUN_STATUSES.has(job.status) && (
         <button type="button" disabled={pending} className={buttonClass} onClick={() => void run(() => rerunJob(job.job_id))}>
           Rerun
@@ -76,6 +73,34 @@ function RowActions({ job, onInspect, onChanged }: RowActionsProps) {
   )
 }
 
+interface SortableThProps {
+  field: QueueSortField
+  label: string
+  sortField: QueueSortField
+  sortDir: SortDir
+  onSortChange: (field: QueueSortField, dir: SortDir) => void
+}
+
+/** A clickable column header: click cycles asc/desc when it's already the
+ * active sort field, or switches to this field (defaulting to desc) when
+ * it isn't. The active field gets a bright ▲/▼ arrow; other sortable
+ * columns get a dim ⇅ so it's visually obvious they're clickable too. */
+function SortableTh({ field, label, sortField, sortDir, onSortChange }: SortableThProps) {
+  const active = field === sortField
+  return (
+    <th className="px-3 py-2">
+      <button
+        type="button"
+        onClick={() => onSortChange(field, active ? (sortDir === 'asc' ? 'desc' : 'asc') : 'desc')}
+        className="flex items-center gap-1 uppercase tracking-wide text-slate-500 hover:text-slate-300"
+      >
+        {label}
+        <span className={active ? 'text-slate-200' : 'text-slate-700'}>{active ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}</span>
+      </button>
+    </th>
+  )
+}
+
 interface QueueTableProps {
   page: QueuePage | null
   pageIndex: number
@@ -86,8 +111,9 @@ interface QueueTableProps {
   instances: InstanceSummary[]
   selectedInstance: string | undefined
   onInstanceChange: (instance: string | undefined) => void
+  sortField: QueueSortField
   sortDir: SortDir
-  onSortDirChange: (dir: SortDir) => void
+  onSortChange: (field: QueueSortField, dir: SortDir) => void
   onChanged: () => void
 }
 
@@ -105,8 +131,9 @@ function QueueTable({
   instances,
   selectedInstance,
   onInstanceChange,
+  sortField,
   sortDir,
-  onSortDirChange,
+  onSortChange,
   onChanged,
 }: QueueTableProps) {
   const [filterText, setFilterText] = useState('')
@@ -195,21 +222,6 @@ function QueueTable({
           placeholder="Filter by path or series id…"
           className="min-w-56 flex-1 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-200 placeholder:text-slate-500"
         />
-        <label className="flex items-center gap-2 text-xs text-slate-400">
-          Page size
-          <select
-            aria-label="Page size"
-            value={pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-slate-200"
-          >
-            {PAGE_SIZE_OPTIONS.map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
 
       {selected.size > 0 && (
@@ -256,6 +268,7 @@ function QueueTable({
             <th className="px-3 py-1" />
             <th className="px-3 py-1" />
             <th className="px-3 py-1" />
+            <th className="px-3 py-1" />
           </tr>
           <tr className="text-xs uppercase tracking-wide text-slate-500">
             <th className="px-3 py-2">
@@ -264,22 +277,17 @@ function QueueTable({
                 aria-label="Select all"
                 checked={items.length > 0 && selected.size === items.length}
                 onChange={toggleAll}
+                onClick={(e) => e.stopPropagation()}
+                className="h-4 w-4 cursor-pointer accent-indigo-500"
               />
             </th>
-            <th className="px-3 py-2">Series (id)</th>
+            <SortableTh field="series" label="Series (id)" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <th className="px-3 py-2">Episode(s)</th>
-            <th className="px-3 py-2">Instance</th>
-            <th className="px-3 py-2">Confidence</th>
+            <th className="px-3 py-2">File</th>
+            <SortableTh field="instance" label="Instance" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
+            <SortableTh field="confidence" label="Confidence" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <th className="px-3 py-2">Outcome</th>
-            <th className="px-3 py-2">
-              <button
-                type="button"
-                onClick={() => onSortDirChange(sortDir === 'asc' ? 'desc' : 'asc')}
-                className="flex items-center gap-1 uppercase tracking-wide text-slate-500 hover:text-slate-300"
-              >
-                Updated {sortDir === 'asc' ? '▲' : '▼'}
-              </button>
-            </th>
+            <SortableTh field="updated_at" label="Updated" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <th className="px-3 py-2">Actions</th>
           </tr>
         </thead>
@@ -298,13 +306,13 @@ function QueueTable({
                     aria-label={`Select job ${job.job_id}`}
                     checked={selected.has(job.job_id)}
                     onChange={() => toggleRow(job.job_id)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="h-4 w-4 cursor-pointer accent-indigo-500"
                   />
                 </td>
-                <td className="px-3 py-2 text-slate-200">
-                  Series {job.file.series_id}
-                  <div className="text-xs text-slate-500">{pathBasename(job.file.sonarr_path)}</div>
-                </td>
+                <td className="px-3 py-2 text-slate-200">Series {job.file.series_id}</td>
                 <td className="px-3 py-2 text-slate-400">{job.file.episode_ids.join(', ')}</td>
+                <td className="px-3 py-2 text-slate-400">{pathBasename(job.file.sonarr_path)}</td>
                 <td className="px-3 py-2 text-slate-400">{job.instance ?? '—'}</td>
                 <td className="px-3 py-2">
                   <span
@@ -316,7 +324,7 @@ function QueueTable({
                 <td className="px-3 py-2 text-slate-400">{capitalize(job.status)}</td>
                 <td className="px-3 py-2 text-slate-500">{relativeTime(job.updated_at)}</td>
                 <td className="rounded-r-lg px-3 py-2">
-                  <RowActions job={job} onInspect={onInspect} onChanged={onChanged} />
+                  <RowActions job={job} onChanged={onChanged} />
                 </td>
               </tr>
             )
@@ -324,10 +332,28 @@ function QueueTable({
         </tbody>
       </table>
       {items.length === 0 && <p className="px-3 py-6 text-sm text-slate-500">No jobs in this queue.</p>}
-      <div className="mt-3 flex items-center justify-between text-sm text-slate-400">
-        <span>
-          {rangeStart}–{rangeEnd} of {total}
-        </span>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400">
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-slate-400">
+            Page size
+            <select
+              aria-label="Page size"
+              value={pageSize}
+              onChange={(e) => onPageSizeChange(Number(e.target.value))}
+              className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-slate-200"
+            >
+              {PAGE_SIZE_OPTIONS.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span>
+            {rangeStart}–{rangeEnd} of {total}
+          </span>
+        </div>
         <div className="flex gap-2">
           <button
             type="button"

@@ -93,4 +93,43 @@ describe('LogDrawer', () => {
     expect(getLogsMock).toHaveBeenCalledWith('ERROR')
     expect(screen.getByRole('button', { name: 'ERROR' })).toHaveAttribute('aria-pressed', 'true')
   })
+
+  it('the scroll container has min-h-0 so it scrolls within the fixed drawer height instead of overflowing it', async () => {
+    render(<LogDrawer open />)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const line = screen.getByText('claimed job 42').closest('div')!
+    const scrollContainer = line.parentElement!
+    expect(scrollContainer).toHaveClass('overflow-y-auto', 'min-h-0')
+  })
+
+  it('selecting WARNING renders only the warning+error records the (level-aware) API returns, not the INFO-level default', async () => {
+    // A level-aware mock, not the fixed fixture: this is what actually
+    // proves the level filter's effect renders, not just that the fetch
+    // call carried the right argument.
+    getLogsMock.mockImplementation((level?: string) => {
+      const items =
+        level === 'WARNING' ? logRecordsFixture.filter((r) => r.level !== 'INFO') : logRecordsFixture
+      return Promise.resolve({ items })
+    })
+    const user = userEvent.setup()
+    render(<LogDrawer open />)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.getByText(/claimed job 42/)).toBeInTheDocument() // INFO line present by default
+
+    await user.click(screen.getByRole('button', { name: 'WARNING' }))
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByText(/claimed job 42/)).not.toBeInTheDocument() // INFO line dropped
+    expect(screen.getByText(/DRY-RUN: would DELETE/)).toBeInTheDocument() // WARNING line kept
+    expect(screen.getByText(/plugin crashed/)).toBeInTheDocument() // ERROR line kept
+  })
 })

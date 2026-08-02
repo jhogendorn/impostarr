@@ -61,7 +61,7 @@ export interface StatusResponse {
 
 // -- /queues/{status} ---------------------------------------------------
 
-export type QueueSortField = 'updated_at' | 'created_at'
+export type QueueSortField = 'updated_at' | 'created_at' | 'confidence' | 'series' | 'instance'
 export type SortDir = 'asc' | 'desc'
 
 export interface QueueFileSummary {
@@ -177,6 +177,17 @@ export interface SeriesExternalIds {
   tmdb_id: number | null
 }
 
+export interface FrameHashSummary {
+  algo: string
+  version: number
+  n_frames: number
+}
+
+export interface PhashCorpusSummary {
+  confidence: number
+  source: 'auto' | 'human'
+}
+
 export interface JobDetail {
   job: JobDetailJob
   instance: string | null
@@ -186,6 +197,8 @@ export interface JobDetail {
   verdict: JobDetailVerdict | null
   assets: Asset[]
   frame_hash_present: boolean
+  frame_hash: FrameHashSummary | null
+  phash_corpus: PhashCorpusSummary | null
 }
 
 // -- /jobs/{id}/verdict ---------------------------------------------------

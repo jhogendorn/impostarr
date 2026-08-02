@@ -539,6 +539,63 @@ def test_queues_sort_created_at_ascending(app):
     assert [item["job_id"] for item in body["items"]] == ids
 
 
+def test_queues_sort_confidence_desc_nulls_last(app):
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_low = _make_file(session_factory, instance_id, episode_file_id=9200)
+    file_high = _make_file(session_factory, instance_id, episode_file_id=9201)
+    file_none = _make_file(session_factory, instance_id, episode_file_id=9202)
+    job_low = _make_job(session_factory, file_low, status="quarantine")
+    job_high = _make_job(session_factory, file_high, status="quarantine")
+    job_none = _make_job(session_factory, file_none, status="quarantine")
+    _make_verdict(session_factory, job_low, s_claimed=0.2)
+    _make_verdict(session_factory, job_high, s_claimed=0.9)
+    # job_none gets no verdict row at all -> s_claimed is null via the
+    # correlated subquery, must sort after every scored job regardless of dir.
+
+    with TestClient(app) as client:
+        desc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "confidence", "dir": "desc"})
+        asc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "confidence", "dir": "asc"})
+
+    assert [item["job_id"] for item in desc.json()["items"]] == [job_high, job_low, job_none]
+    assert [item["job_id"] for item in asc.json()["items"]] == [job_low, job_high, job_none]
+
+
+def test_queues_sort_series(app):
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_a = _make_file(session_factory, instance_id, episode_file_id=9300, series_id=10)
+    file_b = _make_file(session_factory, instance_id, episode_file_id=9301, series_id=30)
+    file_c = _make_file(session_factory, instance_id, episode_file_id=9302, series_id=20)
+    job_a = _make_job(session_factory, file_a, status="quarantine")
+    job_b = _make_job(session_factory, file_b, status="quarantine")
+    job_c = _make_job(session_factory, file_c, status="quarantine")
+
+    with TestClient(app) as client:
+        asc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "series", "dir": "asc"})
+        desc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "series", "dir": "desc"})
+
+    assert [item["job_id"] for item in asc.json()["items"]] == [job_a, job_c, job_b]
+    assert [item["job_id"] for item in desc.json()["items"]] == [job_b, job_c, job_a]
+
+
+def test_queues_sort_instance(app):
+    session_factory = _session_factory(app)
+    instance_a = _make_instance(session_factory, name="alpha")
+    instance_b = _make_instance(session_factory, name="beta")
+    file_a = _make_file(session_factory, instance_a, episode_file_id=9400)
+    file_b = _make_file(session_factory, instance_b, episode_file_id=9401)
+    job_a = _make_job(session_factory, file_a, status="quarantine")
+    job_b = _make_job(session_factory, file_b, status="quarantine")
+
+    with TestClient(app) as client:
+        asc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "instance", "dir": "asc"})
+        desc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "instance", "dir": "desc"})
+
+    assert [item["job_id"] for item in asc.json()["items"]] == [job_a, job_b]
+    assert [item["job_id"] for item in desc.json()["items"]] == [job_b, job_a]
+
+
 # -- job detail / assets -----------------------------------------------------
 
 
@@ -641,6 +698,55 @@ def test_job_detail_includes_dupe_info(app):
         response = client.get(f"{API_PREFIX}/jobs/{job_id}")
 
     assert response.json()["verdict"]["dupe_info"] == dupe_info
+
+
+@respx.mock
+def test_job_detail_includes_frame_hash_and_phash_corpus(app):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    with session_factory() as session:
+        frame_hash = FrameHash(
+            file_id=file_id, algo="phash", version=1, timestamps=[0.5, 1.5], hashes=["a", "b"]
+        )
+        session.add(frame_hash)
+        session.commit()
+        session.add(
+            PhashCorpusEntry(
+                frame_hash_id=frame_hash.id,
+                external_ids={},
+                season=1,
+                episodes=[1],
+                confidence=0.97,
+                source="auto",
+            )
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    body = response.json()
+    assert body["frame_hash"] == {"algo": "phash", "version": 1, "n_frames": 2}
+    assert body["phash_corpus"] == {"confidence": 0.97, "source": "auto"}
+
+
+@respx.mock
+def test_job_detail_frame_hash_and_phash_corpus_null_when_absent(app):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    body = response.json()
+    assert body["frame_hash"] is None
+    assert body["phash_corpus"] is None
 
 
 def test_job_detail_404_unknown(app):

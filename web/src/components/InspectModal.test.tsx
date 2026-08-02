@@ -3,7 +3,12 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { JobStatus } from '../api/types'
 import InspectModal from './InspectModal'
-import { jobDetailDupeFixture, jobDetailFixture, jobDetailHumanIdentFixture } from './testFixtures'
+import {
+  jobDetailDupeFixture,
+  jobDetailFixture,
+  jobDetailHumanIdentFixture,
+  jobDetailMatchedFixture,
+} from './testFixtures'
 
 const { getJobMock } = vi.hoisted(() => ({ getJobMock: vi.fn() }))
 
@@ -26,15 +31,27 @@ describe('InspectModal', () => {
     expect(within(section).getByText(jobDetailFixture.file.sonarr_path)).toBeInTheDocument()
   })
 
-  it('renders humanized plugin status chips and a percentage candidate chip', async () => {
+  it('renders the restored plugin-results table (name/version, raw status, raw reason, percent candidate confidence)', async () => {
     getJobMock.mockResolvedValue(jobDetailFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    expect(await screen.findByText(/whisper-transcript/)).toBeInTheDocument()
-    expect(screen.getByText('found evidence')).toBeInTheDocument()
-    expect(screen.getByText(/ocr-subs/)).toBeInTheDocument()
-    expect(screen.getByText('skipped: no subtitle track')).toBeInTheDocument()
-    expect(screen.getByText('S01E01 — 92%')).toBeInTheDocument()
+    const section = (await screen.findByText('Plugin results')).closest('section')!
+    expect(within(section).getByText(/whisper-transcript/)).toBeInTheDocument()
+    expect(within(section).getByText('ok')).toBeInTheDocument()
+    expect(within(section).getByText(/ocr-subs/)).toBeInTheDocument()
+    expect(within(section).getByText('abstain')).toBeInTheDocument()
+    expect(within(section).getByText('no subtitle track')).toBeInTheDocument()
+    expect(within(section).getByText(/conf 92% · tvdb S1E1/)).toBeInTheDocument()
+  })
+
+  it('the plugin-results table translates in_series/cross_series/junk tokens to words and carries an evidence tooltip', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const section = (await screen.findByText('Plugin results')).closest('section')!
+    expect(within(section).getByText(/matches this series: episodes 100/)).toBeInTheDocument()
+    const candidateLine = within(section).getByText(/conf 92% · tvdb S1E1/)
+    expect(candidateLine).toHaveAttribute('title', JSON.stringify({}))
   })
 
   it('never renders raw internal terms (in_series/s_claimed/s_alt)', async () => {
@@ -48,14 +65,36 @@ describe('InspectModal', () => {
     expect(text).not.toMatch(/\bs_alt\b/)
   })
 
-  it('renders the Confidence section as sentences', async () => {
-    getJobMock.mockResolvedValue(jobDetailFixture)
+  it('a matched job gets ONE "Verified as ... confidence" statement, with the redundant plain outcome line dropped', async () => {
+    getJobMock.mockResolvedValue(jobDetailMatchedFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    expect(await screen.findByText('Confidence it is the labelled episode: 92%')).toBeInTheDocument()
+    expect(await screen.findByText('Verified as S01E01 — 97% confidence.')).toBeInTheDocument()
+    expect(screen.queryByText('Verified match.')).not.toBeInTheDocument()
   })
 
-  it('"Identified as" names the in-series remap target with its confidence', async () => {
+  it('a genuinely inconclusive job (no usable evidence) gets one statement and no redundant outcome line', async () => {
+    getJobMock.mockResolvedValue({
+      ...jobDetailFixture,
+      plugin_results: [],
+      verdict: {
+        s_claimed: null,
+        s_alt: null,
+        outcome: 'inconclusive',
+        proposed_action: null,
+        remediation_log: null,
+        source: 'auto',
+        human_ident: null,
+        dupe_info: null,
+      },
+    })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    expect(await screen.findByText('Could not be identified — no usable evidence.')).toBeInTheDocument()
+    expect(screen.queryByText('Not enough evidence to judge.')).not.toBeInTheDocument()
+  })
+
+  it('a mid-band quarantine job with a credible remap alternative shows the mislabel statement AND keeps the review-workflow line (adds new info)', async () => {
     getJobMock.mockResolvedValue({
       ...jobDetailFixture,
       plugin_results: [
@@ -83,12 +122,31 @@ describe('InspectModal', () => {
     })
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    const section = (await screen.findByText('Identified as')).closest('section')!
-    expect(within(section).getByText(/S01E05/)).toBeInTheDocument()
-    expect(within(section).getByText(/97%/)).toBeInTheDocument()
+    const section = (await screen.findByText('Identification')).closest('section')!
+    expect(
+      within(section).getByText('This file appears to be S01E05 (97% confidence), not the labelled S01E01 (10%).'),
+    ).toBeInTheDocument()
+    expect(within(section).getByText('Waiting for human review.')).toBeInTheDocument()
   })
 
-  it('"Identified as" reports a cross-series match with a TVDB link', async () => {
+  it('a mislabel identification statement with no matching plugin candidate falls back to generic wording', async () => {
+    getJobMock.mockResolvedValue({
+      ...jobDetailFixture,
+      verdict: {
+        ...jobDetailFixture.verdict!,
+        s_claimed: 0.1,
+        s_alt: 0.97,
+        proposed_action: { kind: 'remap', target_episode_ids: [999999] }, // no plugin candidate resolves to this
+      },
+    })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    expect(
+      await screen.findByText('This file appears to be a different episode (97% confidence), not the labelled S01E01 (10%).'),
+    ).toBeInTheDocument()
+  })
+
+  it('Identification reports a cross-series match with a TVDB link', async () => {
     getJobMock.mockResolvedValue({
       ...jobDetailFixture,
       plugin_results: [
@@ -112,15 +170,17 @@ describe('InspectModal', () => {
     })
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    const section = (await screen.findByText('Identified as')).closest('section')!
-    expect(within(section).getByText(/different series/)).toBeInTheDocument()
+    const section = (await screen.findByText('Identification')).closest('section')!
+    expect(
+      within(section).getByText(/This file appears to be a different series entirely \(85% confidence\)/),
+    ).toBeInTheDocument()
     expect(within(section).getByRole('link', { name: 'TVDB' })).toHaveAttribute(
       'href',
       'https://thetvdb.com/dereferrer/series/81189',
     )
   })
 
-  it('"Identified as" reports junk when replace is proposed with no cross-series evidence', async () => {
+  it('Identification reports junk when replace is proposed with no cross-series evidence', async () => {
     getJobMock.mockResolvedValue({
       ...jobDetailFixture,
       plugin_results: [
@@ -142,27 +202,30 @@ describe('InspectModal', () => {
     })
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    expect(await screen.findByText("Content didn't match any episode.")).toBeInTheDocument()
+    expect(
+      await screen.findByText("This file's content didn't match any known episode (5% confidence)."),
+    ).toBeInTheDocument()
   })
 
-  it('"Identified as" shows the human override for an is_other verdict', async () => {
+  it('Identification shows the human override for an is_other verdict', async () => {
     getJobMock.mockResolvedValue(jobDetailHumanIdentFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    const section = (await screen.findByText('Identified as')).closest('section')!
+    const section = (await screen.findByText('Identification')).closest('section')!
     expect(within(section).getByText(/S02E03E04/)).toBeInTheDocument()
     expect(within(section).getByText(/human override/)).toBeInTheDocument()
   })
 
+  // matched/quarantine/inconclusive plain outcome lines are covered by the
+  // dedicated statement tests above (where the redundancy-drop rule is the
+  // point); `remediate` always keeps its outcome line regardless of the
+  // identification statement, since it conveys new info (an action taken).
   it.each([
-    ['matched' as const, 'matched' as JobStatus, false, 'Verified match.'],
-    ['quarantine' as const, 'quarantine' as JobStatus, false, 'Waiting for human review.'],
-    ['inconclusive' as const, 'inconclusive' as JobStatus, false, 'Not enough evidence to judge.'],
     ['remediate' as const, 'remediated' as JobStatus, false, 'Fix applied.'],
     ['remediate' as const, 'remediated' as JobStatus, true, 'Fix applied (dry run).'],
     ['remediate' as const, 'quarantine' as JobStatus, false, 'Fix attempted, needs review.'],
     ['remediate' as const, 'error' as JobStatus, false, 'Error while applying the fix.'],
-  ])('plain-language outcome: outcome=%s status=%s dryRun=%s -> %s', async (outcome, jobStatus, dryRun, expected) => {
+  ])('plain-language outcome (always kept for remediate): outcome=%s status=%s dryRun=%s -> %s', async (outcome, jobStatus, dryRun, expected) => {
     getJobMock.mockResolvedValue({
       ...jobDetailFixture,
       job: { ...jobDetailFixture.job, status: jobStatus },
@@ -173,21 +236,37 @@ describe('InspectModal', () => {
     expect(await screen.findByText(expected)).toBeInTheDocument()
   })
 
-  it('shows a dupe warning sentence when verdict.dupe_info is present', async () => {
-    getJobMock.mockResolvedValue(jobDetailDupeFixture)
-    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
-
-    expect(
-      await screen.findByText('Visually near-identical to Other.S01E01.mkv (similarity 93%)'),
-    ).toBeInTheDocument()
-  })
-
-  it('omits the dupe section when dupe_info is absent', async () => {
+  it('the Fingerprint section shows perceptual-hash and corpus-storage info when present', async () => {
     getJobMock.mockResolvedValue(jobDetailFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
+    const section = (await screen.findByText('Fingerprint')).closest('section')!
+    expect(within(section).getByText('Perceptual hash: 16 frames (phash v1) · stored in corpus (auto, 97%)')).toBeInTheDocument()
+  })
+
+  it('the Fingerprint section omits the corpus clause when there is no corpus entry', async () => {
+    getJobMock.mockResolvedValue({ ...jobDetailFixture, phash_corpus: null })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const section = (await screen.findByText('Fingerprint')).closest('section')!
+    expect(within(section).getByText('Perceptual hash: 16 frames (phash v1)')).toBeInTheDocument()
+    expect(within(section).queryByText(/stored in corpus/)).not.toBeInTheDocument()
+  })
+
+  it('the Fingerprint section also carries the dupe warning when dupe_info is present', async () => {
+    getJobMock.mockResolvedValue(jobDetailDupeFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const section = (await screen.findByText('Fingerprint')).closest('section')!
+    expect(within(section).getByText('Visually near-identical to Other.S01E01.mkv (similarity 93%)')).toBeInTheDocument()
+  })
+
+  it('omits the Fingerprint section entirely when there is neither a frame hash nor a dupe hit', async () => {
+    getJobMock.mockResolvedValue({ ...jobDetailFixture, frame_hash: null, phash_corpus: null })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
     await screen.findByText(/whisper-transcript/)
-    expect(screen.queryByText('Possible duplicate')).not.toBeInTheDocument()
+    expect(screen.queryByText('Fingerprint')).not.toBeInTheDocument()
   })
 
   it('shows the series title in the header when external_ids.title is present', async () => {
@@ -284,7 +363,7 @@ describe('InspectModal', () => {
           candidates: [
             { confidence: 'not-a-number', ident: null, numbering: null }, // malformed: confidence not numeric
             null, // malformed: not an object
-            { confidence: 0.7, ident: null, numbering: 'tvdb', evidence: {} }, // valid, but no matching normalized entry
+            { confidence: 0.7, ident: null, numbering: 'tvdb', evidence: {} }, // valid, ident-less candidate
           ],
           normalized: [],
         },
@@ -294,7 +373,7 @@ describe('InspectModal', () => {
 
     expect(await screen.findByText(/flaky-plugin/)).toBeInTheDocument()
     expect(screen.getAllByText('unrecognized entry')).toHaveLength(2)
-    expect(screen.getByText('confidence 70%')).toBeInTheDocument()
+    expect(screen.getByText(/conf 70% · tvdb/)).toBeInTheDocument()
   })
 
   it('renders a Close button that calls onClose', async () => {
