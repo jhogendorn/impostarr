@@ -1,0 +1,35 @@
+[
+  {
+    "id": 555,
+    "seasonNumber": 1,
+    "episodeNumber": 2,
+    "absoluteEpisodeNumber": 2,
+    "sceneSeasonNumber": null,
+    "sceneEpisodeNumber": null,
+    "sceneAbsoluteEpisodeNumber": null,
+    "episodeFileId": 9001,
+    "hasFile": true
+  },
+  {
+    "id": 556,
+    "seasonNumber": 1,
+    "episodeNumber": 3,
+    "absoluteEpisodeNumber": 3,
+    "sceneSeasonNumber": 1,
+    "sceneEpisodeNumber": 4,
+    "sceneAbsoluteEpisodeNumber": 4,
+    "episodeFileId": 9002,
+    "hasFile": true
+  },
+  {
+    "id": 557,
+    "seasonNumber": 1,
+    "episodeNumber": 4,
+    "absoluteEpisodeNumber": 4,
+    "sceneSeasonNumber": null,
+    "sceneEpisodeNumber": null,
+    "sceneAbsoluteEpisodeNumber": null,
+    "episodeFileId": 0,
+    "hasFile": false
+  }
+]

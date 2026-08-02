@@ -1,0 +1,105 @@
+# Impostarr configuration reference.
+#
+# Bind-mount at /config/impostarr.yml. Every key below is optional; omitted
+# sections/keys fall back to their defaults. Any value can be overridden at
+# the environment level: IMPOSTARR__SECTION__KEY=value for scalars,
+# IMPOSTARR__SECTION=<json> for list/object-valued keys (e.g.
+# IMPOSTARR__SONARR='[{"name": "main", ...}]'). Env always wins over this
+# file. See docs/specs/2026-08-02-impostarr-poc-design.md#configuration.
+
+# One entry per Sonarr instance to watch. Default: [] (no instances).
+sonarr:
+  - name: main # unique identifier for this instance
+    url: http://sonarr:8989
+    api_key: CHANGE_ME
+    # Container path -> Sonarr path mappings, used to translate paths Sonarr
+    # reports into paths this container can read. Longest-prefix match wins.
+    path_mappings:
+      - sonarr: /tv
+        local: /media/tv
+    # Sonarr-visible staging dir for remap choreography (manual import).
+    # Must be on the same filesystem as the library so hardlinks work.
+    staging_dir: /media/staging/main
+    # Path filters (local paths) restricting which files are eligible.
+    # Empty list = watch everything.
+    watch_dirs: []
+    poll_interval_s: 300
+    # Per-instance enable flags for automatic remediation verbs. When
+    # false, the corresponding proposed action queues for human approval
+    # instead of acting automatically.
+    auto_remap: false
+    auto_replace: false
+
+# Score bands driving routing decisions (spec Scoring & routing section).
+# All values below are the PoC defaults.
+thresholds:
+  quarantine: 0.8 # S_claimed >= this -> matched
+  auto: 0.4 # S_claimed < this -> auto-remediation eligible
+  alt: 0.8 # alternate candidate score must reach this to be "credible"
+  alt_margin: 0.2 # and beat S_claimed by at least this margin
+  auto_min_evidence: 2 # min applicable plugins required to auto-act
+  phash_store: 0.9 # min verdict confidence to store a phash corpus record
+
+# External identifier plugins.
+plugins:
+  # Pinned pip specs for external plugin collections, installed at boot
+  # into a dedicated venv overlay. Supports git+https://...@tag#subdirectory=...
+  sources: []
+  # Per-plugin config keyed by plugin name.
+  identifiers:
+    whisper-subs:
+      enabled: true
+      weight: 1.0
+      options:
+        tmdb_api_key: CHANGE_ME
+    subs-llm:
+      enabled: true
+      weight: 1.0
+      options:
+        base_url: http://ollama:11434/v1
+        model: llama3
+        api_key: CHANGE_ME
+
+# Reference subtitle service (OpenSubtitles), shared by identifier plugins.
+refsubs:
+  api_key: null
+  username: null
+  password: null
+  daily_quota: 20
+  cache_dir: /assets/refsubs
+  # Manual local-SRT drop-in directory, checked before cache/API. Layout:
+  # <manual_dir>/<tvdb_id>/SxxEyy.srt
+  manual_dir: /config/refsubs-manual
+
+# Identity/audit layer. Disabled (admin-for-everyone) by default; securing
+# the stack is the deployer's job (see spec Auth section).
+auth:
+  # Forward-auth header name (e.g. Authentik), attributes identity for audit.
+  trusted_header: null
+  # Optional group gate: when both are set, requests without a matching
+  # group header value get 403.
+  group_header: null
+  required_group: null
+  # Static API keys for automation (sent as X-Api-Key).
+  api_keys: []
+  # - name: automation
+  #   key: CHANGE_ME
+
+# Database. Absent dsn -> SQLite at <state_dir>/impostarr.db.
+# Postgres requires the `postgres` extra (psycopg) — install with
+# `uv sync --extra postgres`, or use a docker image built from this repo
+# (both docker/Dockerfile and docker/Dockerfile.cuda include it).
+db:
+  dsn: null
+  # dsn: postgresql+psycopg://user:pass@postgres:5432/impostarr
+
+# Worker pool.
+workers:
+  pool_size: 2
+  whisper_model: small
+  whisper_device: auto # auto | cpu | cuda
+
+# Volumes (see spec Deployment section).
+state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay
+assets_dir: /assets # extracted artifact blobs (transcripts, framegrabs, refsub cache)
+models_dir: /models # whisper/LLM model caches

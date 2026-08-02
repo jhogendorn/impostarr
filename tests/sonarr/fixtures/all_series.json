@@ -1,0 +1,18 @@
+[
+  {
+    "id": 42,
+    "title": "Show Name",
+    "tvdbId": 123456,
+    "imdbId": "tt1234567",
+    "tmdbId": 654321,
+    "titleSlug": "show-name"
+  },
+  {
+    "id": 43,
+    "title": "Other Show",
+    "tvdbId": 654987,
+    "imdbId": null,
+    "tmdbId": null,
+    "titleSlug": "other-show"
+  }
+]

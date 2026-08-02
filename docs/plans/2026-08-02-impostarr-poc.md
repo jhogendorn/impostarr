@@ -108,8 +108,10 @@ only fields we consume):
 
 - `system_status()` — connectivity check.
 - `history_since(history_id: int) -> list[HistoryRecord]` — paged
-  `GET /history?eventType=downloadFolderImported&sortKey=id&sortDir=asc`,
-  filtered to records with id > watermark. HistoryRecord: id, episodeIds,
+  `GET /history?eventType=downloadFolderImported&sortKey=id&sortDirection=descending`,
+  early-stopping as soon as a page contains an id ≤ watermark (avoids
+  re-walking lifetime history each poll); returns matching records sorted
+  ascending by id. HistoryRecord: id, episodeIds,
   seriesId, sourceTitle, downloadId, data (guid, indexer), episodeFileId,
   quality, languages, date.
 - `episode_files(series_id)` / `episode_file(id)` — path, size, quality.
@@ -164,8 +166,10 @@ Transitions validated against the spec queue model; invalid transition raises.
   after batch committed — crash-safe).
 - `backfill_step(batch_size)` — walk `all_series()`/`episode_files()` with
   persisted `(series_id, episode_file_id)` cursor on `instances`; same file
-  capture path; created jobs enter `hold` when a configured backfill rate
-  limit is active, else `pending`.
+  capture path. PoC decision (settled): no rate limiter in discovery —
+  backfill jobs go directly to `pending` and the caller paces via
+  batch_size/call cadence; jobs.py's `hold`/park support is the future
+  limiter seam. Documented in the Discoverer docstring.
 - Content hash: xxh64 of first+last 8MiB + size (fast, stable) via
   `hash_file(path)` helper — full-file hashing is too slow on remuxes.
 
@@ -246,9 +250,14 @@ ctx) -> PluginResult` and `config_model` class attr.
 
 `loader.py` — discover via entry-point group `impostarr.identifiers`; apply
 per-plugin config/enable/weight from Settings; boot-time installer
-`ensure_external_plugins(specs)` runs `uv pip install` into the running env
-only when the lock-hash of pinned specs (stored in state dir) changes;
-install failure disables that plugin and logs, never crashes the app.
+`ensure_external_plugins(specs, state_dir, venv_dir)` installs into a
+persisted venv overlay (spec: `/config/plugins/venv`) via
+`uv pip install --python <venv>/bin/python`, creating the venv on first use,
+gated by a lock-hash of the pinned specs (stored in state dir); install
+failure disables that plugin and logs, never crashes the app.
+`activate_plugin_overlay(venv_dir)` appends the overlay site-packages to
+sys.path; the composition root (main.py, Task 15) calls it before
+`load_plugins`, and Task 18's entrypoint passes `/config/plugins/venv`.
 
 `normalize.py` — `normalize(candidate, series_ctx) -> NormalizedCandidate
 {episode_ids: list[int]} | Unnormalizable(reason)`. Mapping rules per spec:

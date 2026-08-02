@@ -1,0 +1,50 @@
+services:
+  impostarr:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: impostarr:latest
+    ports:
+      - "8484:8484"
+    volumes:
+      - ./config:/config
+      - ./assets:/assets
+      - ./models:/models
+      - ${MEDIA_PATH:?set MEDIA_PATH}:/media:ro
+    environment:
+      # Remaps the container's `impostarr` user to this uid/gid before it
+      # drops privileges (docker/entrypoint.sh) — set to match whoever owns
+      # ./config, ./assets, ./models on the host. Defaults to 1000:1000,
+      # matching the `chown -R 1000:1000` quickstart guidance in README.
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    # Copy compose.example.env to compose.env, fill in real values, then
+    # uncomment (env_file values become container env vars, e.g.
+    # IMPOSTARR__SONARR / MEDIA_PATH):
+    # env_file: compose.env
+    restart: unless-stopped
+
+  # Optional Postgres backend, for deployments needing more than one
+  # replica (default is SQLite under /config, which is single-replica
+  # only — see spec Deployment section). Enable with:
+  #   docker compose --profile postgres up
+  # and point impostarr.yml at it (values matching POSTGRES_USER/PASSWORD/DB
+  # below), e.g.:
+  #   db:
+  #     dsn: postgresql+psycopg://impostarr:CHANGE_ME@postgres:5432/impostarr
+  # The `postgres` extra (psycopg) is included in both docker/Dockerfile and
+  # docker/Dockerfile.cuda, so the shipped images can talk to this out of
+  # the box.
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-impostarr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-impostarr}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
