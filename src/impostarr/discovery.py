@@ -15,6 +15,7 @@ commit makes the batch all-or-nothing (crash-safe).
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 
 import xxhash
@@ -114,14 +115,14 @@ class Discoverer:
             is not None
         )
 
-    def _capture_file(
+    async def _capture_file(
         self,
         session: Session,
         instance: Instance,
         *,
         ep_file: EpisodeFile,
         series_id: int,
-        episode_ids: list[int],
+        episode_ids: list[int] | None,
         quality: dict,
         languages: list,
         history_id: int | None = None,
@@ -129,9 +130,14 @@ class Discoverer:
         source_title: str | None = None,
         indexer: str | None = None,
         guid: str | None = None,
+        episode_ids_resolver: Callable[[], Awaitable[list[int]]] | None = None,
     ) -> bool:
         """Stage a `files` row + `jobs` row on `session` (no commit). Returns
-        whether a job was created (False for any skip reason)."""
+        whether a job was created (False for any skip reason).
+
+        `episode_ids` is used as-is when given; when `None`,
+        `episode_ids_resolver` is awaited instead (kept lazy so a file that
+        gets skipped below never triggers the resolver's network call)."""
         if self._file_exists(session, instance.id, ep_file.id):
             return False
 
@@ -150,6 +156,10 @@ class Discoverer:
         if not local_path.exists():
             logger.warning("local file missing, skipping: %s", local_path)
             return False
+
+        if episode_ids is None:
+            assert episode_ids_resolver is not None
+            episode_ids = await episode_ids_resolver()
 
         content_hash = hash_file(local_path)
         file_row = File(
@@ -191,6 +201,10 @@ class Discoverer:
             return 0
 
         created = 0
+        # Per-series episodeFileId -> episode_ids grouping, cached across
+        # this call's records (client.episodes(series_id) is fetched at
+        # most once per distinct series_id seen in this batch).
+        episode_ids_by_series: dict[int, dict[int, list[int]]] = {}
         with self.session_factory() as session:
             instance = session.get(Instance, instance_id)
             last_id = watermark
@@ -215,12 +229,31 @@ class Discoverer:
                         )
                         continue
                     raise
-                if self._capture_file(
+                # Sonarr emits one history record per episode, even for a
+                # multi-episode file sharing one episodeFileId: record.
+                # episode_ids is always single-element. Resolve the full set
+                # lazily (only for files that actually get captured below)
+                # by grouping episodeFileId via the episodes endpoint,
+                # falling back to the record's own id if the file isn't
+                # found there (e.g. already deleted from Sonarr).
+                async def resolve_episode_ids(
+                    series_id: int = record.series_id,
+                    file_id: int = episode_file_id,
+                    fallback: list[int] = record.episode_ids,
+                ) -> list[int]:
+                    if series_id not in episode_ids_by_series:
+                        episode_ids_by_series[series_id] = await self._episode_ids_by_file(
+                            series_id
+                        )
+                    return episode_ids_by_series[series_id].get(file_id) or fallback
+
+                if await self._capture_file(
                     session,
                     instance,
                     ep_file=ep_file,
                     series_id=record.series_id,
-                    episode_ids=record.episode_ids,
+                    episode_ids=None,
+                    episode_ids_resolver=resolve_episode_ids,
                     quality=record.quality,
                     languages=record.languages,
                     history_id=record.id,
@@ -289,7 +322,7 @@ class Discoverer:
                         series_exhausted = False
                         break
                     processed += 1
-                    if self._capture_file(
+                    if await self._capture_file(
                         session,
                         instance,
                         ep_file=ep_file,

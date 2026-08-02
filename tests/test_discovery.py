@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from impostarr.config import PathMapping, Settings, SonarrInstance
 from impostarr.db import init_db, make_session_factory
 from impostarr.discovery import Discoverer, hash_file
-from impostarr.models import File, Instance
+from impostarr.models import File, Instance, Job
 from impostarr.sonarr import SonarrClient
 
 BASE_URL = "http://sonarr.test:8989"
@@ -110,6 +110,22 @@ def episode_file_json(id_, *, series_id=42, path="/tv/Show/S01E02.mkv", size=100
     }
 
 
+def episode_json(id_, *, episode_file_id, season_number=1, episode_number=1, has_file=True):
+    return {
+        "id": id_,
+        "seasonNumber": season_number,
+        "episodeNumber": episode_number,
+        "episodeFileId": episode_file_id,
+        "hasFile": has_file,
+    }
+
+
+def mock_episodes(series_id: int, episodes: list[dict]) -> None:
+    respx.get(f"{API_URL}/episode", params={"seriesId": str(series_id)}).mock(
+        return_value=httpx.Response(200, json=episodes)
+    )
+
+
 def mock_history_once(records: list[dict]) -> None:
     """Mock a single poll: one page of `records` (descending order expected
     by the caller) followed by the trailing empty page the client always
@@ -174,6 +190,7 @@ async def test_poll_once_creates_job_and_dedupes_same_episode_file_on_second_pol
     respx.get(f"{API_URL}/episodefile/9001").mock(
         return_value=httpx.Response(200, json=episode_file_json(9001, path="/tv/Show/S01E02.mkv"))
     )
+    mock_episodes(42, [episode_json(555, episode_file_id=9001)])
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
@@ -203,6 +220,49 @@ async def test_poll_once_creates_job_and_dedupes_same_episode_file_on_second_pol
 
 
 @respx.mock
+async def test_poll_once_multi_episode_file_captures_all_episode_ids(tmp_path, session_factory):
+    # Sonarr emits one history record per episode for a multi-episode
+    # import, both sharing the same episodeFileId. The sibling record hits
+    # the (instance_id, episode_file_id) dedupe and is dropped, but the
+    # first-captured files row must carry BOTH episode ids (needed for
+    # EpisodeSearch remediation later), not just the first record's own.
+    cfg = make_instance_cfg(tmp_path)
+    local_path = tmp_path / "tv" / "Show" / "S01E01E02.mkv"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"multi-episode content")
+
+    mock_history_once(
+        [
+            history_record(101, episode_id=555, series_id=42, file_id=9001),
+            history_record(102, episode_id=556, series_id=42, file_id=9001),
+        ]
+    )
+    respx.get(f"{API_URL}/episodefile/9001").mock(
+        return_value=httpx.Response(
+            200, json=episode_file_json(9001, path="/tv/Show/S01E01E02.mkv")
+        )
+    )
+    mock_episodes(
+        42,
+        [
+            episode_json(555, episode_file_id=9001),
+            episode_json(556, episode_file_id=9001, episode_number=2),
+        ],
+    )
+
+    async with make_client() as client:
+        discoverer = Discoverer(cfg, client, session_factory)
+        created = await discoverer.poll_once()
+
+    assert created == 1
+    with session_factory() as session:
+        assert session.query(File).count() == 1
+        file_row = session.query(File).one()
+        assert file_row.episode_ids == [555, 556]
+        assert session.query(Job).count() == 1
+
+
+@respx.mock
 async def test_poll_once_path_mapping_picks_longest_prefix(tmp_path, session_factory):
     cfg = make_instance_cfg(
         tmp_path,
@@ -220,6 +280,7 @@ async def test_poll_once_path_mapping_picks_longest_prefix(tmp_path, session_fac
     respx.get(f"{API_URL}/episodefile/9001").mock(
         return_value=httpx.Response(200, json=episode_file_json(9001, path=sonarr_path))
     )
+    mock_episodes(42, [episode_json(555, episode_file_id=9001)])
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
@@ -314,6 +375,13 @@ async def test_poll_once_watermark_advances_only_on_success(tmp_path, session_fa
     )
     respx.get(f"{API_URL}/episodefile/9002").mock(
         return_value=httpx.Response(200, json=episode_file_json(9002, path="/tv/bad.mkv"))
+    )
+    mock_episodes(
+        42,
+        [
+            episode_json(555, episode_file_id=9001),
+            episode_json(556, episode_file_id=9002, episode_number=2),
+        ],
     )
 
     # Bypass the dedupe check so processing reaches the DB insert for the
