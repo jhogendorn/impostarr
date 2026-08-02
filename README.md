@@ -144,10 +144,18 @@ works, and needs no API key.
 
 ### Writing a plugin
 
+`whisper-subs` and `subs-llm` are themselves ordinary third-party-style
+plugins bundled with Impostarr for convenience, not special-cased code: each
+lives in its own package under `src/` (`src/impostarr_plugin_whisper_subs/`,
+`src/impostarr_plugin_subs_llm/`), registers its own entry point, defines
+its own config model, and imports only from `impostarr.plugins.*` — exactly
+what an external plugin package looks like. Use either as a reference
+implementation.
+
 Plugins are discovered via the `impostarr.identifiers` entry-point group.
-Subclass `IdentifierPlugin` (`src/impostarr/plugins/base.py`), set `name`,
-`version`, and optionally `config_model` (a pydantic `BaseModel` — its
-fields become the `options` block in `impostarr.yml`), and implement:
+Subclass `IdentifierPlugin` (`impostarr.plugins.base.IdentifierPlugin`), set
+`name`, `version`, and optionally `config_model` (a pydantic `BaseModel` —
+its fields become the `options` block in `impostarr.yml`), and implement:
 
 ```python
 async def identify(self, claimed: ClaimedIdent, assets: AssetBundle, ctx: SeriesContext) -> PluginResult: ...
@@ -158,6 +166,10 @@ include at least one candidate with `ident.series == "claimed"` — this is
 how a plugin votes "yes, this is what it's labelled"), `"abstain"` with a
 `reason` when the plugin has nothing to go on (e.g. no transcript), or
 `"error"` with a `reason` on failure — never raise out of `identify`.
+
+A minimal SRT cue parser is available as public API for plugins that need
+one: `impostarr.plugins.subtitles.parse_srt` (used by both bundled
+plugins) — no need to write your own.
 
 Register the entry point in your plugin package's `pyproject.toml`:
 

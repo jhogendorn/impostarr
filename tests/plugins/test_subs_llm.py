@@ -9,7 +9,7 @@ import pytest
 import respx
 
 from impostarr.plugins.base import AssetBundle, ClaimedIdent, SeriesContext
-from impostarr.plugins.subs_llm import _JSON_REMINDER, SubsLlmConfig, SubsLlmPlugin
+from impostarr_plugin_subs_llm.plugin import _JSON_REMINDER, SubsLlmConfig, SubsLlmPlugin
 
 BASE_URL = "https://llm.test/v1"
 
