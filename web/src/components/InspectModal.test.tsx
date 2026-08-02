@@ -44,14 +44,41 @@ describe('InspectModal', () => {
     expect(within(section).getByText(/conf 92% · tvdb S1E1/)).toBeInTheDocument()
   })
 
-  it('the plugin-results table translates in_series/cross_series/junk tokens to words and carries an evidence tooltip', async () => {
+  it('the plugin-results table omits the in-series annotation (the SxxEyy candidate label already says it) and carries an evidence tooltip', async () => {
     getJobMock.mockResolvedValue(jobDetailFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
     const section = (await screen.findByText('Plugin results')).closest('section')!
-    expect(within(section).getByText(/matches this series: episodes 100/)).toBeInTheDocument()
+    expect(within(section).queryByText(/matches this series/)).not.toBeInTheDocument()
     const candidateLine = within(section).getByText(/conf 92% · tvdb S1E1/)
     expect(candidateLine).toHaveAttribute('title', JSON.stringify({}))
+  })
+
+  it('the plugin-results table keeps annotations that carry information: "different series" for cross-series, "no match" for junk', async () => {
+    getJobMock.mockResolvedValue({
+      ...jobDetailFixture,
+      plugin_results: [
+        {
+          name: 'whisper-transcript',
+          version: '1.0.0',
+          status: 'ok',
+          reason: null,
+          candidates: [
+            { confidence: 0.6, ident: { series: { tvdb: 81189 }, season: 1, episodes: [1] }, numbering: 'tvdb', evidence: {} },
+            { confidence: 0.1, ident: null, numbering: null, evidence: {} },
+          ],
+          normalized: [
+            { kind: 'cross_series', external_ids: { tvdb: 81189 } },
+            { kind: 'junk' },
+          ],
+        },
+      ],
+    })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const section = (await screen.findByText('Plugin results')).closest('section')!
+    expect(within(section).getByText(/different series/)).toBeInTheDocument()
+    expect(within(section).getByText('no match')).toBeInTheDocument()
   })
 
   it('never renders raw internal terms (in_series/s_claimed/s_alt)', async () => {

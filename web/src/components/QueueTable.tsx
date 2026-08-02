@@ -224,30 +224,41 @@ function QueueTable({
         />
       </div>
 
-      {selected.size > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-sm text-slate-200">
-          <span>{selected.size} selected</span>
-          {(['rerun', 'park', 'unpark'] as const).map((action) => {
-            const eligibleCount = selectedJobs.filter((job) => isEligible(action, job.status)).length
-            return (
-              <button
-                key={action}
-                type="button"
-                disabled={eligibleCount === 0 || bulkProgress !== null}
-                onClick={() => void runBulk(action)}
-                className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {BULK_ACTION_LABELS[action]} ({eligibleCount})
-              </button>
-            )
-          })}
-          {bulkProgress && (
-            <span className="text-xs text-slate-400">
-              {BULK_ACTION_LABELS[bulkProgress.action]}ing {bulkProgress.done}/{bulkProgress.total}…
-            </span>
-          )}
-        </div>
-      )}
+      {/* Fixed-height slot, always rendered — its contents (below) appear
+       * only when something is selected, but the slot itself never does,
+       * so selecting/deselecting rows causes zero vertical layout shift. */}
+      <div
+        role="group"
+        aria-label="Bulk actions"
+        className={`mb-3 flex h-10 flex-wrap items-center gap-3 rounded-lg px-3 text-sm text-slate-200 ${
+          selected.size > 0 ? 'border border-indigo-500/30 bg-indigo-500/10 py-2' : ''
+        }`}
+      >
+        {selected.size > 0 && (
+          <>
+            <span>{selected.size} selected</span>
+            {(['rerun', 'park', 'unpark'] as const).map((action) => {
+              const eligibleCount = selectedJobs.filter((job) => isEligible(action, job.status)).length
+              return (
+                <button
+                  key={action}
+                  type="button"
+                  disabled={eligibleCount === 0 || bulkProgress !== null}
+                  onClick={() => void runBulk(action)}
+                  className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {BULK_ACTION_LABELS[action]} ({eligibleCount})
+                </button>
+              )
+            })}
+            {bulkProgress && (
+              <span className="text-xs text-slate-400">
+                {BULK_ACTION_LABELS[bulkProgress.action]}ing {bulkProgress.done}/{bulkProgress.total}…
+              </span>
+            )}
+          </>
+        )}
+      </div>
       {bulkErrors.length > 0 && (
         <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
           {bulkErrors.map((message) => (
@@ -276,9 +287,10 @@ function QueueTable({
                 type="checkbox"
                 aria-label="Select all"
                 checked={items.length > 0 && selected.size === items.length}
+                disabled={items.length === 0}
                 onChange={toggleAll}
                 onClick={(e) => e.stopPropagation()}
-                className="h-4 w-4 cursor-pointer accent-indigo-500"
+                className="h-4 w-4 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
               />
             </th>
             <SortableTh field="series" label="Series (id)" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
