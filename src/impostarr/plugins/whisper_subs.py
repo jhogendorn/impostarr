@@ -17,8 +17,12 @@ documented fallback, this module implements the comparison natively with
 `rapidfuzz` (pinned) instead; `mkv-episode-matcher` is not a dependency.
 
 Comparison formula (`_match_ratio`): reference SRT lines and transcript
-segment texts are each lowercased and stripped of punctuation/extra
-whitespace. Two signals are blended 50/50:
+segment texts are each stripped of subtitle markup (HTML-style tags like
+`<i>...</i>`, ASS override blocks like `{\an8}`), lowercased, and stripped
+of punctuation/extra whitespace — markup removal runs first so tag
+delimiters (`<`, `>`, `{`, `}`) never fuse with adjacent words once
+punctuation is stripped (e.g. `<i>Hello</i>` must not become "ihelloi").
+Two signals are blended 50/50:
   - `full_ratio` — `rapidfuzz.fuzz.token_set_ratio` over the two blobs of
     joined, normalized text (0..100, scaled to 0..1). Rewards overall
     content overlap even when transcript/subtitle line segmentation differs.
@@ -61,6 +65,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_CANDIDATES = 10
 _LINE_HIT_THRESHOLD = 70.0
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_ASS_OVERRIDE_RE = re.compile(r"\{[^}]*\}")
 _PUNCT_RE = re.compile(r"[^\w\s]")
 _WS_RE = re.compile(r"\s+")
 
@@ -70,6 +76,10 @@ class WhisperSubsConfig(BaseModel):
 
 
 def _normalize(text: str) -> str:
+    # Markup stripped first: removing punctuation before markup would fuse
+    # tag delimiters into adjacent words (e.g. "<i>Hello</i>" -> "ihelloi").
+    text = _HTML_TAG_RE.sub("", text)
+    text = _ASS_OVERRIDE_RE.sub("", text)
     text = text.lower()
     text = _PUNCT_RE.sub("", text)
     text = _WS_RE.sub(" ", text).strip()

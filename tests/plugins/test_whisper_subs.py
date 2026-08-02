@@ -219,3 +219,41 @@ async def test_candidate_window_capped_at_ten_nearest(tmp_path):
     assert result.status == "ok"
     assert len(refsubs.calls) <= 11
     assert len(result.candidates) <= 11
+
+
+def test_normalize_strips_html_tags_before_punctuation():
+    assert whisper_subs._normalize("<i>Hello there</i>") == whisper_subs._normalize("Hello there")
+
+
+def test_normalize_strips_ass_override_blocks_before_punctuation():
+    assert whisper_subs._normalize(r"{\an8}Hello there") == whisper_subs._normalize("Hello there")
+
+
+async def test_match_ratio_high_for_markup_srt_vs_clean_transcript(tmp_path):
+    tagged_path = tmp_path / "S01E01.srt"
+    write_srt(
+        tagged_path,
+        [
+            r"{\an8}<i>The crew boards the ship at dawn</i>",
+            "<b>The captain gives the final order</b>",
+            r"{\an8}Engines ignite and they depart quietly",
+        ],
+    )
+    transcript = make_transcript(
+        [
+            "The crew boards the ship at dawn",
+            "The captain gives the final order",
+            "Engines ignite and they depart quietly",
+        ]
+    )
+    episodes = [make_episode(1, 1)]
+    refsubs = StubRefSubs({(1, 1): tagged_path})
+    ctx = make_ctx(make_series(), episodes, refsubs)
+    claimed = make_claimed(season=1, episodes=[1])
+    assets = AssetBundle(transcript=transcript)
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3))
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "ok"
+    assert result.candidates[0].confidence > 0.9
