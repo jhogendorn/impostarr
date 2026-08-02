@@ -16,11 +16,30 @@ mid-remediation back to `pending`, and a future worker could then re-claim it
 and call `replace`/`remap` again — but re-running Sonarr side effects
 (blocklist, delete, search/import) against a job that already made partial
 progress would be silently wrong, not merely redundant. Both methods guard
-against this: if `verdict.remediation_log` is already non-empty on entry,
-no steps are (re-)run and no API calls are made — a single log entry
-records the interruption and the job is quarantined for operator review.
-This converts a reap-and-redrive into a clean quarantine instead of a
-misleading double-execution.
+against this: if `verdict.remediation_log` already contains a *mutating*
+step on entry, no steps are (re-)run and no API calls are made — a single
+log entry records the interruption and the job is quarantined for operator
+review. This converts a reap-and-redrive into a clean quarantine instead of
+a misleading double-execution.
+
+Interruption guard, precisely (see `MUTATING_STEPS`/`_is_mutating_entry`):
+the guard keys on whether the log contains an entry that actually touched
+Sonarr or the filesystem, not on mere non-emptiness. A log can be
+non-empty without anything having been mutated — `remap`'s refusal steps
+(`occupied_check`, `episode_resolution`), `replace`'s "no download
+history" note (logged under the `mark_history_failed` step name but making
+no API call), a previous guard trip itself (`interruption_guard`), or an
+entirely DRY-RUN-prefixed log from a prior dry-run pass — and blocking a
+retry in those cases was a bug: an operator resolving the underlying issue
+(free up the occupied episode slot, fix a permissions problem, flip
+dry_run off) could never get `approve` to actually retry, since the stale
+refusal/note entries alone were enough to trip the old non-emptiness check.
+A logged step only counts as a genuine interruption when it's in
+`MUTATING_STEPS`, succeeded (`ok` True — a failed attempt didn't take
+durable effect, or failed atomically enough that retrying doesn't double
+anything up), and isn't DRY-RUN-prefixed. The log itself stays append-only
+either way (no entries are ever cleared) — the guard just looks past the
+non-mutating ones.
 """
 
 from __future__ import annotations
@@ -41,6 +60,56 @@ from impostarr.models import File, Job, TrashItem, Verdict
 from impostarr.sonarr import SonarrClient, SonarrError
 
 logger = logging.getLogger(__name__)
+
+# Step names that represent an action able to actually touch Sonarr state
+# or the filesystem — the closed set the interruption guard checks
+# against. Refusal/note steps (`occupied_check`, `episode_resolution`,
+# `interruption_guard`) are deliberately absent: they never call Sonarr or
+# touch a file, so their presence in a log must never block a retry.
+# `manual_import` (the single combined step `remap` logs only in dry-run)
+# is included for completeness but is inert in practice — dry-run entries
+# are excluded by `_is_mutating_entry` regardless of step name.
+MUTATING_STEPS = frozenset(
+    {
+        "trash",
+        "hardlink",
+        "mark_history_failed",
+        "delete_episode_file",
+        "manual_import_candidates",
+        "execute_manual_import",
+        "manual_import",
+        "episode_search",
+    }
+)
+
+
+def _is_mutating_entry(entry: dict) -> bool:
+    """True if one `remediation_log` entry represents a step that actually
+    happened against Sonarr or the filesystem.
+
+    False for: any step not in `MUTATING_STEPS`; a step that didn't
+    succeed (`ok` False); a DRY-RUN-prefixed detail (nothing was touched,
+    by dry-run's own construction); and `mark_history_failed`'s "no
+    download history" note specifically — that note shares its step name
+    with the real blocklist call but makes no API call at all, so it's
+    told apart by its detail text rather than by step name or `ok` alone.
+    """
+    if not entry["ok"]:
+        return False
+    if entry["detail"].startswith("DRY-RUN: "):
+        return False
+    if entry["step"] == "mark_history_failed" and "no download history exists" in entry["detail"]:
+        return False
+    return entry["step"] in MUTATING_STEPS
+
+
+def _was_interrupted(remediation_log: list[dict]) -> bool:
+    """True if `remediation_log` contains at least one genuinely mutating
+    entry — see `_is_mutating_entry`. This is what `replace`/`remap` check
+    on entry to decide whether to guard (quarantine without acting) instead
+    of the old "log is non-empty" check, which misfired on refusal-only and
+    dry-run-only logs (see this module's docstring)."""
+    return any(_is_mutating_entry(entry) for entry in remediation_log)
 
 
 def _log_step(session: Session, verdict: Verdict, step: str, ok: bool, detail: str) -> None:
@@ -122,7 +191,7 @@ class Remediator:
             file = session.get(File, db_job.file_id)
             verdict = _latest_verdict(session, db_job.id)
 
-            if verdict.remediation_log:
+            if _was_interrupted(verdict.remediation_log):
                 self._log(
                     session,
                     verdict,
@@ -260,7 +329,7 @@ class Remediator:
             file = session.get(File, db_job.file_id)
             verdict = _latest_verdict(session, db_job.id)
 
-            if verdict.remediation_log:
+            if _was_interrupted(verdict.remediation_log):
                 self._log(
                     session,
                     verdict,
