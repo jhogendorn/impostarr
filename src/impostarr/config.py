@@ -118,6 +118,14 @@ class Settings(BaseSettings):
     db: DbConfig = Field(default_factory=DbConfig)
     workers: WorkersConfig = Field(default_factory=WorkersConfig)
 
+    # Strongly recommended for first runs against a real library: no files
+    # are touched, no Sonarr state is changed; every action is logged as
+    # "DRY-RUN would ...". Scoping: only Sonarr API mutations and
+    # media-library filesystem operations are suppressed — Impostarr's own
+    # database and asset extraction (transcripts, framegrabs, phash corpus)
+    # still run, since those are impostarr's own artifacts, not the library.
+    dry_run: bool = False
+
     state_dir: Path = Path("/config")
     assets_dir: Path = Path("/assets")
     models_dir: Path = Path("/models")

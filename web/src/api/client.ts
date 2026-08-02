@@ -3,6 +3,7 @@ import type {
   BackfillResponse,
   JobDetail,
   JobStatus,
+  LogsResponse,
   QueuePage,
   StatusResponse,
   TransitionResponse,
@@ -94,4 +95,10 @@ export function triggerBackfill(name: string, batchSize?: number): Promise<Backf
     method: 'POST',
     body: JSON.stringify(batchSize === undefined ? {} : { batch_size: batchSize }),
   })
+}
+
+export function getLogs(level?: string, limit = 200): Promise<LogsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (level) params.set('level', level)
+  return api<LogsResponse>(`/logs?${params}`)
 }

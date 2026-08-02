@@ -627,7 +627,8 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
                 jobs.release(session, job, decision.outcome, deps.worker_id)
             else:  # "remediate" -- route() only sets this outcome when auto is True.
                 remediator = Remediator(
-                    deps.sonarr_client, deps.instance_cfg, deps.session_factory
+                    deps.sonarr_client, deps.instance_cfg, deps.session_factory,
+                    dry_run=deps.settings.dry_run,
                 )
                 if isinstance(decision.action, Remap):
                     await remediator.remap(

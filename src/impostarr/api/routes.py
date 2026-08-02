@@ -136,6 +136,15 @@ def healthz() -> dict:
     return {"status": "ok"}
 
 
+@router.get("/logs")
+def get_logs(request: Request, level: str | None = None, limit: int = 200) -> dict:
+    """Recent records from the in-memory ring buffer (Task: log viewer),
+    newest last. `level` filters at-or-above (INFO/WARNING/ERROR/...);
+    omitted returns every buffered level."""
+    buffer = request.app.state.log_buffer
+    return {"items": buffer.get_logs(level=level, limit=limit)}
+
+
 @router.get("/status")
 def get_status(request: Request) -> dict:
     with _session_factory(request)() as session:
@@ -154,6 +163,7 @@ def get_status(request: Request) -> dict:
         "instances": instances_out,
         "queues": queues,
         "workers": {"pool_size": request.app.state.pool_size},
+        "dry_run": request.app.state.settings.dry_run,
     }
 
 
@@ -439,7 +449,8 @@ async def approve_job(job_id: int, request: Request) -> dict:
             raise HTTPException(409, str(exc)) from exc
 
     runtime = _instance_runtime_for_file(request, file)
-    remediator = Remediator(runtime.client, runtime.cfg, session_factory)
+    dry_run = request.app.state.settings.dry_run
+    remediator = Remediator(runtime.client, runtime.cfg, session_factory, dry_run=dry_run)
     if action["kind"] == "remap":
         await remediator.remap(job, frozenset(action["target_episode_ids"]), worker_id)
     else:

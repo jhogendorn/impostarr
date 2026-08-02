@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from typing import ClassVar
 from unittest.mock import AsyncMock
@@ -181,6 +182,60 @@ def test_create_app_with_empty_sonarr_boots_without_workers(app_no_instance):
     with TestClient(app_no_instance) as client:
         response = client.get(f"{API_PREFIX}/healthz")
     assert response.status_code == 200
+
+
+def test_status_dry_run_defaults_false(app):
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/status")
+    assert response.json()["dry_run"] is False
+
+
+def test_status_dry_run_reflects_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(Discoverer, "poll_once", AsyncMock(return_value=0))
+    settings = Settings(state_dir=tmp_path / "state", dry_run=True)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/status")
+    assert response.json()["dry_run"] is True
+
+
+# -- logs -------------------------------------------------------------------
+
+
+def test_logs_endpoint_returns_captured_records(app):
+    with TestClient(app) as client:
+        logging.getLogger("impostarr.somewhere").warning("DRY-RUN: would do a thing")
+        response = client.get(f"{API_PREFIX}/logs")
+
+    assert response.status_code == 200
+    body = response.json()
+    messages = [item["message"] for item in body["items"]]
+    assert "DRY-RUN: would do a thing" in messages
+
+
+def test_logs_endpoint_filters_by_level(app):
+    with TestClient(app) as client:
+        logger = logging.getLogger("impostarr.somewhere")
+        logger.info("info line")
+        logger.error("error line")
+        response = client.get(f"{API_PREFIX}/logs", params={"level": "ERROR"})
+
+    assert response.status_code == 200
+    messages = [item["message"] for item in response.json()["items"]]
+    assert "error line" in messages
+    assert "info line" not in messages
+
+
+def test_logs_endpoint_respects_limit(app):
+    with TestClient(app) as client:
+        logger = logging.getLogger("impostarr.somewhere")
+        for i in range(5):
+            logger.info("msg-%d", i)
+        response = client.get(f"{API_PREFIX}/logs", params={"limit": 2})
+
+    items = response.json()["items"]
+    assert len(items) == 2
+    assert items[-1]["message"] == "msg-4"
 
 
 def test_create_app_wires_shared_refsubservice_into_every_instance_deps(tmp_path, monkeypatch):
@@ -556,7 +611,7 @@ def test_verdict_double_submission_second_409s_single_verdict_row(app):
 class FakeRemediator:
     calls: ClassVar[list[tuple]] = []
 
-    def __init__(self, client, cfg, session_factory) -> None:
+    def __init__(self, client, cfg, session_factory, dry_run: bool = False) -> None:
         self.session_factory = session_factory
 
     async def replace(self, job, worker_id) -> None:

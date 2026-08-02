@@ -156,6 +156,17 @@ workers:
   #   model: Systran/faster-whisper-small
   #   api_key: ""  # leave empty if the server doesn't require one
 
+# Dry run. Strongly recommended for first runs against a real library: no
+# files are touched, no Sonarr state is changed; every action is logged as
+# "DRY-RUN would ...". Scoping: only Sonarr API mutations (delete, search,
+# manual import, blocklist) and media-library file operations (the
+# hardlink/copy into staging) are suppressed. Impostarr's own database and
+# asset extraction (transcripts, framegrabs, phash corpus) still run — those
+# are impostarr's own artifacts, not the library. Jobs still transition to
+# `remediated` in dry-run (queue flow observable end-to-end); the
+# remediation_log audit trail records what would have happened.
+dry_run: false
+
 # Volumes (see README).
 state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay
 assets_dir: /assets # extracted artifact blobs (transcripts, framegrabs, refsub cache)

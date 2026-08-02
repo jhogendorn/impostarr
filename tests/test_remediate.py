@@ -43,8 +43,8 @@ def make_instance_cfg(tmp_path, **overrides) -> SonarrInstance:
     return SonarrInstance(**defaults)
 
 
-def make_client() -> SonarrClient:
-    return SonarrClient(BASE_URL, API_KEY, backoff=(0, 0, 0))
+def make_client(dry_run: bool = False) -> SonarrClient:
+    return SonarrClient(BASE_URL, API_KEY, backoff=(0, 0, 0), dry_run=dry_run)
 
 
 def make_active_job(
@@ -642,6 +642,86 @@ async def test_remap_hardlink_non_exdev_failure_includes_staging_path(
     assert log[0]["ok"] is False
     assert str(staged_path) in log[0]["detail"]
     assert get_job_status(session_factory, job_id) == "quarantine"
+
+
+# -- dry_run --------------------------------------------------------------
+#
+# No mutating route (delete/history/manualimport-POST) is mocked in any of
+# these: the client's own dry-run stubs make those calls no-ops, so a stray
+# real HTTP call to one would raise via respx's unmocked-request error just
+# as surely as an explicit call-count assertion.
+
+
+@respx.mock
+async def test_replace_dry_run_zero_mutating_calls_and_remediates(tmp_path, session_factory):
+    cfg = make_instance_cfg(tmp_path)
+    job_id, _ = make_active_job(session_factory, tmp_path, history_id=500)
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client(dry_run=True) as client:
+        remediator = Remediator(client, cfg, session_factory, dry_run=True)
+        await remediator.replace(job, WORKER_ID)
+
+    assert respx.calls.call_count == 0
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 3
+    assert all(step["ok"] for step in log)
+    assert all(step["detail"].startswith("DRY-RUN: ") for step in log)
+    assert get_job_status(session_factory, job_id) == "remediated"
+
+
+@respx.mock
+async def test_remap_dry_run_skips_filesystem_and_manual_import_but_remediates(
+    tmp_path, session_factory
+):
+    cfg = make_instance_cfg(tmp_path)
+    job_id, local_path = make_active_job(
+        session_factory, tmp_path, episode_ids=[555], series_id=42, episode_file_id=9001
+    )
+    target_ids = frozenset({777})
+
+    # Only a GET is mocked (episode resolution): delete_episode_file is a
+    # client-level dry-run no-op, and dry-run remap skips the
+    # manualimport GET + command POST entirely.
+    episodes_route = respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                episode_json(555, episode_number=2, episode_file_id=9001, has_file=True),
+                episode_json(
+                    777, season_number=1, episode_number=3, episode_file_id=0, has_file=False
+                ),
+            ],
+        )
+    )
+
+    with session_factory() as db_session:
+        job = db_session.get(Job, job_id)
+
+    async with make_client(dry_run=True) as client:
+        remediator = Remediator(client, cfg, session_factory, dry_run=True)
+        await remediator.remap(job, target_ids, WORKER_ID)
+
+    assert episodes_route.called
+    assert respx.calls.call_count == 1
+
+    staged_path = Path(cfg.staging_dir) / "S01E03.mkv"
+    assert not staged_path.exists()
+    assert not Path(cfg.staging_dir).exists()  # never created
+    assert local_path.exists()  # original file untouched
+
+    log = get_remediation_log(session_factory, job_id)
+    assert len(log) == 3
+    steps = [entry["step"] for entry in log]
+    assert steps == ["hardlink", "delete_episode_file", "manual_import"]
+    assert all(step["ok"] for step in log)
+    assert all(step["detail"].startswith("DRY-RUN: ") for step in log)
+    assert "would manual-import" in log[2]["detail"]
+    assert "777" in log[2]["detail"]
+    assert get_job_status(session_factory, job_id) == "remediated"
 
 
 @respx.mock

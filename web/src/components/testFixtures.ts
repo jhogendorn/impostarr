@@ -1,5 +1,5 @@
 /** Shared fixtures for component tests. Not itself a test file. */
-import type { JobDetail, QueuePage, StatusResponse } from '../api/types'
+import type { JobDetail, LogRecord, QueuePage, StatusResponse } from '../api/types'
 
 export const statusFixture: StatusResponse = {
   instances: [
@@ -16,7 +16,21 @@ export const statusFixture: StatusResponse = {
     remediated: 8,
   },
   workers: { pool_size: 2 },
+  dry_run: false,
 }
+
+export const dryRunStatusFixture: StatusResponse = { ...statusFixture, dry_run: true }
+
+export const logRecordsFixture: LogRecord[] = [
+  { ts: '2026-08-02T00:00:00Z', level: 'INFO', logger: 'impostarr.worker', message: 'claimed job 42' },
+  {
+    ts: '2026-08-02T00:00:01Z',
+    level: 'WARNING',
+    logger: 'impostarr.sonarr.client',
+    message: 'DRY-RUN: would DELETE /episodefile/9001',
+  },
+  { ts: '2026-08-02T00:00:02Z', level: 'ERROR', logger: 'impostarr.pipeline', message: 'plugin crashed' },
+]
 
 export const queuePageFixture: QueuePage = {
   total: 4,

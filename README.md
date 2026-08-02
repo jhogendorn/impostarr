@@ -50,6 +50,32 @@ annotated reference: [examples/impostarr.yml](examples/impostarr.yml). Any
 value can also be set via env var (`IMPOSTARR__SECTION__KEY`, or JSON for
 list/object-valued keys) — env always wins over the file.
 
+## Dry run
+
+`dry_run: true` (top-level in `impostarr.yml`) is strongly recommended for
+first runs against a real library: no files are touched, no Sonarr state
+is changed. Every action that would otherwise mutate something is instead
+logged as `DRY-RUN: would ...` — visible live in the [log viewer](#log-viewer)
+(lines highlighted amber) and, for remediation, in the job's
+`remediation_log` audit trail.
+
+Scoping: only Sonarr API mutations (delete, search, manual import,
+blocklist) and media-library filesystem operations (the hardlink/copy into
+staging) are suppressed. Impostarr's own database and asset extraction
+(transcripts, framegrabs, phash corpus) still run — those are impostarr's
+own artifacts, not the library. Jobs still walk their full step sequence
+and transition to `remediated` normally, so the queue flow is observable
+end-to-end; the audit trail marks what would have happened instead of
+actually happening. When active, the UI shows an amber "DRY RUN" badge in
+the header.
+
+## Log viewer
+
+The "Logs" button in the header opens a bottom drawer with a live tail of
+the last 1000 log records (`GET /api/v1/logs`), filterable by level
+(INFO/WARNING/ERROR), polling every 3 seconds while open. DRY-RUN lines are
+highlighted amber.
+
 ## Volumes
 
 | Volume    | Contents                                                        | Notes |
