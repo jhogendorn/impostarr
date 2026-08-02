@@ -49,10 +49,19 @@ TERMINAL_STATUSES = frozenset(
 
 # Allowed `from status -> {to statuses}` for the queue state machine. Single
 # source of truth for every status change in this module.
+#
+# The terminal-status entries (matched/quarantine/inconclusive/error) exist
+# for two API-driven paths, not the worker pool: `requeue` (rerun, any of
+# them -> pending) and `claim_for_api` (approve, quarantine -> active only,
+# distinct from `claim_next`'s pending -> active claim).
 VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "hold": frozenset({"pending"}),
     "pending": frozenset({"hold", "active"}),
     "active": frozenset({"pending"} | TERMINAL_STATUSES),
+    "matched": frozenset({"pending"}),
+    "quarantine": frozenset({"pending", "active"}),
+    "inconclusive": frozenset({"pending"}),
+    "error": frozenset({"pending"}),
 }
 
 
@@ -226,5 +235,54 @@ def unpark(session: Session, job: Job) -> Job:
         session.rollback()
         raise InvalidTransition(f"job {job.id} was no longer on hold when unparking")
     job.status = "pending"
+    session.commit()
+    return job
+
+
+def requeue(session: Session, job: Job) -> Job:
+    """Reset a settled job (`matched`/`quarantine`/`inconclusive`/`error`)
+    back to `pending` for a fresh attempt: resets `attempts` to 0 and clears
+    any stale lease fields. Fenced on the job still being in its expected
+    starting status in the DB, like `park`/`unpark`. API-driven (the `rerun`
+    endpoint), not part of the worker pool's own state machine."""
+    from_status = job.status
+    _check_transition(from_status, "pending", job.id)
+    result = session.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status == from_status)
+        .values(status="pending", attempts=0, claimed_by=None, claimed_at=None, heartbeat_at=None)
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise InvalidTransition(f"job {job.id} was no longer {from_status!r} when requeuing")
+    job.status = "pending"
+    job.attempts = 0
+    job.claimed_by = None
+    job.claimed_at = None
+    job.heartbeat_at = None
+    session.commit()
+    return job
+
+
+def claim_for_api(session: Session, job: Job, worker_id: str) -> Job:
+    """Claim a `quarantine` job for direct API-driven remediation (the
+    `approve` endpoint). Fenced UPDATE `quarantine` -> `active`, distinct
+    from `claim_next`'s `pending` -> `active` claim: this claims one
+    specific, already-identified job rather than the oldest pending one.
+    Raises `InvalidTransition` if the job is no longer `quarantine`."""
+    _check_transition(job.status, "active", job.id)
+    now = _utcnow()
+    result = session.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status == "quarantine")
+        .values(status="active", claimed_by=worker_id, claimed_at=now, heartbeat_at=now)
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise InvalidTransition(f"job {job.id} was no longer quarantine when claiming for api")
+    job.status = "active"
+    job.claimed_by = worker_id
+    job.claimed_at = now
+    job.heartbeat_at = now
     session.commit()
     return job

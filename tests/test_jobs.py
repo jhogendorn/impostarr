@@ -11,12 +11,14 @@ from impostarr.jobs import (
     InvalidTransition,
     LeaseLost,
     _utcnow,
+    claim_for_api,
     claim_next,
     create_job,
     heartbeat,
     park,
     reap_stale,
     release,
+    requeue,
     unpark,
 )
 from impostarr.models import File, Instance, Job
@@ -373,6 +375,59 @@ def test_unpark_on_pending_job_raises_invalid_transition(session_factory):
 
         with pytest.raises(InvalidTransition):
             unpark(session, job)
+
+
+@pytest.mark.parametrize("terminal_status", ["matched", "quarantine", "inconclusive", "error"])
+def test_requeue_settled_job_resets_to_pending(session_factory, terminal_status):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        create_job(session, file_id)
+        job = claim_next(session, "worker-1")
+        job.attempts = 2
+        session.commit()
+        release(session, job, terminal_status, "worker-1")
+        assert job.status == terminal_status
+
+        requeued = requeue(session, job)
+
+        assert requeued.status == "pending"
+        assert requeued.attempts == 0
+        assert requeued.claimed_by is None
+        assert requeued.claimed_at is None
+        assert requeued.heartbeat_at is None
+
+
+def test_requeue_on_pending_job_raises_invalid_transition(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        job = create_job(session, file_id)
+
+        with pytest.raises(InvalidTransition):
+            requeue(session, job)
+
+
+def test_claim_for_api_claims_quarantine_job_active(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        create_job(session, file_id)
+        job = claim_next(session, "worker-1")
+        release(session, job, "quarantine", "worker-1")
+
+        claimed = claim_for_api(session, job, "api-alice")
+
+        assert claimed.status == "active"
+        assert claimed.claimed_by == "api-alice"
+        assert claimed.claimed_at is not None
+        assert claimed.heartbeat_at is not None
+
+
+def test_claim_for_api_on_pending_job_raises_invalid_transition(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        job = create_job(session, file_id)
+
+        with pytest.raises(InvalidTransition):
+            claim_for_api(session, job, "api-alice")
 
 
 def test_job_datetimes_are_tz_aware_in_a_fresh_session(session_factory):

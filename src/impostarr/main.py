@@ -1,0 +1,145 @@
+"""Composition root: builds the FastAPI app from `Settings`.
+
+Recommended entrypoint is `uvicorn --factory impostarr.main:create_app`
+(or the `app` factory alias below) rather than a module-level `app =
+create_app()` — the latter would run settings/DB/plugin loading as an
+import-time side effect, which is exactly what tests construct their own
+`Settings` to avoid.
+
+Known PoC gap: plugins are constructed by `plugins.loader.load_plugins`
+without any per-request/per-instance dependency injection (no shared
+`httpx.AsyncClient` handed to them), so a plugin like `subs-llm` that wants
+its own HTTP client builds one internally. Documented rather than "fixed"
+here — reworking the loader's construction protocol is out of scope for
+this task.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+from impostarr.api.auth import AuthMiddleware
+from impostarr.api.events import EventBus
+from impostarr.api.routes import router
+from impostarr.assets.transcribe import NullTranscriber, Transcriber
+from impostarr.config import Settings, SonarrInstance, load_settings
+from impostarr.db import init_db, make_session_factory
+from impostarr.discovery import Discoverer
+from impostarr.pipeline import PipelineDeps
+from impostarr.plugins.loader import activate_plugin_overlay, ensure_external_plugins, load_plugins
+from impostarr.sonarr import SonarrClient
+from impostarr.worker import WorkerPool
+
+logger = logging.getLogger(__name__)
+
+try:
+    import faster_whisper  # noqa: F401
+
+    _FASTER_WHISPER_AVAILABLE = True
+except ImportError:
+    _FASTER_WHISPER_AVAILABLE = False
+
+
+@dataclass
+class InstanceRuntime:
+    """Per-Sonarr-instance runtime handles that routes look up via
+    `app.state.instances[name]`."""
+
+    client: SonarrClient
+    cfg: SonarrInstance
+    discoverer: Discoverer
+
+
+def _build_transcriber(settings: Settings) -> Transcriber:
+    if _FASTER_WHISPER_AVAILABLE and settings.workers.whisper_model:
+        from impostarr.assets.transcribe import FasterWhisperTranscriber
+
+        return FasterWhisperTranscriber(
+            model_name=settings.workers.whisper_model,
+            device=settings.workers.whisper_device,
+            models_dir=settings.models_dir,
+        )
+    return NullTranscriber()
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings if settings is not None else load_settings()
+
+    engine = init_db(settings)
+    session_factory = make_session_factory(engine)
+
+    plugin_venv_dir = settings.state_dir / "plugins" / "venv"
+    ensure_external_plugins(settings.plugins.sources, settings.state_dir, plugin_venv_dir)
+    activate_plugin_overlay(plugin_venv_dir)
+    loaded_plugins = load_plugins(settings)
+
+    transcriber = _build_transcriber(settings)
+    event_bus = EventBus()
+
+    instances: dict[str, InstanceRuntime] = {}
+    deps_per_instance: dict[str, PipelineDeps] = {}
+    for instance_cfg in settings.sonarr:
+        client = SonarrClient(instance_cfg.url, instance_cfg.api_key)
+        discoverer = Discoverer(instance_cfg, client, session_factory)
+        instances[instance_cfg.name] = InstanceRuntime(client=client, cfg=instance_cfg, discoverer=discoverer)
+        deps_per_instance[instance_cfg.name] = PipelineDeps(
+            session_factory=session_factory,
+            sonarr_client=client,
+            settings=settings,
+            instance_cfg=instance_cfg,
+            plugins=loaded_plugins,
+            transcriber=transcriber,
+            refsubs=None,
+            worker_id=f"pool-{instance_cfg.name}",
+            event_bus=event_bus,
+        )
+
+    worker_pool = (
+        WorkerPool(
+            deps_per_instance,
+            {name: runtime.discoverer for name, runtime in instances.items()},
+            settings.workers.pool_size,
+        )
+        if deps_per_instance
+        else None
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if worker_pool is not None:
+            await worker_pool.start()
+        try:
+            yield
+        finally:
+            if worker_pool is not None:
+                await worker_pool.stop()
+            for runtime in instances.values():
+                await runtime.client.close()
+
+    fastapi_app = FastAPI(lifespan=lifespan)
+    fastapi_app.state.settings = settings
+    fastapi_app.state.session_factory = session_factory
+    fastapi_app.state.event_bus = event_bus
+    fastapi_app.state.instances = instances
+    fastapi_app.state.pool_size = settings.workers.pool_size if deps_per_instance else 0
+
+    fastapi_app.add_middleware(AuthMiddleware, settings=settings)
+    fastapi_app.include_router(router)
+
+    web_dist = Path("web/dist")
+    if web_dist.is_dir():
+        fastapi_app.mount("/", StaticFiles(directory=web_dist, html=True), name="static")
+
+    return fastapi_app
+
+
+def app() -> FastAPI:
+    """Factory alias for `uvicorn impostarr.main:app --factory`."""
+    return create_app()

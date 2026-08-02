@@ -57,6 +57,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from impostarr import jobs
+from impostarr.api.events import EventBus
 from impostarr.assets import extract
 from impostarr.assets.transcribe import Transcriber
 from impostarr.config import Settings, SonarrInstance
@@ -97,6 +98,15 @@ class PipelineDeps:
     # for this process's lifetime (no TTL needed for the PoC).
     series_cache: dict[tuple[str, int], SeriesContext] = field(default_factory=dict)
     series_cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Optional: when set, `_publish` notifies SSE subscribers at each
+    # terminal point in `process_job` (Task 15). None in existing tests and
+    # any caller that doesn't need live updates (default, no behavior change).
+    event_bus: EventBus | None = None
+
+
+def _publish(deps: PipelineDeps, job_id: int, status: str) -> None:
+    if deps.event_bus is not None:
+        deps.event_bus.publish({"type": "job_update", "job_id": job_id, "status": status})
 
 
 # -- series context / claimed ident -----------------------------------------
@@ -539,6 +549,7 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
                     job_id, file.episode_ids, file.series_id,
                 )
                 jobs.release(session, job, "error", deps.worker_id)
+                _publish(deps, job_id, "error")
                 return
 
             path = Path(file.local_path)
@@ -554,6 +565,7 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
             if sum(x is None for x in (probe_asset, audio_asset, subs_assets, frame_seq)) == 4:
                 logger.error("job %s: all asset extraction stages failed", job_id)
                 jobs.release(session, job, "error", deps.worker_id)
+                _publish(deps, job_id, "error")
                 return
 
             transcript_payload = await _stage_transcript(
@@ -621,6 +633,7 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
                     await remediator.replace(job, deps.worker_id)
                 with deps.session_factory() as check_session:
                     final_status = check_session.get(Job, job.id).status
+            _publish(deps, job_id, final_status)
 
             if frame_hash_row is not None:
                 threshold = deps.settings.thresholds.phash_store
@@ -651,3 +664,4 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
             logger.exception("job %s: unexpected pipeline error", job_id)
             if job.status == "active":
                 jobs.release(session, job, "error", deps.worker_id)
+                _publish(deps, job_id, "error")
