@@ -17,15 +17,35 @@ function App() {
   const [queuePage, setQueuePage] = useState<QueuePage | null>(null)
   const [inspectJobId, setInspectJobId] = useState<number | null>(null)
 
+  // Latest activeTab/pageIndex, readable from the debounce timer callback at
+  // fire time rather than captured (possibly stale) at schedule time.
+  const activeTabRef = useRef(activeTab)
+  activeTabRef.current = activeTab
+  const pageIndexRef = useRef(pageIndex)
+  pageIndexRef.current = pageIndex
+
+  // Per-fetch-kind request tokens: a response only calls setState if it's
+  // still the most recently issued request of its kind — guards against an
+  // older, slower request resolving after a newer one (e.g. two queue
+  // fetches in flight for different tabs).
+  const statusTokenRef = useRef(0)
+  const queueTokenRef = useRef(0)
+
   const fetchStatus = useCallback(() => {
+    const token = ++statusTokenRef.current
     getStatus()
-      .then(setStatus)
+      .then((data) => {
+        if (token === statusTokenRef.current) setStatus(data)
+      })
       .catch((err: unknown) => console.error('status fetch failed', err))
   }, [])
 
   const fetchQueue = useCallback((jobStatus: JobStatus, page: number) => {
+    const token = ++queueTokenRef.current
     getQueue(jobStatus, page, PAGE_SIZE)
-      .then(setQueuePage)
+      .then((data) => {
+        if (token === queueTokenRef.current) setQueuePage(data)
+      })
       .catch((err: unknown) => console.error('queue fetch failed', err))
   }, [])
 
@@ -51,11 +71,11 @@ function App() {
       if (debounceTimer.current !== null) clearTimeout(debounceTimer.current)
       debounceTimer.current = setTimeout(() => {
         debounceTimer.current = null
-        fetchQueue(activeTab, pageIndex)
+        fetchQueue(activeTabRef.current, pageIndexRef.current)
         fetchStatus()
       }, JOB_UPDATE_DEBOUNCE_MS)
     },
-    [activeTab, pageIndex, fetchQueue, fetchStatus],
+    [fetchQueue, fetchStatus],
   )
 
   const connected = useEvents(handleEvent)

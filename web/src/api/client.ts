@@ -30,10 +30,16 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   })
   const text = await response.text()
-  const body = text ? JSON.parse(text) : null
   if (!response.ok) {
+    let body: unknown = text
+    try {
+      body = text ? JSON.parse(text) : null
+    } catch {
+      // non-JSON error body (e.g. a proxy/plaintext 5xx) — surface the raw text
+    }
     throw new ApiError(response.status, body)
   }
+  const body = text ? JSON.parse(text) : null
   return body as T
 }
 

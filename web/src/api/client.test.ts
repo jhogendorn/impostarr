@@ -35,4 +35,25 @@ describe('api client', () => {
       expect(apiError.body).toEqual(errorBody)
     }
   })
+
+  it('falls back to the raw text body when a non-2xx response is not valid JSON', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('<html>502 Bad Gateway</html>', {
+        status: 502,
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const rejection = getStatus()
+    await expect(rejection).rejects.toBeInstanceOf(ApiError)
+    try {
+      await rejection
+      expect.unreachable()
+    } catch (err) {
+      const apiError = err as ApiError
+      expect(apiError.status).toBe(502)
+      expect(apiError.body).toBe('<html>502 Bad Gateway</html>')
+    }
+  })
 })

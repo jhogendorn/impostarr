@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import type { SseEvent } from './api/types'
@@ -58,5 +58,32 @@ describe('App SSE wiring', () => {
 
     expect(getQueueMock).toHaveBeenCalledTimes(2)
     expect(getStatusMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('debounced refetch targets the tab active when the timer fires, not when it was scheduled', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    render(<App />)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    getQueueMock.mockClear()
+
+    // schedule the debounced refetch while still on the default 'hold' tab
+    act(() => {
+      capturedHandler?.({ kind: 'job_update', data: { type: 'job_update', job_id: 1, status: 'matched' } })
+    })
+
+    // switch tabs mid-debounce-window
+    act(() => {
+      fireEvent.click(screen.getByRole('tab', { name: /^Quarantine/ }))
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+
+    const lastCall = getQueueMock.mock.calls.at(-1)
+    expect(lastCall?.[0]).toBe('quarantine')
   })
 })

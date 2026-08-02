@@ -16,12 +16,13 @@ interface Candidate {
   confidence: number
   ident: { series: unknown; season: number; episodes: number[] } | null
   numbering: string | null
+  evidence?: Record<string, unknown>
 }
 
 interface RemediationStep {
   step: string
   ok: boolean
-  detail: string
+  detail: unknown
   ts: string
 }
 
@@ -41,8 +42,24 @@ interface TranscriptPayload {
   language?: string
 }
 
-function isCandidateArray(value: unknown): value is Candidate[] {
-  return Array.isArray(value)
+// -- runtime shape guards for the API's genuinely-`unknown` JSON fields
+// (candidates/normalized/remediation_log/asset payload) — a malformed
+// entry renders a visible fallback instead of throwing mid-render.
+
+function isCandidateIdent(value: unknown): value is { series: unknown; season: number; episodes: number[] } {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return typeof record.season === 'number' && Array.isArray(record.episodes)
+}
+
+function isCandidate(value: unknown): value is Candidate {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (typeof record.confidence !== 'number') return false
+  if (typeof record.evidence !== 'object' || record.evidence === null) return false
+  if (record.numbering != null && typeof record.numbering !== 'string') return false
+  if (record.ident != null && !isCandidateIdent(record.ident)) return false
+  return true
 }
 
 function describeNormalized(entry: unknown): string {
@@ -55,8 +72,33 @@ function describeNormalized(entry: unknown): string {
   return JSON.stringify(entry)
 }
 
-function isRemediationLog(value: unknown): value is RemediationStep[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === 'object' && entry !== null && 'step' in entry)
+function isRemediationStep(value: unknown): value is RemediationStep {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return typeof record.step === 'string' && typeof record.ok === 'boolean' && typeof record.ts === 'string'
+}
+
+function isProbePayload(value: unknown): value is ProbePayload {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.format != null && (typeof record.format !== 'object' || Array.isArray(record.format))) return false
+  if (record.streams != null && !Array.isArray(record.streams)) return false
+  return true
+}
+
+function isTranscriptSegment(value: unknown): value is TranscriptSegment {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return typeof record.start === 'number' && typeof record.end === 'number' && typeof record.text === 'string'
+}
+
+function isTranscriptPayload(value: unknown): value is TranscriptPayload {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.segments != null && !(Array.isArray(record.segments) && record.segments.every(isTranscriptSegment))) {
+    return false
+  }
+  return true
 }
 
 /** Fetches job detail on open; renders claimed mapping, scores, per-plugin
@@ -103,19 +145,30 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
   const frameAssets = detail?.assets.filter((asset) => asset.type === 'frames' && asset.has_path) ?? []
   const transcriptAsset = detail?.assets.find((asset) => asset.type === 'transcript')
   const probeAsset = detail?.assets.find((asset) => asset.type === 'probe')
-  const transcript = transcriptAsset?.payload as TranscriptPayload | undefined
-  const probe = probeAsset?.payload as ProbePayload | undefined
+  const transcript =
+    transcriptAsset && isTranscriptPayload(transcriptAsset.payload) ? transcriptAsset.payload : undefined
+  const probe = probeAsset && isProbePayload(probeAsset.payload) ? probeAsset.payload : undefined
   const remediationLogRaw = detail?.verdict?.remediation_log
-  const remediationLog = isRemediationLog(remediationLogRaw) ? remediationLogRaw : null
+  const remediationEntries: unknown[] = Array.isArray(remediationLogRaw) ? remediationLogRaw : []
 
   return (
     <Dialog open={open} onClose={onClose} className="relative z-50">
       <DialogBackdrop className="fixed inset-0 bg-black/70" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
         <DialogPanel className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-6 text-slate-100">
-          <DialogTitle className="text-lg font-semibold text-indigo-400">
-            Job #{jobId} {detail ? `— ${detail.job.status}` : ''}
-          </DialogTitle>
+          <div className="flex items-start justify-between gap-4">
+            <DialogTitle className="text-lg font-semibold text-indigo-400">
+              Job #{jobId} {detail ? `— ${detail.job.status}` : ''}
+            </DialogTitle>
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={onClose}
+              className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            >
+              ✕
+            </button>
+          </div>
 
           {loading && <p className="mt-4 text-sm text-slate-400">Loading…</p>}
           {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
@@ -158,14 +211,22 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
                         <td className="py-1 pr-2">{result.status}</td>
                         <td className="py-1 pr-2 text-slate-500">{result.reason ?? '—'}</td>
                         <td className="py-1 pr-2">
-                          {isCandidateArray(result.candidates) && result.candidates.length > 0 ? (
+                          {Array.isArray(result.candidates) && result.candidates.length > 0 ? (
                             <ul className="space-y-0.5">
-                              {result.candidates.map((candidate, i) => (
-                                <li key={i}>
-                                  conf {candidate.confidence.toFixed(2)} · {candidate.numbering ?? '—'}{' '}
-                                  {candidate.ident ? `S${candidate.ident.season}E${candidate.ident.episodes.join(',')}` : ''}
-                                </li>
-                              ))}
+                              {result.candidates.map((candidate, i) =>
+                                isCandidate(candidate) ? (
+                                  <li key={i}>
+                                    conf {candidate.confidence.toFixed(2)} · {candidate.numbering ?? '—'}{' '}
+                                    {candidate.ident
+                                      ? `S${candidate.ident.season}E${candidate.ident.episodes.join(',')}`
+                                      : ''}
+                                  </li>
+                                ) : (
+                                  <li key={i} className="text-slate-600">
+                                    unrecognized entry
+                                  </li>
+                                ),
+                              )}
                             </ul>
                           ) : (
                             '—'
@@ -223,15 +284,22 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
                 </section>
               )}
 
-              {remediationLog && remediationLog.length > 0 && (
+              {remediationEntries.length > 0 && (
                 <section>
                   <h3 className="mb-1 font-medium text-slate-300">Remediation log</h3>
                   <ol className="space-y-1">
-                    {remediationLog.map((step, i) => (
-                      <li key={i} className={step.ok ? 'text-slate-400' : 'text-red-400'}>
-                        {step.ts} · {step.step} · {step.ok ? 'ok' : 'failed'} — {step.detail}
-                      </li>
-                    ))}
+                    {remediationEntries.map((entry, i) =>
+                      isRemediationStep(entry) ? (
+                        <li key={i} className={entry.ok ? 'text-slate-400' : 'text-red-400'}>
+                          {entry.ts} · {entry.step} · {entry.ok ? 'ok' : 'failed'} —{' '}
+                          {typeof entry.detail === 'string' ? entry.detail : JSON.stringify(entry.detail)}
+                        </li>
+                      ) : (
+                        <li key={i} className="text-slate-600">
+                          unrecognized entry
+                        </li>
+                      ),
+                    )}
                   </ol>
                 </section>
               )}
