@@ -108,7 +108,7 @@ only fields we consume):
 
 - `system_status()` — connectivity check.
 - `history_since(history_id: int) -> list[HistoryRecord]` — paged
-  `GET /history?eventType=downloadFolderImported&sortKey=id&sortDir=asc`,
+  `GET /history?eventType=downloadFolderImported&sortKey=id&sortDirection=ascending`,
   filtered to records with id > watermark. HistoryRecord: id, episodeIds,
   seriesId, sourceTitle, downloadId, data (guid, indexer), episodeFileId,
   quality, languages, date.
