@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1
+#
+# GPU-transcription variant. Structurally identical to docker/Dockerfile;
+# the only functional difference is `--extra whisper` in stage 2, which
+# pulls in faster-whisper + ctranslate2 (their GPU wheels bundle the CUDA
+# runtime libraries they need, so no separate nvidia/cuda base image is
+# required here). Everything else — apt packages, runtime base, entrypoint,
+# healthcheck — is the same as the CPU image.
+#
+# Running with GPU access additionally requires:
+#   - the nvidia-container-toolkit installed on the Docker host
+#   - `docker run --gpus all ...` (or `deploy.resources.reservations.devices`
+#     with driver `nvidia` in compose)
+#   - workers.whisper_device: cuda (or auto) in impostarr.yml
+#
+# Not built as part of the PoC's smoke test (heavy: bundles CUDA-capable
+# wheels); structure-verified only. Build from the repo root:
+#   docker build -f docker/Dockerfile.cuda -t impostarr:cuda .
+
+# ---- Stage 1: web build ---------------------------------------------------
+FROM node:24-slim AS web
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# ---- Stage 2: python dependency build (+ whisper extra) --------------------
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS python-builder
+
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_NO_CACHE=1
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+COPY src ./src
+RUN uv sync --frozen --no-dev --no-editable --extra whisper
+
+# ---- Stage 3: runtime -------------------------------------------------------
+FROM python:3.12-slim-bookworm AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg \
+      mkvtoolnix \
+      tesseract-ocr \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-builder /usr/local/bin/uv /usr/local/bin/uv
+
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin impostarr
+
+WORKDIR /app
+COPY --from=python-builder /app/.venv /app/.venv
+COPY src ./src
+COPY --from=web /web/dist ./web/dist
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && chown -R impostarr:impostarr /app
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    IMPOSTARR_CONFIG=/config/impostarr.yml \
+    UV_NO_CACHE=1
+
+VOLUME ["/config", "/assets", "/models", "/media"]
+EXPOSE 8484
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:8484/api/v1/healthz || exit 1
+
+USER impostarr
+ENTRYPOINT ["/entrypoint.sh"]
