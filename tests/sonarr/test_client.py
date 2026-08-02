@@ -307,6 +307,19 @@ async def test_exhausted_retries_on_persistent_5xx_raises_sonarr_error():
     assert route.call_count == 3
 
 
+@respx.mock
+async def test_retry_backoff_index_clamped_when_max_retries_exceeds_backoff_length():
+    # backoff has only 1 entry but max_retries=3 requires indexing attempts
+    # 0..2; _request must clamp the index instead of raising IndexError.
+    route = respx.get(f"{API_URL}/system/status").mock(return_value=httpx.Response(503))
+    async with SonarrClient(BASE_URL, API_KEY, max_retries=3, backoff=(0,)) as client:
+        with pytest.raises(SonarrError) as exc_info:
+            await client.system_status()
+
+    assert exc_info.value.status_code == 503
+    assert route.call_count == 4
+
+
 async def test_context_manager_closes_underlying_client():
     async with SonarrClient(BASE_URL, API_KEY) as client:
         inner = client._client
