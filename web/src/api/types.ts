@@ -23,16 +23,46 @@ export interface InstanceSummary {
   url: string
   history_watermark: string | null
   backfill_cursor: string | null
+  last_polled_at: string | null
+  last_backfilled_at: string | null
+}
+
+export interface ActiveJob {
+  job_id: number
+  instance: string | null
+  series_id: number | null
+  sonarr_path: string | null
+  claimed_by: string | null
+  claimed_at: string | null
+  elapsed_s: number | null
+}
+
+export interface StatusSummary {
+  unprocessed: number
+  processed: number
+}
+
+export interface SystemStats {
+  cpu_percent: number
+  mem_percent: number
 }
 
 export interface StatusResponse {
   instances: InstanceSummary[]
   queues: Record<JobStatus, number>
+  summary: StatusSummary
+  system: SystemStats
+  approval_required: boolean
+  active_jobs: ActiveJob[]
   workers: { pool_size: number }
   dry_run: boolean
+  trash_count: number
 }
 
 // -- /queues/{status} ---------------------------------------------------
+
+export type QueueSortField = 'updated_at' | 'created_at'
+export type SortDir = 'asc' | 'desc'
 
 export interface QueueFileSummary {
   series_id: number
@@ -49,6 +79,7 @@ export interface QueueVerdictSummary {
 export interface JobSummary {
   job_id: number
   status: JobStatus
+  instance: string | null
   file: QueueFileSummary
   verdict: QueueVerdictSummary | null
   created_at: string
@@ -57,7 +88,16 @@ export interface JobSummary {
 
 export interface QueuePage {
   total: number
+  page_size: number
   items: JobSummary[]
+}
+
+export interface GetQueueOptions {
+  page?: number
+  pageSize?: number
+  instance?: string
+  sort?: QueueSortField
+  dir?: SortDir
 }
 
 // -- /jobs/{id} -----------------------------------------------------------
@@ -101,6 +141,12 @@ export interface HumanIdent {
   episodes: number[]
 }
 
+export interface DupeInfo {
+  duplicate_of_file_id: number
+  similarity: number
+  sonarr_path: string | null
+}
+
 export interface JobDetailVerdict {
   s_claimed: number | null
   s_alt: number | null
@@ -109,6 +155,7 @@ export interface JobDetailVerdict {
   remediation_log: unknown
   source: 'auto' | 'human'
   human_ident: HumanIdent | null
+  dupe_info: DupeInfo | null
 }
 
 export interface Asset {
@@ -120,8 +167,20 @@ export interface Asset {
   payload: unknown | null
 }
 
+/** Live-fetched claimed-series cross-database ids, `null` when the lookup
+ * failed or no instance runtime is configured (see routes.py
+ * `_series_external_ids`). */
+export interface SeriesExternalIds {
+  title: string | null
+  tvdb_id: number | null
+  imdb_id: string | null
+  tmdb_id: number | null
+}
+
 export interface JobDetail {
   job: JobDetailJob
+  instance: string | null
+  external_ids: SeriesExternalIds | null
   file: JobDetailFile
   plugin_results: PluginResult[]
   verdict: JobDetailVerdict | null
@@ -190,4 +249,35 @@ export interface LogRecord {
 
 export interface LogsResponse {
   items: LogRecord[]
+}
+
+// -- /trash ---------------------------------------------------------------
+
+export interface TrashItem {
+  id: number
+  instance: string
+  original_path: string
+  trash_path: string
+  series_id: number
+  episode_ids: number[]
+  size: number
+  trashed_at: string
+  expires_at: string
+  expires_in_s: number
+}
+
+export interface TrashPage {
+  total: number
+  page_size: number
+  items: TrashItem[]
+}
+
+export interface DeleteTrashResponse {
+  result: 'deleted'
+}
+
+export interface RestoreTrashResponse {
+  result: 'restored'
+  original_path: string
+  note: string
 }

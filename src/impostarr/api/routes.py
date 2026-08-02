@@ -288,8 +288,30 @@ def get_queue(
     return {"total": total, "page_size": page_size, "items": items}
 
 
+async def _series_external_ids(request: Request, file: File) -> dict[str, Any] | None:
+    """Best-effort live lookup of the claimed series' cross-database ids
+    (for the inspect modal's TVDB/IMDB links + title), via the same
+    per-instance runtime `_instance_runtime_for_file` resolves for approve.
+    Broad except is deliberate: this is a non-critical enrichment of the
+    job-detail response — an unreachable/misconfigured instance, or the
+    file's instance having no runtime, should degrade to `None`, not fail
+    the whole job-detail request."""
+    try:
+        runtime = _instance_runtime_for_file(request, file)
+        series = await runtime.client.series(file.series_id)
+    except Exception:
+        logger.warning("series lookup failed for external_ids (series_id=%s)", file.series_id, exc_info=True)
+        return None
+    return {
+        "title": series.title,
+        "tvdb_id": series.tvdb_id,
+        "imdb_id": series.imdb_id,
+        "tmdb_id": series.tmdb_id,
+    }
+
+
 @router.get("/jobs/{job_id}")
-def get_job_detail(job_id: int, request: Request) -> dict:
+async def get_job_detail(job_id: int, request: Request) -> dict:
     with _session_factory(request)() as session:
         job = session.get(Job, job_id)
         if job is None:
@@ -306,6 +328,7 @@ def get_job_detail(job_id: int, request: Request) -> dict:
             .first()
         )
         instance_row = session.get(Instance, file.instance_id)
+        external_ids = await _series_external_ids(request, file)
         return {
             "job": {
                 "id": job.id,
@@ -315,6 +338,7 @@ def get_job_detail(job_id: int, request: Request) -> dict:
                 "updated_at": job.updated_at.isoformat(),
             },
             "instance": instance_row.name if instance_row is not None else None,
+            "external_ids": external_ids,
             "file": {
                 "series_id": file.series_id,
                 "episode_ids": file.episode_ids,

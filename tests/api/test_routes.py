@@ -183,6 +183,25 @@ def mock_episodes(series_id=42):
     )
 
 
+def series_json(series_id=42, **overrides):
+    body = {
+        "id": series_id,
+        "title": "Test Show",
+        "tvdbId": 12345,
+        "imdbId": "tt1234567",
+        "tmdbId": 6789,
+        "titleSlug": "test-show",
+    }
+    body.update(overrides)
+    return body
+
+
+def mock_series(series_id=42, **overrides):
+    respx.get(f"{API_URL}/series/{series_id}").mock(
+        return_value=httpx.Response(200, json=series_json(series_id, **overrides))
+    )
+
+
 # -- healthz / status -----------------------------------------------------
 
 
@@ -523,7 +542,9 @@ def test_queues_sort_created_at_ascending(app):
 # -- job detail / assets -----------------------------------------------------
 
 
+@respx.mock
 def test_job_detail_includes_plugin_results_and_verdict(app):
+    mock_series()
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
     file_id = _make_file(session_factory, instance_id)
@@ -558,7 +579,57 @@ def test_job_detail_includes_plugin_results_and_verdict(app):
     assert body["frame_hash_present"] is False
 
 
+@respx.mock
+def test_job_detail_includes_external_ids_on_successful_series_lookup(app):
+    mock_series(title="Breaking Bad", tvdbId=81189, imdbId="tt0903747", tmdbId=1396)
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["external_ids"] == {
+        "title": "Breaking Bad",
+        "tvdb_id": 81189,
+        "imdb_id": "tt0903747",
+        "tmdb_id": 1396,
+    }
+
+
+@respx.mock
+def test_job_detail_external_ids_null_on_series_lookup_failure(app):
+    respx.get(f"{API_URL}/series/42").mock(return_value=httpx.Response(404, json={}))
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["external_ids"] is None
+
+
+def test_job_detail_external_ids_null_when_no_runtime_configured(app_no_instance):
+    session_factory = _session_factory(app_no_instance)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app_no_instance) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["external_ids"] is None
+
+
+@respx.mock
 def test_job_detail_includes_dupe_info(app):
+    mock_series()
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
     file_id = _make_file(session_factory, instance_id)

@@ -32,4 +32,29 @@ describe('StatusHeader', () => {
 
     expect(onToggleLogs).toHaveBeenCalledTimes(1)
   })
+
+  it('shows the unprocessed/processed summary from status.summary', () => {
+    render(<StatusHeader status={statusFixture} connected onToggleLogs={vi.fn()} />)
+
+    expect(screen.getByText('6 unprocessed · 30 processed')).toBeInTheDocument()
+  })
+
+  it('renders an instance chip with a last-sync/last-backfill tooltip', () => {
+    render(<StatusHeader status={statusFixture} connected onToggleLogs={vi.fn()} />)
+
+    expect(screen.getByText('main')).toBeInTheDocument()
+    expect(screen.getByText('main').closest('[title]')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/last sync .*; last backfill .*/),
+    )
+  })
+
+  it('the connection dot carries an explanatory tooltip', () => {
+    render(<StatusHeader status={statusFixture} connected onToggleLogs={vi.fn()} />)
+
+    expect(screen.getByTestId('sse-dot').closest('[title]')).toHaveAttribute(
+      'title',
+      expect.stringContaining('Live updates connected/disconnected'),
+    )
+  })
 })

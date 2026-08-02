@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react'
 import { assetUrl, getJob } from '../api/client'
-import type { JobDetail } from '../api/types'
-import { formatScore } from '../lib/format'
+import type { JobDetail, JobDetailVerdict, SeriesExternalIds } from '../api/types'
+import { formatPercent, formatTimestampS, pathBasename } from '../lib/format'
 import VerdictActions from './VerdictActions'
 
 interface InspectModalProps {
@@ -10,11 +10,18 @@ interface InspectModalProps {
   open: boolean
   onClose: () => void
   onChanged: () => void
+  dryRun?: boolean
+}
+
+interface CandidateIdent {
+  series: unknown
+  season: number
+  episodes: number[]
 }
 
 interface Candidate {
   confidence: number
-  ident: { series: unknown; season: number; episodes: number[] } | null
+  ident: CandidateIdent | null
   numbering: string | null
   evidence?: Record<string, unknown>
 }
@@ -42,11 +49,23 @@ interface TranscriptPayload {
   language?: string
 }
 
-// -- runtime shape guards for the API's genuinely-`unknown` JSON fields
-// (candidates/normalized/remediation_log/asset payload) — a malformed
-// entry renders a visible fallback instead of throwing mid-render.
+type NormalizedKind = 'in_series' | 'cross_series' | 'junk'
 
-function isCandidateIdent(value: unknown): value is { series: unknown; season: number; episodes: number[] } {
+interface NormalizedInSeries {
+  kind: 'in_series'
+  episode_ids: number[]
+}
+
+interface NormalizedCrossSeries {
+  kind: 'cross_series'
+  external_ids: Record<string, unknown>
+}
+
+// -- runtime shape guards for the API's genuinely-`unknown` JSON fields
+// (candidates/normalized/remediation_log/asset payload/tool_meta) — a
+// malformed entry renders a visible fallback instead of throwing mid-render.
+
+function isCandidateIdent(value: unknown): value is CandidateIdent {
   if (typeof value !== 'object' || value === null) return false
   const record = value as Record<string, unknown>
   return typeof record.season === 'number' && Array.isArray(record.episodes)
@@ -56,20 +75,17 @@ function isCandidate(value: unknown): value is Candidate {
   if (typeof value !== 'object' || value === null) return false
   const record = value as Record<string, unknown>
   if (typeof record.confidence !== 'number') return false
-  if (typeof record.evidence !== 'object' || record.evidence === null) return false
   if (record.numbering != null && typeof record.numbering !== 'string') return false
   if (record.ident != null && !isCandidateIdent(record.ident)) return false
   return true
 }
 
-function describeNormalized(entry: unknown): string {
-  if (typeof entry !== 'object' || entry === null) return String(entry)
-  const record = entry as Record<string, unknown>
-  if (record.kind === 'in_series') return `in_series: ${(record.episode_ids as number[]).join(', ')}`
-  if (record.kind === 'cross_series') return `cross_series: ${JSON.stringify(record.external_ids)}`
-  if (record.kind === 'junk') return 'junk'
-  if (typeof record.reason === 'string') return `unnormalizable: ${record.reason}`
-  return JSON.stringify(entry)
+function normalizedKind(value: unknown): NormalizedKind | 'unnormalizable' | 'unknown' {
+  if (typeof value !== 'object' || value === null) return 'unknown'
+  const record = value as Record<string, unknown>
+  if (record.kind === 'in_series' || record.kind === 'cross_series' || record.kind === 'junk') return record.kind
+  if (typeof record.reason === 'string') return 'unnormalizable'
+  return 'unknown'
 }
 
 function isRemediationStep(value: unknown): value is RemediationStep {
@@ -101,10 +117,246 @@ function isTranscriptPayload(value: unknown): value is TranscriptPayload {
   return true
 }
 
-/** Fetches job detail on open; renders claimed mapping, scores, per-plugin
- * results, transcript excerpt, framegrab strip, probe summary, remediation
- * log, and the VerdictActions footer. */
-function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
+function frameTimestampS(toolMeta: unknown): number | null {
+  if (typeof toolMeta !== 'object' || toolMeta === null) return null
+  const value = (toolMeta as Record<string, unknown>).timestamp_s
+  return typeof value === 'number' ? value : null
+}
+
+// -- external-id links --------------------------------------------------
+
+/** Either the job-detail-level `external_ids` shape (tvdb_id/imdb_id/tmdb_id,
+ * from Sonarr's Series model) or a normalized cross_series candidate's
+ * (tvdb/imdb/tmdb, from the plugin contract's ExternalIds) — both are
+ * rendered the same way. */
+function tvdbUrl(ids: SeriesExternalIds | Record<string, unknown> | null | undefined): string | null {
+  if (!ids) return null
+  const record = ids as Record<string, unknown>
+  const tvdb = record.tvdb_id ?? record.tvdb
+  return typeof tvdb === 'number' ? `https://thetvdb.com/dereferrer/series/${tvdb}` : null
+}
+
+function imdbUrl(ids: SeriesExternalIds | Record<string, unknown> | null | undefined): string | null {
+  if (!ids) return null
+  const record = ids as Record<string, unknown>
+  const imdb = record.imdb_id ?? record.imdb
+  return typeof imdb === 'string' ? `https://www.imdb.com/title/${imdb}/` : null
+}
+
+function ExternalLinks({ ids }: { ids: SeriesExternalIds | Record<string, unknown> | null | undefined }) {
+  const tvdb = tvdbUrl(ids)
+  const imdb = imdbUrl(ids)
+  if (!tvdb && !imdb) return null
+  return (
+    <span className="ml-2 space-x-2 text-xs">
+      {tvdb && (
+        <a href={tvdb} target="_blank" rel="noreferrer" className="text-indigo-400 hover:underline">
+          TVDB
+        </a>
+      )}
+      {imdb && (
+        <a href={imdb} target="_blank" rel="noreferrer" className="text-indigo-400 hover:underline">
+          IMDB
+        </a>
+      )}
+    </span>
+  )
+}
+
+// -- "labelled as" season/episode derivation -----------------------------
+//
+// JobDetail.file only carries Sonarr episode ids, not season/episode
+// numbers. Every applicable ('ok') plugin result is contractually
+// guaranteed a candidate with ident.series === 'claimed' (see
+// plugins/base.py's PluginResult validator) — that candidate's
+// season/episodes is the human-readable numbering for the file's claimed
+// identity, so it's reused here rather than adding a second Sonarr episode
+// lookup to the backend just for display.
+function claimedSeasonEpisode(detail: JobDetail): CandidateIdent | null {
+  for (const pr of detail.plugin_results) {
+    if (pr.status !== 'ok' || !Array.isArray(pr.candidates)) continue
+    for (const raw of pr.candidates) {
+      if (isCandidate(raw) && raw.ident && raw.ident.series === 'claimed') return raw.ident
+    }
+  }
+  return null
+}
+
+function seasonEpisodeLabel(ident: { season: number; episodes: number[] }): string {
+  const season = String(ident.season).padStart(2, '0')
+  return `S${season}${ident.episodes.map((ep) => `E${String(ep).padStart(2, '0')}`).join('')}`
+}
+
+// -- "identified as" derivation -------------------------------------------
+//
+// Tied to the server's own routing decision (`verdict.proposed_action`)
+// rather than re-deriving scoring from scratch client-side: `remap` names
+// the exact winning in-series alternate by episode id, `replace` means the
+// winner was cross-series/junk (that distinction isn't itself persisted, so
+// it's inferred from whichever plugin candidate best explains it).
+
+interface IdentifiedAs {
+  kind: 'matches' | 'remap' | 'cross_series' | 'junk' | 'human' | 'uncertain' | 'unknown'
+  seasonEpisode?: CandidateIdent
+  externalIds?: Record<string, unknown>
+  confidence?: number | null
+}
+
+function findInSeriesLabel(detail: JobDetail, targetIds: Set<number>): CandidateIdent | null {
+  for (const pr of detail.plugin_results) {
+    if (!Array.isArray(pr.candidates) || !Array.isArray(pr.normalized)) continue
+    for (let i = 0; i < pr.candidates.length; i++) {
+      const norm = pr.normalized[i]
+      if (normalizedKind(norm) !== 'in_series') continue
+      const ids = (norm as NormalizedInSeries).episode_ids
+      if (Array.isArray(ids) && ids.length === targetIds.size && ids.every((id) => targetIds.has(id))) {
+        const cand = pr.candidates[i]
+        if (isCandidate(cand) && cand.ident) return cand.ident
+      }
+    }
+  }
+  return null
+}
+
+function findCrossSeriesCandidate(detail: JobDetail): Record<string, unknown> | null {
+  for (const pr of detail.plugin_results) {
+    if (!Array.isArray(pr.candidates) || !Array.isArray(pr.normalized)) continue
+    for (let i = 0; i < pr.candidates.length; i++) {
+      if (normalizedKind(pr.normalized[i]) === 'cross_series') {
+        return (pr.normalized[i] as NormalizedCrossSeries).external_ids
+      }
+    }
+  }
+  return null
+}
+
+function identifiedAs(detail: JobDetail): IdentifiedAs {
+  const verdict = detail.verdict
+  if (!verdict) return { kind: 'unknown' }
+  if (verdict.source === 'human' && verdict.human_ident) {
+    return { kind: 'human', seasonEpisode: { season: verdict.human_ident.season, episodes: verdict.human_ident.episodes, series: 'claimed' } }
+  }
+  if (verdict.s_claimed === null) return { kind: 'unknown' }
+  if (verdict.outcome === 'matched') return { kind: 'matches' }
+
+  const action = verdict.proposed_action
+  if (action && action.kind === 'remap' && Array.isArray(action.target_episode_ids)) {
+    const targetIds = new Set(action.target_episode_ids as number[])
+    const label = findInSeriesLabel(detail, targetIds)
+    return { kind: 'remap', seasonEpisode: label ?? undefined, confidence: verdict.s_alt }
+  }
+  if (action && action.kind === 'replace') {
+    const cross = findCrossSeriesCandidate(detail)
+    if (cross) return { kind: 'cross_series', externalIds: cross, confidence: verdict.s_alt }
+    return { kind: 'junk', confidence: verdict.s_alt }
+  }
+  if (verdict.s_alt !== null) return { kind: 'uncertain', confidence: verdict.s_alt }
+  return { kind: 'matches' }
+}
+
+function IdentifiedAsText({ result }: { result: IdentifiedAs }) {
+  switch (result.kind) {
+    case 'matches':
+      return <span>Matches the labelled episode.</span>
+    case 'human':
+      return <span>{result.seasonEpisode ? seasonEpisodeLabel(result.seasonEpisode) : '—'} (human override)</span>
+    case 'remap':
+      return (
+        <span>
+          {result.seasonEpisode ? seasonEpisodeLabel(result.seasonEpisode) : 'a different episode'} at{' '}
+          {formatPercent(result.confidence ?? null)}
+        </span>
+      )
+    case 'cross_series':
+      return (
+        <span>
+          Identified as a different series
+          <ExternalLinks ids={result.externalIds} />
+        </span>
+      )
+    case 'junk':
+      return <span>Content didn't match any episode.</span>
+    case 'uncertain':
+      return <span>No confident alternative found ({formatPercent(result.confidence ?? null)}).</span>
+    default:
+      return <span>Could not identify.</span>
+  }
+}
+
+// -- plain-language outcome sentence --------------------------------------
+
+function outcomeSentence(verdict: JobDetailVerdict | null, jobStatus: string, dryRun: boolean): string {
+  if (!verdict) return 'Not yet processed.'
+  switch (verdict.outcome) {
+    case 'matched':
+      return 'Verified match.'
+    case 'quarantine':
+      return 'Waiting for human review.'
+    case 'inconclusive':
+      return 'Not enough evidence to judge.'
+    case 'remediate':
+      if (jobStatus === 'remediated') return dryRun ? 'Fix applied (dry run).' : 'Fix applied.'
+      if (jobStatus === 'error') return 'Error while applying the fix.'
+      return 'Fix attempted, needs review.'
+    default:
+      return `${verdict.outcome[0].toUpperCase()}${verdict.outcome.slice(1)}.`
+  }
+}
+
+// -- plugin candidate chip -------------------------------------------------
+
+function CandidateChip({ candidate, normalized }: { candidate: Candidate; normalized: unknown }) {
+  const kind = normalizedKind(normalized)
+  const title = candidate.evidence ? JSON.stringify(candidate.evidence) : undefined
+
+  let body: ReactNode
+  if (kind === 'in_series' && candidate.ident) {
+    body = `${seasonEpisodeLabel(candidate.ident)} — ${formatPercent(candidate.confidence)}`
+  } else if (kind === 'cross_series') {
+    body = (
+      <>
+        identified as a different series <ExternalLinks ids={(normalized as NormalizedCrossSeries).external_ids} />
+      </>
+    )
+  } else if (kind === 'junk') {
+    body = "content didn't match any episode"
+  } else if (kind === 'unnormalizable') {
+    body = "couldn't map to a known episode"
+  } else if (candidate.ident) {
+    // The normalized companion entry is missing/misaligned, but the
+    // candidate itself is well-formed — fall back to its own ident rather
+    // than the "unrecognized entry" wording reserved for genuinely
+    // malformed candidate objects (see the fallback below).
+    body = `${seasonEpisodeLabel(candidate.ident)} — ${formatPercent(candidate.confidence)}`
+  } else {
+    body = `confidence ${formatPercent(candidate.confidence)}`
+  }
+
+  return (
+    <li title={title} className="rounded border border-slate-700 bg-slate-800/60 px-2 py-1 text-xs text-slate-300">
+      {body}
+    </li>
+  )
+}
+
+const STATUS_CHIP_CLASS: Record<string, string> = {
+  ok: 'bg-emerald-500/15 text-emerald-400',
+  abstain: 'bg-slate-700 text-slate-300',
+  error: 'bg-red-500/15 text-red-400',
+}
+
+function statusChipText(status: string, reason: string | null): string {
+  if (status === 'ok') return 'found evidence'
+  if (status === 'abstain') return `skipped: ${reason ?? 'no reason given'}`
+  if (status === 'error') return `failed: ${reason ?? 'unknown error'}`
+  return status
+}
+
+/** Fetches job detail on open; renders a plain-language identification
+ * summary, per-plugin results, transcript excerpt, framegrab strip (with
+ * timestamp badges), probe summary, dupe warning, remediation log, and the
+ * VerdictActions footer. */
+function InspectModal({ jobId, open, onClose, onChanged, dryRun = false }: InspectModalProps) {
   const [detail, setDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -151,6 +403,9 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
   const remediationLogRaw = detail?.verdict?.remediation_log
   const remediationEntries: unknown[] = Array.isArray(remediationLogRaw) ? remediationLogRaw : []
 
+  const labelledSeasonEpisode = detail ? claimedSeasonEpisode(detail) : null
+  const identified = detail ? identifiedAs(detail) : null
+
   return (
     <Dialog open={open} onClose={onClose} className="relative z-50">
       <DialogBackdrop className="fixed inset-0 bg-black/70" />
@@ -158,7 +413,8 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
         <DialogPanel className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-6 text-slate-100">
           <div className="flex items-start justify-between gap-4">
             <DialogTitle className="text-lg font-semibold text-indigo-400">
-              Job #{jobId} {detail ? `— ${detail.job.status}` : ''}
+              {detail ? `Series ${detail.file.series_id}` : `Job #${jobId}`}
+              {detail && <ExternalLinks ids={detail.external_ids} />}
             </DialogTitle>
             <button
               type="button"
@@ -173,76 +429,80 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
           {loading && <p className="mt-4 text-sm text-slate-400">Loading…</p>}
           {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
 
-          {detail && (
+          {detail && identified && (
             <div className="mt-4 space-y-6 text-sm">
               <section>
-                <h3 className="mb-1 font-medium text-slate-300">Claimed mapping</h3>
+                <h3 className="mb-1 font-medium text-slate-300">Labelled as</h3>
                 <p className="text-slate-400">
-                  series {detail.file.series_id} · episodes {detail.file.episode_ids.join(', ')}
+                  {labelledSeasonEpisode
+                    ? seasonEpisodeLabel(labelledSeasonEpisode)
+                    : `episode(s) ${detail.file.episode_ids.join(', ')}`}{' '}
+                  · {detail.instance ?? 'unknown instance'}
                 </p>
                 <p className="break-all text-slate-500">{detail.file.sonarr_path}</p>
               </section>
 
               <section>
-                <h3 className="mb-1 font-medium text-slate-300">Scores</h3>
+                <h3 className="mb-1 font-medium text-slate-300">Identified as</h3>
                 <p className="text-slate-400">
-                  s_claimed {formatScore(detail.verdict?.s_claimed ?? null)} · s_alt{' '}
-                  {formatScore(detail.verdict?.s_alt ?? null)} · outcome {detail.verdict?.outcome ?? '—'}
+                  <IdentifiedAsText result={identified} />
                 </p>
               </section>
 
               <section>
+                <h3 className="mb-1 font-medium text-slate-300">Confidence</h3>
+                <p className="text-slate-400">
+                  Confidence it is the labelled episode: {formatPercent(detail.verdict?.s_claimed ?? null)}
+                </p>
+                <p className="text-slate-400">{outcomeSentence(detail.verdict, detail.job.status, dryRun)}</p>
+              </section>
+
+              {detail.verdict?.dupe_info && (
+                <section>
+                  <h3 className="mb-1 font-medium text-slate-300">Possible duplicate</h3>
+                  <p className="text-amber-400">
+                    Visually near-identical to{' '}
+                    {detail.verdict.dupe_info.sonarr_path ? pathBasename(detail.verdict.dupe_info.sonarr_path) : 'another file'}{' '}
+                    (similarity {formatPercent(detail.verdict.dupe_info.similarity)})
+                  </p>
+                </section>
+              )}
+
+              <section>
                 <h3 className="mb-1 font-medium text-slate-300">Plugin results</h3>
-                <table className="w-full text-left text-xs">
-                  <thead className="text-slate-500">
-                    <tr>
-                      <th className="py-1 pr-2">Plugin</th>
-                      <th className="py-1 pr-2">Status</th>
-                      <th className="py-1 pr-2">Reason</th>
-                      <th className="py-1 pr-2">Candidates</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.plugin_results.map((result) => (
-                      <tr key={`${result.name}-${result.version}`} className="align-top text-slate-300">
-                        <td className="py-1 pr-2">
+                <ul className="space-y-2">
+                  {detail.plugin_results.map((result) => (
+                    <li key={`${result.name}-${result.version}`} className="text-slate-300">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">
                           {result.name} v{result.version}
-                        </td>
-                        <td className="py-1 pr-2">{result.status}</td>
-                        <td className="py-1 pr-2 text-slate-500">{result.reason ?? '—'}</td>
-                        <td className="py-1 pr-2">
-                          {Array.isArray(result.candidates) && result.candidates.length > 0 ? (
-                            <ul className="space-y-0.5">
-                              {result.candidates.map((candidate, i) =>
-                                isCandidate(candidate) ? (
-                                  <li key={i}>
-                                    conf {candidate.confidence.toFixed(2)} · {candidate.numbering ?? '—'}{' '}
-                                    {candidate.ident
-                                      ? `S${candidate.ident.season}E${candidate.ident.episodes.join(',')}`
-                                      : ''}
-                                  </li>
-                                ) : (
-                                  <li key={i} className="text-slate-600">
-                                    unrecognized entry
-                                  </li>
-                                ),
-                              )}
-                            </ul>
-                          ) : (
-                            '—'
+                        </span>
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-xs ${STATUS_CHIP_CLASS[result.status] ?? 'bg-slate-700 text-slate-300'}`}
+                        >
+                          {statusChipText(result.status, result.reason)}
+                        </span>
+                      </div>
+                      {Array.isArray(result.candidates) && result.candidates.length > 0 && (
+                        <ul className="mt-1 flex flex-wrap gap-1.5">
+                          {result.candidates.map((candidate, i) =>
+                            isCandidate(candidate) ? (
+                              <CandidateChip
+                                key={i}
+                                candidate={candidate}
+                                normalized={Array.isArray(result.normalized) ? result.normalized[i] : undefined}
+                              />
+                            ) : (
+                              <li key={i} className="text-slate-600">
+                                unrecognized entry
+                              </li>
+                            ),
                           )}
-                          {Array.isArray(result.normalized) && result.normalized.length > 0 && (
-                            <ul className="mt-1 space-y-0.5 text-slate-500">
-                              {result.normalized.map((entry, i) => (
-                                <li key={i}>{describeNormalized(entry)}</li>
-                              ))}
-                            </ul>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        </ul>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </section>
 
               {transcript?.segments && transcript.segments.length > 0 && (
@@ -261,15 +521,24 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
                 <section>
                   <h3 className="mb-1 font-medium text-slate-300">Framegrabs</h3>
                   <div className="flex flex-wrap gap-2">
-                    {frameAssets.map((asset) => (
-                      <img
-                        key={asset.id}
-                        src={assetUrl(detail.job.id, asset.id)}
-                        loading="lazy"
-                        alt={`frame ${asset.id}`}
-                        className="h-20 w-auto rounded border border-slate-700"
-                      />
-                    ))}
+                    {frameAssets.map((asset) => {
+                      const timestampS = frameTimestampS(asset.tool_meta)
+                      return (
+                        <div key={asset.id} className="relative">
+                          <img
+                            src={assetUrl(detail.job.id, asset.id)}
+                            loading="lazy"
+                            alt={`frame ${asset.id}`}
+                            className="h-20 w-auto rounded border border-slate-700"
+                          />
+                          {timestampS !== null && (
+                            <span className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 text-[10px] text-slate-100">
+                              {formatTimestampS(timestampS)}
+                            </span>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </section>
               )}

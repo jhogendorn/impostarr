@@ -1,4 +1,5 @@
-import type { StatusResponse } from '../api/types'
+import type { InstanceSummary, StatusResponse } from '../api/types'
+import { relativeTime } from '../lib/format'
 
 interface StatusHeaderProps {
   status: StatusResponse | null
@@ -6,12 +7,19 @@ interface StatusHeaderProps {
   onToggleLogs: () => void
 }
 
-/** Presentational: instances + watermarks, queue-depth summary, worker
- * pool size, SSE connection dot, dry-run badge, logs drawer toggle. Data
+const CONNECTION_TOOLTIP =
+  'Live updates connected/disconnected — the UI auto-reconnects and refreshes when events arrive.'
+
+function instanceTooltip(instance: InstanceSummary): string {
+  const lastSync = instance.last_polled_at ? relativeTime(instance.last_polled_at) : 'never'
+  const lastBackfill = instance.last_backfilled_at ? relativeTime(instance.last_backfilled_at) : 'never'
+  return `last sync ${lastSync}; last backfill ${lastBackfill}`
+}
+
+/** Presentational: instances (chips with sync/backfill tooltips), unprocessed/processed
+ * summary, worker pool size, SSE connection dot, dry-run badge, logs drawer toggle. Data
  * owned/fetched by the parent. */
 function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
-  const totalQueued = status ? Object.values(status.queues).reduce((sum, n) => sum + n, 0) : null
-
   return (
     <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 bg-slate-900 px-6 py-3">
       <div className="flex items-center gap-6">
@@ -24,19 +32,22 @@ function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
             Dry Run
           </span>
         )}
-        <div className="flex flex-wrap gap-4 text-sm text-slate-300">
+        <div className="flex flex-wrap gap-2 text-sm text-slate-300">
           {status?.instances.map((instance) => (
-            <div key={instance.name} className="flex items-center gap-1.5">
+            <div
+              key={instance.name}
+              title={instanceTooltip(instance)}
+              className="flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1"
+            >
               <span className="font-medium text-slate-200">{instance.name}</span>
-              <span className="text-slate-500">
-                {instance.history_watermark ? `watermark ${instance.history_watermark}` : 'no watermark'}
-              </span>
             </div>
           ))}
         </div>
       </div>
       <div className="flex items-center gap-5 text-sm text-slate-400">
-        <span>queued: {totalQueued ?? '—'}</span>
+        <span>
+          {status ? `${status.summary.unprocessed} unprocessed · ${status.summary.processed} processed` : '—'}
+        </span>
         <span>workers: {status?.workers.pool_size ?? '—'}</span>
         <button
           type="button"
@@ -45,11 +56,10 @@ function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
         >
           Logs
         </button>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" title={CONNECTION_TOOLTIP}>
           <span
             data-testid="sse-dot"
             className={`h-2.5 w-2.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-600'}`}
-            title={connected ? 'connected' : 'disconnected'}
           />
           {connected ? 'connected' : 'disconnected'}
         </div>
