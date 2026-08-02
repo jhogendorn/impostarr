@@ -145,7 +145,11 @@ async def test_malformed_json_then_retry_succeeds(tmp_path):
     assert result.status == "ok"
     assert route.call_count == 2
     second_body = json.loads(route.calls[1].request.content)
-    assert any(_JSON_REMINDER in m["content"] for m in second_body["messages"])
+    messages = second_body["messages"]
+    reminder_idx = next(i for i, m in enumerate(messages) if _JSON_REMINDER in m["content"])
+    assistant_idx = next(i for i, m in enumerate(messages) if m["role"] == "assistant")
+    assert messages[assistant_idx]["content"] == "not json"
+    assert assistant_idx < reminder_idx
 
 
 @respx.mock
@@ -252,3 +256,79 @@ async def test_http_500_returns_error(tmp_path):
     assert result.status == "error"
     assert result.reason
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_empty_choices_returns_error_not_raise(tmp_path):
+    srt = tmp_path / "S01E05.srt"
+    write_srt(srt, ["hello there"])
+    ctx = make_ctx(make_series(), [make_episode(1, 5)])
+    claimed = make_claimed(season=1, episodes=[5])
+    assets = AssetBundle(sub_paths=[str(srt)])
+
+    respx.post(f"{BASE_URL}/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+
+    plugin = SubsLlmPlugin(make_config())
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "error"
+    assert result.reason
+
+
+@respx.mock
+async def test_episodes_as_string_triggers_retry_path(tmp_path):
+    srt = tmp_path / "S01E05.srt"
+    write_srt(srt, ["hello there"])
+    ctx = make_ctx(make_series(), [make_episode(1, 5)])
+    claimed = make_claimed(season=1, episodes=[5])
+    assets = AssetBundle(sub_paths=[str(srt)])
+
+    bad_response = httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"season": 1, "episodes": "5", "confidence": 0.5, "reasoning": "r"}
+                        )
+                    }
+                }
+            ]
+        },
+    )
+    good_response = llm_response(
+        {"season": 1, "episodes": [5], "confidence": 0.7, "reasoning": "ok"}
+    )
+    route = respx.post(f"{BASE_URL}/chat/completions").mock(
+        side_effect=[bad_response, good_response]
+    )
+
+    plugin = SubsLlmPlugin(make_config())
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "ok"
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_omits_authorization_header_when_api_key_empty(tmp_path):
+    srt = tmp_path / "S01E05.srt"
+    write_srt(srt, ["hello there"])
+    ctx = make_ctx(make_series(), [make_episode(1, 5)])
+    claimed = make_claimed(season=1, episodes=[5])
+    assets = AssetBundle(sub_paths=[str(srt)])
+
+    route = respx.post(f"{BASE_URL}/chat/completions").mock(
+        return_value=llm_response(
+            {"season": 1, "episodes": [5], "confidence": 0.5, "reasoning": "r"}
+        )
+    )
+
+    plugin = SubsLlmPlugin(make_config(api_key=""))
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "ok"
+    assert "authorization" not in {h.lower() for h in route.calls[0].request.headers}

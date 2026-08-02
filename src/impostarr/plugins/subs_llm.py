@@ -39,6 +39,15 @@ supported in PoC". This is a documented limitation, not an oversight.
 
 SRT parsing reuses `whisper_subs.parse_srt` (same minimal cue parser; no
 need for a second implementation in-package).
+
+HTTP client lifecycle: mirrors `RefSubService`'s injection pattern — an
+`httpx.AsyncClient` can be passed to the constructor (caller owns it, e.g.
+Task 14's pipeline sharing one client across plugins); otherwise the plugin
+lazily creates and owns one on first use, closable via `aclose()`.
+
+Retry: on a malformed-JSON reply, the retry appends the model's own invalid
+reply as an `assistant` turn before the reminder `user` turn — small models
+self-correct better when they can see what they just said.
 """
 
 from __future__ import annotations
@@ -136,6 +145,8 @@ def _parse_llm_json(content: str) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict) or "season" not in data or "episodes" not in data:
         return None
+    if not isinstance(data["episodes"], list):
+        return None
     return data
 
 
@@ -144,39 +155,68 @@ class SubsLlmPlugin(IdentifierPlugin):
     version = "1.0.0"
     config_model = SubsLlmConfig
 
-    def __init__(self, config: SubsLlmConfig | None = None) -> None:
+    def __init__(
+        self, config: SubsLlmConfig | None = None, http: httpx.AsyncClient | None = None
+    ) -> None:
         super().__init__(config or SubsLlmConfig())
+        self._http = http
+        self._owns_http = http is None
+
+    async def aclose(self) -> None:
+        """Closes the lazily-created owned client, if any. No-op when an
+        `httpx.AsyncClient` was injected — the injector owns that
+        lifecycle."""
+        if self._owns_http and self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
+    async def _get_http(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=self.config.timeout_s)
+        return self._http
 
     async def _call_llm(self, prompt: str) -> dict[str, Any]:
         messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
-        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        headers = {}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
+        client = await self._get_http()
 
-        async with httpx.AsyncClient(timeout=self.config.timeout_s) as client:
-            for attempt in range(_MAX_ATTEMPTS):
-                try:
-                    resp = await client.post(
-                        url,
-                        headers=headers,
-                        json={
-                            "model": self.config.model,
-                            "messages": messages,
-                            "response_format": {"type": "json_object"},
-                            "temperature": 0,
-                        },
-                    )
-                except httpx.HTTPError as exc:
-                    raise _LlmError(f"LLM request failed: {exc}") from exc
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                resp = await client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "model": self.config.model,
+                        "messages": messages,
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0,
+                    },
+                )
+            except httpx.HTTPError as exc:
+                raise _LlmError(f"LLM request failed: {exc}") from exc
 
-                if resp.status_code != 200:
-                    raise _LlmError(f"LLM request failed: HTTP {resp.status_code}")
+            if resp.status_code != 200:
+                raise _LlmError(f"LLM request failed: HTTP {resp.status_code}")
 
+            try:
                 content = resp.json()["choices"][0]["message"]["content"]
-                parsed = _parse_llm_json(content)
-                if parsed is not None:
-                    return parsed
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+                raise _LlmError(f"LLM response malformed: {exc}") from exc
 
-                messages = [*messages, {"role": "user", "content": _JSON_REMINDER}]
+            parsed = _parse_llm_json(content)
+            if parsed is not None:
+                return parsed
+
+            # Include the model's own invalid reply before the reminder —
+            # small models self-correct better seeing what they just said.
+            messages = [
+                *messages,
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": _JSON_REMINDER},
+            ]
 
         raise _LlmError("LLM did not return valid JSON after retry")
 
@@ -203,34 +243,45 @@ class SubsLlmPlugin(IdentifierPlugin):
             llm_episodes = [int(e) for e in data["episodes"]]
             llm_confidence = _clamp01(float(data.get("confidence", 0.0)))
             reasoning = str(data.get("reasoning", ""))
+
+            llm_candidate = Candidate(
+                confidence=llm_confidence,
+                ident=CandidateIdent(series="claimed", season=llm_season, episodes=llm_episodes),
+                numbering="tvdb",
+                evidence={
+                    "reasoning": reasoning,
+                    "cue_count": len(cues),
+                    "model": self.config.model,
+                },
+            )
+
+            identified_claimed = llm_season == claimed.season and set(llm_episodes) == set(
+                claimed.episodes
+            )
+            if identified_claimed:
+                candidates = [llm_candidate]
+            else:
+                claimed_candidate = Candidate(
+                    confidence=max(0.0, 1.0 - llm_confidence),
+                    ident=CandidateIdent(
+                        series="claimed", season=claimed.season, episodes=list(claimed.episodes)
+                    ),
+                    numbering="tvdb",
+                    evidence={"source": "derived"},
+                )
+                candidates = [llm_candidate, claimed_candidate]
         except _LlmError as exc:
             logger.warning("subs-llm call failed: %s", exc)
             return PluginResult(status="error", reason=str(exc))
         except (KeyError, TypeError, ValueError) as exc:
-            logger.warning("subs-llm returned an unusable response: %s", exc)
+            logger.exception("subs-llm returned an unusable response")
             return PluginResult(status="error", reason=f"malformed LLM response: {exc}")
-
-        llm_candidate = Candidate(
-            confidence=llm_confidence,
-            ident=CandidateIdent(series="claimed", season=llm_season, episodes=llm_episodes),
-            numbering="tvdb",
-            evidence={"reasoning": reasoning, "cue_count": len(cues), "model": self.config.model},
-        )
-
-        identified_claimed = llm_season == claimed.season and set(llm_episodes) == set(
-            claimed.episodes
-        )
-        if identified_claimed:
-            candidates = [llm_candidate]
-        else:
-            claimed_candidate = Candidate(
-                confidence=max(0.0, 1.0 - llm_confidence),
-                ident=CandidateIdent(
-                    series="claimed", season=claimed.season, episodes=list(claimed.episodes)
-                ),
-                numbering="tvdb",
-                evidence={"source": "derived"},
-            )
-            candidates = [llm_candidate, claimed_candidate]
+        except Exception as exc:
+            # Belt-and-braces, matching whisper-subs: an identifier plugin
+            # must never raise out of identify(), so any exception missed by
+            # the specific handlers above (e.g. a pydantic ValidationError
+            # from an empty `episodes` list) still maps to status="error".
+            logger.exception("subs-llm identify failed")
+            return PluginResult(status="error", reason=f"subs-llm failed: {exc}")
 
         return PluginResult(status="ok", candidates=candidates)
