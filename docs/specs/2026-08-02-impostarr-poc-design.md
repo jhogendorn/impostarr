@@ -1,7 +1,7 @@
 # Impostarr — PoC Design
 
 **Date:** 2026-08-02
-**Status:** Approved draft (pre-implementation) — codex review round 1 applied
+**Status:** Pre-implementation — buddysystem codex review loop in progress (r1–r3 applied)
 
 ## Purpose
 
@@ -96,14 +96,21 @@ service. It returns:
   reason: string | null,          # required for abstain/error
   candidates: [                    # present when status == ok
     { confidence: 0.0–1.0,
-      ident: { season: int, episodes: [int, ...] } | null,
-      numbering: "tvdb" | "tmdb" | "absolute" | "scene",
+      ident: { series: "claimed" | { tvdb?: int, tmdb?: int, imdb?: str },
+               season: int, episodes: [int, ...] } | null,
+      numbering: "tvdb" | "tmdb" | "absolute" | "scene" | null,
       evidence: { ...plugin-specific } } ] }
 ```
 
 - `episodes` is an array to support multi-episode files (S01E01E02) and
   maps to one or more Sonarr episode ids after normalization. Specials are
-  season 0 under tvdb numbering.
+  season 0 under tvdb numbering. `series` is `"claimed"` for in-series
+  candidates (the common case); a plugin that identifies content as a
+  *different* series supplies that series' external ids instead.
+- `ident: null` expresses negative/junk evidence — "this content is not the
+  claimed episode and no ident could be established" — with `confidence` as
+  the strength of that negative claim. `numbering` is null when `ident` is
+  null (and only then).
 - **Every `ok` result MUST include a candidate for the claimed ident** (its
   assessed confidence, even if 0.0). Identifying plugins additionally return
   ranked alternates.
@@ -182,7 +189,8 @@ Remediation verb selection when `S_claimed < thresholds.auto`:
 - **Credible same-series alternate** → **remap** (choreography below). Never
   blocklists; this prevents refetch/blacklist loops caused by scene-vs-TVDB
   numbering disagreements and preserves high-quality mislabelled releases.
-- **No credible alternate, or alternate is a different series / junk** →
+- **No credible alternate, or the credible candidate is a different series
+  (`ident.series` ≠ claimed) or junk (`ident: null`)** →
   **replace**: delete file via Sonarr episodeFile delete + blocklist (only
   when a grab-history record exists — see below) + trigger episode search.
 - `auto_remap` and `auto_replace` are independently toggleable; when disabled,
@@ -242,7 +250,8 @@ ranks.)
   normalized ident with confidence ≥ `thresholds.phash_store`** — a match, a
   remap target, or a human "is X". Negative verdicts ("isn't X",
   replace-with-no-alternate) remain gold in `verdicts` but create no corpus
-  record. Human verdicts are highest-signal.
+  record. Human verdicts are highest-signal; a human positive verdict has
+  defined confidence 1.0 (and therefore always clears the threshold).
   `external_ids` is a JSON map (`{tvdb, tmdb, imdb, mal, anilist, ...}`)
   populated from what Sonarr exposes for the series — Sonarr does not expose
   AniDB ids, so AniDB mapping is a future provider, not a stored claim.
