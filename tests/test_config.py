@@ -5,7 +5,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from impostarr.config import DEFAULT_CONFIG_PATH, PathMapping, Settings, load_settings
+from impostarr.config import DEFAULT_CONFIG_PATH, PathMapping, PluginConfig, Settings, load_settings
 
 
 @pytest.fixture(autouse=True)
@@ -129,3 +129,8 @@ def test_duplicate_sonarr_instance_names_rejected():
                 {"name": "dup", "url": "http://b", "api_key": "k2", "staging_dir": "/s2"},
             ]
         )
+
+
+def test_plugin_config_negative_weight_rejected():
+    with pytest.raises(ValidationError):
+        PluginConfig(weight=-1.0)

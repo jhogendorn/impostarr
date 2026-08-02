@@ -18,6 +18,12 @@ its claimed-series candidate was unnormalizable), the plugin is treated as
 reporting 0.0 confidence on the claimed key — it still counts in the
 claimed key's weighted average, at 0.0, while its actual (differing)
 candidate scores normally under its own key and may become the alternate.
+
+Within-plugin dedupe: if a single plugin reports two candidates that
+normalize to the *same* key (e.g. two differently-worded candidates that
+both resolve to the same episode-id set), that plugin contributes only its
+max confidence for that key — never double-counted, never averaged with
+itself.
 """
 
 from __future__ import annotations
@@ -95,7 +101,9 @@ def _kind_of_key(key: CandidateKey) -> Literal["in_series", "cross_series", "jun
         return "in_series"
     if key[0] == "cross":
         return "cross_series"
-    return "junk"
+    if key[0] == "junk":
+        return "junk"
+    raise TypeError(f"unrecognized candidate key shape: {key!r}")
 
 
 def _key_repr(key: CandidateKey) -> str:
@@ -147,10 +155,17 @@ def aggregate(results: list[PluginOutcome], claimed_episode_ids: frozenset[int])
         key: (sum_wc / sum_w if sum_w > 0 else 0.0) for key, (sum_wc, sum_w) in accum.items()
     }
 
-    s_claimed = scores.get(claimed_key, 0.0)
+    # claimed_key is always present: every applicable plugin's per_plugin dict
+    # gets a claimed_key entry (natural or 0.0-injected) above, and
+    # applicable_count > 0 was already checked, so accum/scores is non-empty
+    # and includes claimed_key.
+    s_claimed = scores[claimed_key]
 
     non_claimed = {key: score for key, score in scores.items() if key != claimed_key}
     if non_claimed:
+        # Tie-break: max() returns the first maximal element it encounters;
+        # iterating in ascending key-repr order makes ties resolve to the
+        # lexicographically-smallest key-repr, deterministically.
         alt_key = max(sorted(non_claimed, key=_key_repr), key=lambda k: non_claimed[k])
         s_alt = non_claimed[alt_key]
         alt_kind = _kind_of_key(alt_key)
@@ -216,10 +231,11 @@ def route(sheet: ScoreSheet, thresholds: Thresholds, flags: InstanceFlags) -> Ro
     auto = sheet.applicable_count >= thresholds.auto_min_evidence and flag
     outcome = "remediate" if auto else "quarantine"
 
+    s_alt_str = f"{sheet.s_alt:.3f}" if sheet.s_alt is not None else "None"
     reason = (
         f"s_claimed={s_claimed:.3f} < auto threshold {thresholds.auto}; "
         f"{'credible' if credible else 'no credible'} alternate "
-        f"(s_alt={sheet.s_alt}); proposing {action_kind}"
+        f"(s_alt={s_alt_str}); proposing {action_kind}"
     )
     if not auto:
         reason += (

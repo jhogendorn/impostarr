@@ -50,7 +50,7 @@ class Thresholds(BaseModel):
 
 class PluginConfig(BaseModel):
     enabled: bool = True
-    weight: float = 1.0
+    weight: float = Field(default=1.0, ge=0)
     options: dict = Field(default_factory=dict)
 
 

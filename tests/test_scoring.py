@@ -106,6 +106,27 @@ def test_aggregate_weight_asymmetry_reversed():
     assert sheet.s_claimed == pytest.approx(0.3)  # (3*0.1 + 1*0.9) / 4
 
 
+def test_aggregate_all_zero_weight_collapses_scores_to_zero():
+    # Deliberately pinning current behavior: when every reporting plugin's
+    # weight is 0.0, sum(weight) for a key is 0, and the guard against
+    # division-by-zero defaults that key's score to 0.0 - regardless of how
+    # high the reported confidences were. Config now rejects negative
+    # weights (see test_config.py), but 0.0 is a valid weight (an
+    # effectively-disabled-but-still-applicable plugin) and this is its
+    # documented scoring behavior.
+    outcomes = [
+        outcome("p1", 0.0, pairs=[(0.99, IN(CLAIMED))]),
+        outcome("p2", 0.0, pairs=[(0.99, IN(CLAIMED))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED)
+    assert sheet.applicable_count == 2
+    assert sheet.s_claimed == 0.0
+    decision = route(sheet, DEFAULT_THRESHOLDS, FLAGS_ON)
+    # s_claimed=0.0 < auto threshold -> remediation path; no alt reported.
+    assert decision.outcome == "remediate"
+    assert isinstance(decision.action, Replace)
+
+
 def test_aggregate_same_key_dedupe_takes_max_within_plugin():
     outcomes = [
         outcome("p1", 1.0, pairs=[(0.3, IN(CLAIMED)), (0.9, IN(CLAIMED))]),
@@ -288,6 +309,21 @@ def test_route_low_credible_cross_series_alt_replace():
     decision = route(sheet, DEFAULT_THRESHOLDS, FLAGS_ON)
     assert decision.outcome == "remediate"
     assert decision.auto is True
+    assert isinstance(decision.action, Replace)
+
+
+def test_route_low_credible_cross_series_alt_auto_replace_off_quarantine_proposed():
+    # Pins the replace-side flag gate, mirroring the remap-side test above:
+    # auto_replace off -> proposed Replace stays in quarantine, not remediate.
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.1, IN(CLAIMED)), (0.9, CROSS)]),
+        outcome("p2", 1.0, pairs=[(0.05, IN(CLAIMED)), (0.85, CROSS)]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED)
+    flags = InstanceFlags(auto_remap=True, auto_replace=False)
+    decision = route(sheet, DEFAULT_THRESHOLDS, flags)
+    assert decision.outcome == "quarantine"
+    assert decision.auto is False
     assert isinstance(decision.action, Replace)
 
 
