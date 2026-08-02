@@ -440,6 +440,22 @@ def test_static_mount_present_serves_index(tmp_path, monkeypatch):
     assert "hello from web/dist" in response.text
 
 
+def test_static_mount_cache_headers(tmp_path, monkeypatch):
+    dist_dir = tmp_path / "dist"
+    (dist_dir / "assets").mkdir(parents=True)
+    (dist_dir / "index.html").write_text("<html><body>spa</body></html>")
+    (dist_dir / "assets" / "index-abc123.js").write_text("console.log('x')")
+    monkeypatch.setattr("impostarr.main._resolve_web_dist", lambda: dist_dir)
+    app = create_app(Settings(state_dir=tmp_path / "state"))
+
+    with TestClient(app) as client:
+        index_response = client.get("/")
+        asset_response = client.get("/assets/index-abc123.js")
+
+    assert index_response.headers["cache-control"] == "no-cache"
+    assert asset_response.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
 # -- queues -----------------------------------------------------------------
 
 
