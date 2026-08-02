@@ -326,3 +326,67 @@ async def test_context_manager_closes_underlying_client():
         assert inner.is_closed is False
 
     assert inner.is_closed is True
+
+
+# -- dry_run ------------------------------------------------------------
+#
+# No mutating route is mocked in any of these: respx raises on an unmocked
+# request, so a stray real HTTP call would fail the test just as surely as
+# an explicit call-count assertion.
+
+
+@respx.mock
+async def test_delete_episode_file_dry_run_makes_no_call_and_logs(caplog):
+    async with SonarrClient(BASE_URL, API_KEY, dry_run=True) as client:
+        with caplog.at_level("WARNING"):
+            result = await client.delete_episode_file(9001)
+
+    assert result is None
+    assert respx.calls.call_count == 0
+    assert any("DRY-RUN" in record.message for record in caplog.records)
+
+
+@respx.mock
+async def test_mark_history_failed_dry_run_makes_no_call_and_logs(caplog):
+    async with SonarrClient(BASE_URL, API_KEY, dry_run=True) as client:
+        with caplog.at_level("WARNING"):
+            result = await client.mark_history_failed(101)
+
+    assert result is None
+    assert respx.calls.call_count == 0
+    assert any("DRY-RUN" in record.message for record in caplog.records)
+
+
+@respx.mock
+async def test_execute_manual_import_dry_run_makes_no_call_and_logs(caplog):
+    files = [{"path": "/staging/x.mkv", "episodeIds": [555]}]
+    async with SonarrClient(BASE_URL, API_KEY, dry_run=True) as client:
+        with caplog.at_level("WARNING"):
+            result = await client.execute_manual_import(files, import_mode="move")
+
+    assert result == {"dryRun": True}
+    assert respx.calls.call_count == 0
+    assert any("DRY-RUN" in record.message for record in caplog.records)
+
+
+@respx.mock
+async def test_command_dry_run_makes_no_call_and_logs(caplog):
+    async with SonarrClient(BASE_URL, API_KEY, dry_run=True) as client:
+        with caplog.at_level("WARNING"):
+            result = await client.command("EpisodeSearch", episodeIds=[555])
+
+    assert result == {"dryRun": True}
+    assert respx.calls.call_count == 0
+    assert any("DRY-RUN" in record.message for record in caplog.records)
+
+
+@respx.mock
+async def test_get_methods_unaffected_by_dry_run():
+    route = respx.get(f"{API_URL}/system/status").mock(
+        return_value=httpx.Response(200, json=load_fixture("system_status.json"))
+    )
+    async with SonarrClient(BASE_URL, API_KEY, dry_run=True) as client:
+        status = await client.system_status()
+
+    assert status.version == "3.0.10.1567"
+    assert route.called

@@ -12,9 +12,12 @@ from .extract import (
 from .transcribe import (
     FasterWhisperTranscriber,
     NullTranscriber,
+    RemoteTranscriber,
+    TranscribeError,
     Transcriber,
     TranscriptResult,
     TranscriptSegment,
+    WhisperCppTranscriber,
 )
 
 __all__ = [
@@ -23,9 +26,12 @@ __all__ = [
     "FasterWhisperTranscriber",
     "FrameHashSeq",
     "NullTranscriber",
+    "RemoteTranscriber",
+    "TranscribeError",
     "Transcriber",
     "TranscriptResult",
     "TranscriptSegment",
+    "WhisperCppTranscriber",
     "extract_audio",
     "extract_embedded_subs",
     "fingerprint",

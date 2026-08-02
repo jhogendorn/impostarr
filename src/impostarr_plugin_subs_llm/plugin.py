@@ -37,8 +37,10 @@ only the first `.srt` path in `AssetBundle.sub_paths` is used; a bundle with
 sub_paths but no `.srt` among them abstains with reason "PGS/VobSub OCR not
 supported in PoC". This is a documented limitation, not an oversight.
 
-SRT parsing reuses `whisper_subs.parse_srt` (same minimal cue parser; no
-need for a second implementation in-package).
+SRT parsing uses `impostarr.plugins.subtitles.parse_srt` (the same minimal
+cue parser shared by the `whisper-subs` bundled plugin; a third-party plugin
+package cannot import from a sibling plugin package, so shared parsing logic
+lives in `impostarr`'s plugin-facing API instead).
 
 HTTP client lifecycle: mirrors `RefSubService`'s injection pattern — an
 `httpx.AsyncClient` can be passed to the constructor (caller owns it, e.g.
@@ -48,6 +50,12 @@ lazily creates and owns one on first use, closable via `aclose()`.
 Retry: on a malformed-JSON reply, the retry appends the model's own invalid
 reply as an `assistant` turn before the reminder `user` turn — small models
 self-correct better when they can see what they just said.
+
+This package is a standalone, installable plugin — it depends on
+`impostarr` (for the `IdentifierPlugin` contract and `parse_srt`) but is not
+part of the `impostarr` package itself, exemplifying how a third-party
+identifier plugin is structured: own package, own `pyproject.toml` entry
+point, own config model, importing only from `impostarr.plugins.*`.
 """
 
 from __future__ import annotations
@@ -60,7 +68,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from .base import (
+from impostarr.plugins.base import (
     AssetBundle,
     Candidate,
     CandidateIdent,
@@ -69,7 +77,7 @@ from .base import (
     PluginResult,
     SeriesContext,
 )
-from .whisper_subs import parse_srt
+from impostarr.plugins.subtitles import parse_srt
 
 logger = logging.getLogger(__name__)
 

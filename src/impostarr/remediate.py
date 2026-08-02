@@ -76,10 +76,21 @@ class Remediator:
         client: SonarrClient,
         instance_cfg: SonarrInstance,
         session_factory: sessionmaker[Session],
+        dry_run: bool = False,
     ) -> None:
         self.client = client
         self.instance_cfg = instance_cfg
         self.session_factory = session_factory
+        self.dry_run = dry_run
+
+    def _log(self, session: Session, verdict: Verdict, step: str, ok: bool, detail: str) -> None:
+        """Wraps `_log_step`, prefixing `detail` with "DRY-RUN: " whenever
+        this Remediator is in dry-run mode so the remediation_log audit
+        trail is unmistakable even though the job still transitions to
+        `remediated` normally."""
+        if self.dry_run:
+            detail = f"DRY-RUN: {detail}"
+        _log_step(session, verdict, step, ok, detail)
 
     # -- replace ----------------------------------------------------------
 
@@ -98,7 +109,7 @@ class Remediator:
             verdict = _latest_verdict(session, db_job.id)
 
             if verdict.remediation_log:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "interruption_guard",
@@ -112,10 +123,10 @@ class Remediator:
                 try:
                     await self.client.mark_history_failed(file.history_id)
                 except SonarrError as exc:
-                    _log_step(session, verdict, "mark_history_failed", False, str(exc))
+                    self._log(session, verdict, "mark_history_failed", False, str(exc))
                     jobs.release(session, db_job, "quarantine", worker_id)
                     return
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "mark_history_failed",
@@ -123,7 +134,7 @@ class Remediator:
                     f"history_id={file.history_id}",
                 )
             else:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "mark_history_failed",
@@ -134,10 +145,10 @@ class Remediator:
             try:
                 await self.client.delete_episode_file(file.episode_file_id)
             except SonarrError as exc:
-                _log_step(session, verdict, "delete_episode_file", False, str(exc))
+                self._log(session, verdict, "delete_episode_file", False, str(exc))
                 jobs.release(session, db_job, "quarantine", worker_id)
                 return
-            _log_step(
+            self._log(
                 session,
                 verdict,
                 "delete_episode_file",
@@ -148,10 +159,10 @@ class Remediator:
             try:
                 await self.client.command("EpisodeSearch", episodeIds=file.episode_ids)
             except SonarrError as exc:
-                _log_step(session, verdict, "episode_search", False, str(exc))
+                self._log(session, verdict, "episode_search", False, str(exc))
                 jobs.release(session, db_job, "quarantine", worker_id)
                 return
-            _log_step(
+            self._log(
                 session, verdict, "episode_search", True, f"episode_ids={file.episode_ids}"
             )
 
@@ -178,7 +189,7 @@ class Remediator:
             verdict = _latest_verdict(session, db_job.id)
 
             if verdict.remediation_log:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "interruption_guard",
@@ -196,7 +207,7 @@ class Remediator:
             resolved_ids = {ep.id for ep in target_episodes}
             missing_ids = target_episode_ids - resolved_ids
             if missing_ids:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "episode_resolution",
@@ -209,7 +220,7 @@ class Remediator:
 
             occupied = [ep for ep in target_episodes if ep.has_file]
             if occupied:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "occupied_check",
@@ -228,39 +239,45 @@ class Remediator:
             staging_dir = Path(self.instance_cfg.staging_dir)
             staged_path = staging_dir / staged_name
 
-            try:
-                staging_dir.mkdir(parents=True, exist_ok=True)
-                os.link(local_path, staged_path)
-            except OSError as exc:
-                if exc.errno == errno.EXDEV:
-                    try:
-                        shutil.copy2(local_path, staged_path)
-                    except OSError as copy_exc:
-                        _log_step(
+            if self.dry_run:
+                # No staging dir created, no hardlink/copy: nothing under
+                # the media library is touched. The log records the path
+                # that would have been staged.
+                self._log(session, verdict, "hardlink", True, f"staged={staged_path}")
+            else:
+                try:
+                    staging_dir.mkdir(parents=True, exist_ok=True)
+                    os.link(local_path, staged_path)
+                except OSError as exc:
+                    if exc.errno == errno.EXDEV:
+                        try:
+                            shutil.copy2(local_path, staged_path)
+                        except OSError as copy_exc:
+                            self._log(
+                                session,
+                                verdict,
+                                "hardlink",
+                                False,
+                                f"{copy_exc}; staging_path={staged_path}",
+                            )
+                            jobs.release(session, db_job, "quarantine", worker_id)
+                            return
+                    else:
+                        self._log(
                             session,
                             verdict,
                             "hardlink",
                             False,
-                            f"{copy_exc}; staging_path={staged_path}",
+                            f"{exc}; staging_path={staged_path}",
                         )
                         jobs.release(session, db_job, "quarantine", worker_id)
                         return
-                else:
-                    _log_step(
-                        session,
-                        verdict,
-                        "hardlink",
-                        False,
-                        f"{exc}; staging_path={staged_path}",
-                    )
-                    jobs.release(session, db_job, "quarantine", worker_id)
-                    return
-            _log_step(session, verdict, "hardlink", True, f"staged={staged_path}")
+                self._log(session, verdict, "hardlink", True, f"staged={staged_path}")
 
             try:
                 await self.client.delete_episode_file(file.episode_file_id)
             except SonarrError as exc:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "delete_episode_file",
@@ -269,7 +286,7 @@ class Remediator:
                 )
                 jobs.release(session, db_job, "quarantine", worker_id)
                 return
-            _log_step(
+            self._log(
                 session,
                 verdict,
                 "delete_episode_file",
@@ -277,12 +294,27 @@ class Remediator:
                 f"episode_file_id={file.episode_file_id}",
             )
 
+            if self.dry_run:
+                # The staged file was never created above, so the
+                # candidates GET would list nothing real for it — skip both
+                # the candidates fetch and the import call, and log the
+                # single would-be action instead.
+                self._log(
+                    session,
+                    verdict,
+                    "manual_import",
+                    True,
+                    f"would manual-import {staged_path.name} as episodes {sorted(resolved_ids)}",
+                )
+                jobs.release(session, db_job, "remediated", worker_id)
+                return
+
             try:
                 candidates = await self.client.manual_import_candidates(
                     folder=str(staging_dir)
                 )
             except SonarrError as exc:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "manual_import_candidates",
@@ -296,7 +328,7 @@ class Remediator:
                 (c for c in candidates if Path(c.path).name == staged_path.name), None
             )
             if match is None:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "manual_import_candidates",
@@ -306,7 +338,7 @@ class Remediator:
                 )
                 jobs.release(session, db_job, "quarantine", worker_id)
                 return
-            _log_step(
+            self._log(
                 session,
                 verdict,
                 "manual_import_candidates",
@@ -326,7 +358,7 @@ class Remediator:
             try:
                 await self.client.execute_manual_import(files_payload, import_mode="move")
             except SonarrError as exc:
-                _log_step(
+                self._log(
                     session,
                     verdict,
                     "execute_manual_import",
@@ -335,7 +367,7 @@ class Remediator:
                 )
                 jobs.release(session, db_job, "quarantine", worker_id)
                 return
-            _log_step(
+            self._log(
                 session,
                 verdict,
                 "execute_manual_import",

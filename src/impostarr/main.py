@@ -32,25 +32,19 @@ from fastapi.staticfiles import StaticFiles
 
 from impostarr.api.auth import AuthMiddleware
 from impostarr.api.events import EventBus
+from impostarr.api.logbuffer import RingBufferHandler
 from impostarr.api.routes import router
-from impostarr.assets.transcribe import NullTranscriber, Transcriber
 from impostarr.config import Settings, SonarrInstance, load_settings
 from impostarr.db import init_db, make_session_factory
 from impostarr.discovery import Discoverer
 from impostarr.pipeline import PipelineDeps
 from impostarr.plugins.loader import activate_plugin_overlay, ensure_external_plugins, load_plugins
+from impostarr.plugins.transcribers import load_transcriber
 from impostarr.refsubs import RefSubService
 from impostarr.sonarr import SonarrClient
 from impostarr.worker import WorkerPool
 
 logger = logging.getLogger(__name__)
-
-try:
-    import faster_whisper  # noqa: F401
-
-    _FASTER_WHISPER_AVAILABLE = True
-except ImportError:
-    _FASTER_WHISPER_AVAILABLE = False
 
 
 @dataclass
@@ -83,30 +77,29 @@ def _resolve_web_dist() -> Path:
     return Path("web/dist")
 
 
-def _build_transcriber(settings: Settings) -> Transcriber:
-    if _FASTER_WHISPER_AVAILABLE and settings.workers.whisper_model:
-        from impostarr.assets.transcribe import FasterWhisperTranscriber
-
-        return FasterWhisperTranscriber(
-            model_name=settings.workers.whisper_model,
-            device=settings.workers.whisper_device,
-            models_dir=settings.models_dir,
-        )
-    return NullTranscriber()
-
-
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings if settings is not None else load_settings()
 
     engine = init_db(settings)
     session_factory = make_session_factory(engine)
 
+    # Log viewer (Task: dry-run + log viewer feedback batch): captures the
+    # last 1000 records from every impostarr.* module logger for the
+    # /api/v1/logs endpoint. The "impostarr" logger has no explicit level by
+    # default (falls back to root's WARNING), so INFO must be set here or
+    # INFO-level records (including "DRY-RUN: ..." lines) would never reach
+    # the handler at all.
+    log_buffer = RingBufferHandler()
+    impostarr_logger = logging.getLogger("impostarr")
+    impostarr_logger.setLevel(logging.INFO)
+    impostarr_logger.addHandler(log_buffer)
+
     plugin_venv_dir = settings.state_dir / "plugins" / "venv"
     ensure_external_plugins(settings.plugins.sources, settings.state_dir, plugin_venv_dir)
     activate_plugin_overlay(plugin_venv_dir)
     loaded_plugins = load_plugins(settings)
 
-    transcriber = _build_transcriber(settings)
+    transcriber = load_transcriber(settings)
     event_bus = EventBus()
 
     # RefSubService is instance-agnostic (no per-Sonarr-instance state), so
@@ -128,7 +121,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     instances: dict[str, InstanceRuntime] = {}
     deps_per_instance: dict[str, PipelineDeps] = {}
     for instance_cfg in settings.sonarr:
-        client = SonarrClient(instance_cfg.url, instance_cfg.api_key)
+        client = SonarrClient(instance_cfg.url, instance_cfg.api_key, dry_run=settings.dry_run)
         discoverer = Discoverer(instance_cfg, client, session_factory)
         instances[instance_cfg.name] = InstanceRuntime(client=client, cfg=instance_cfg, discoverer=discoverer)
         deps_per_instance[instance_cfg.name] = PipelineDeps(
@@ -165,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for runtime in instances.values():
                 await runtime.client.close()
             await refsubs_http_client.aclose()
+            impostarr_logger.removeHandler(log_buffer)
 
     fastapi_app = FastAPI(lifespan=lifespan)
     fastapi_app.state.settings = settings
@@ -173,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     fastapi_app.state.instances = instances
     fastapi_app.state.deps_per_instance = deps_per_instance
     fastapi_app.state.pool_size = settings.workers.pool_size if deps_per_instance else 0
+    fastapi_app.state.log_buffer = log_buffer
 
     fastapi_app.add_middleware(AuthMiddleware, settings=settings)
     fastapi_app.include_router(router)

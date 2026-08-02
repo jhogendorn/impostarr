@@ -20,11 +20,18 @@ dependencies = [
 
 [project.optional-dependencies]
 whisper = ["faster-whisper>=1.0"]
+whispercpp = ["pywhispercpp>=1.2"]
 postgres = ["psycopg[binary]>=3.2"]
 
 [project.entry-points."impostarr.identifiers"]
-whisper-subs = "impostarr.plugins.whisper_subs:WhisperSubsPlugin"
-subs-llm = "impostarr.plugins.subs_llm:SubsLlmPlugin"
+whisper-subs = "impostarr_plugin_whisper_subs:WhisperSubsPlugin"
+subs-llm = "impostarr_plugin_subs_llm:SubsLlmPlugin"
+
+[project.entry-points."impostarr.transcribers"]
+faster-whisper = "impostarr.plugins.transcribers:faster_whisper_factory"
+whisper-cpp = "impostarr.plugins.transcribers:whisper_cpp_factory"
+remote = "impostarr.plugins.transcribers:remote_factory"
+none = "impostarr.plugins.transcribers:none_factory"
 
 [dependency-groups]
 dev = [
@@ -42,7 +49,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/impostarr"]
+packages = [
+    "src/impostarr",
+    "src/impostarr_plugin_whisper_subs",
+    "src/impostarr_plugin_subs_llm",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -59,7 +59,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from impostarr import jobs
 from impostarr.api.events import EventBus
 from impostarr.assets import extract
-from impostarr.assets.transcribe import Transcriber
+from impostarr.assets.transcribe import TranscribeError, Transcriber
 from impostarr.config import Settings, SonarrInstance
 from impostarr.models import Asset, File, FrameHash, Job, PhashCorpusEntry, Verdict
 from impostarr.models import PluginResult as PluginResultRow
@@ -365,7 +365,11 @@ async def _stage_transcript(
     existing = _latest_asset(session, file.id, "transcript")
     if existing is not None:
         return existing.payload
-    result = await transcriber.transcribe(Path(audio_asset.path))
+    try:
+        result = await transcriber.transcribe(Path(audio_asset.path))
+    except TranscribeError as exc:
+        logger.warning("transcription failed for file %s: %s", file.id, exc)
+        return None
     payload = result.model_dump(mode="json")
     row = Asset(
         file_id=file.id,
@@ -623,7 +627,8 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
                 jobs.release(session, job, decision.outcome, deps.worker_id)
             else:  # "remediate" -- route() only sets this outcome when auto is True.
                 remediator = Remediator(
-                    deps.sonarr_client, deps.instance_cfg, deps.session_factory
+                    deps.sonarr_client, deps.instance_cfg, deps.session_factory,
+                    dry_run=deps.settings.dry_run,
                 )
                 if isinstance(decision.action, Remap):
                     await remediator.remap(

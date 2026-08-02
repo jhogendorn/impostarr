@@ -3,6 +3,7 @@ import { getQueue, getStatus } from './api/client'
 import { useEvents } from './api/sse'
 import type { JobStatus, QueuePage, SseEvent, StatusResponse } from './api/types'
 import InspectModal from './components/InspectModal'
+import LogDrawer from './components/LogDrawer'
 import QueueTable from './components/QueueTable'
 import QueueTabs from './components/QueueTabs'
 import StatusHeader from './components/StatusHeader'
@@ -16,6 +17,7 @@ function App() {
   const [pageIndex, setPageIndex] = useState(1)
   const [queuePage, setQueuePage] = useState<QueuePage | null>(null)
   const [inspectJobId, setInspectJobId] = useState<number | null>(null)
+  const [logsOpen, setLogsOpen] = useState(false)
 
   // Latest activeTab/pageIndex, readable from the debounce timer callback at
   // fire time rather than captured (possibly stale) at schedule time.
@@ -98,7 +100,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <StatusHeader status={status} connected={connected} />
+      <StatusHeader status={status} connected={connected} onToggleLogs={() => setLogsOpen((open) => !open)} />
       <QueueTabs status={status} active={activeTab} onChange={handleTabChange} />
       <QueueTable
         page={queuePage}
@@ -113,6 +115,7 @@ function App() {
         onClose={() => setInspectJobId(null)}
         onChanged={handleModalChanged}
       />
+      <LogDrawer open={logsOpen} />
     </div>
   )
 }

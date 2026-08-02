@@ -1,0 +1,54 @@
+# Rendered by seed.sh into volumes/config/impostarr.yml (api_key placeholder
+# substituted in from Sonarr's auto-generated config.xml). See
+# examples/impostarr.yml for the full annotated reference; this is a
+# minimal demo-specific config, not a general-purpose template.
+sonarr:
+  - name: main
+    url: http://sonarr:8989
+    api_key: __SONARR_API_KEY__
+    path_mappings:
+      - sonarr: /media
+        local: /media
+    staging_dir: /media/staging/main
+    watch_dirs: []
+    poll_interval_s: 15
+    # Both true: the demo's whole point is to show the auto-remediation
+    # path end to end. Safe because dry_run (below) is also true — nothing
+    # in the library or in Sonarr is actually touched.
+    auto_remap: true
+    auto_replace: true
+
+thresholds:
+  quarantine: 0.8
+  auto: 0.4
+  alt: 0.8
+  alt_margin: 0.2
+  auto_min_evidence: 1
+  phash_store: 0.9
+
+plugins:
+  identifiers:
+    whisper-subs:
+      enabled: true
+      weight: 1.0
+    subs-llm:
+      enabled: false
+
+refsubs:
+  manual_dir: /config/refsubs_manual
+
+workers:
+  pool_size: 2
+  transcriber: remote
+  transcriber_options:
+    base_url: http://stub-transcriber:8000/v1
+    model: stub
+
+# Strongly recommended for first runs against a real library, and how this
+# demo proves the remediation path is safe to exercise: every action logs
+# "DRY-RUN: would ..." instead of mutating Sonarr or the library.
+dry_run: true
+
+state_dir: /config
+assets_dir: /assets
+models_dir: /models

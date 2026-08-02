@@ -86,6 +86,21 @@ class DbConfig(BaseModel):
 
 class WorkersConfig(BaseModel):
     pool_size: int = 2
+    # Transcriber backend selection: entry-point name in the
+    # `impostarr.transcribers` group ("faster-whisper" | "whisper-cpp" |
+    # "remote" | "none", or a third-party backend). See
+    # `impostarr.plugins.transcribers.load_transcriber`.
+    transcriber: str = "faster-whisper"
+    # Backend-specific options, keyed by whatever the chosen backend reads
+    # (e.g. whisper-cpp: pywhispercpp params like `language`/`use_gpu`;
+    # remote: `base_url`/`api_key`/`model`/`timeout_s`).
+    transcriber_options: dict = Field(default_factory=dict)
+    # whisper_model: model-size name, shared by the faster-whisper and
+    # whisper-cpp backends. whisper_device: CPU/CUDA device selector,
+    # consumed by the faster-whisper backend only (whisper-cpp's GPU path
+    # is a Vulkan source build, toggled via transcriber_options instead).
+    # Kept as top-level fields rather than folded into transcriber_options
+    # for backward compatibility with existing configs.
     whisper_model: str = "small"
     whisper_device: str = "auto"
 
@@ -102,6 +117,14 @@ class Settings(BaseSettings):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     db: DbConfig = Field(default_factory=DbConfig)
     workers: WorkersConfig = Field(default_factory=WorkersConfig)
+
+    # Strongly recommended for first runs against a real library: no files
+    # are touched, no Sonarr state is changed; every action is logged as
+    # "DRY-RUN would ...". Scoping: only Sonarr API mutations and
+    # media-library filesystem operations are suppressed — Impostarr's own
+    # database and asset extraction (transcripts, framegrabs, phash corpus)
+    # still run, since those are impostarr's own artifacts, not the library.
+    dry_run: bool = False
 
     state_dir: Path = Path("/config")
     assets_dir: Path = Path("/assets")

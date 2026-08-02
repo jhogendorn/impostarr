@@ -29,6 +29,7 @@ export interface StatusResponse {
   instances: InstanceSummary[]
   queues: Record<JobStatus, number>
   workers: { pool_size: number }
+  dry_run: boolean
 }
 
 // -- /queues/{status} ---------------------------------------------------
@@ -177,3 +178,16 @@ export interface JobUpdateEvent {
 export type StatsEvent = Record<JobStatus, number>
 
 export type SseEvent = { kind: 'job_update'; data: JobUpdateEvent } | { kind: 'stats'; data: StatsEvent }
+
+// -- /logs --------------------------------------------------------------
+
+export interface LogRecord {
+  ts: string
+  level: string
+  logger: string
+  message: string
+}
+
+export interface LogsResponse {
+  items: LogRecord[]
+}

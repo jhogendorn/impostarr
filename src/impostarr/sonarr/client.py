@@ -8,6 +8,7 @@ dependency on `impostarr.config`.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from types import TracebackType
 from typing import Any, Self
@@ -15,6 +16,8 @@ from typing import Any, Self
 import httpx
 
 from .types import Episode, EpisodeFile, HistoryRecord, ManualImportItem, Series, SystemStatus
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BACKOFF: tuple[float, ...] = (0.5, 1.0, 2.0)
 DEFAULT_TIMEOUT = httpx.Timeout(30)
@@ -47,6 +50,7 @@ class SonarrClient:
         timeout: httpx.Timeout | float = DEFAULT_TIMEOUT,
         max_retries: int = 3,
         backoff: Sequence[float] = DEFAULT_BACKOFF,
+        dry_run: bool = False,
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=f"{base_url.rstrip('/')}/api/v3",
@@ -55,6 +59,7 @@ class SonarrClient:
         )
         self._max_retries = max_retries
         self._backoff = backoff
+        self.dry_run = dry_run
 
     async def __aenter__(self) -> Self:
         return self
@@ -158,12 +163,19 @@ class SonarrClient:
         return [Episode.model_validate(raw) for raw in response.json()]
 
     async def delete_episode_file(self, file_id: int) -> None:
+        if self.dry_run:
+            logger.warning("DRY-RUN: would DELETE /episodefile/%s", file_id)
+            return
         await self._request("DELETE", f"/episodefile/{file_id}")
 
     async def mark_history_failed(self, history_id: int) -> None:
+        if self.dry_run:
+            logger.warning("DRY-RUN: would POST /history/failed/%s", history_id)
+            return
         await self._request("POST", f"/history/failed/{history_id}")
 
     async def manual_import_candidates(self, folder: str) -> list[ManualImportItem]:
+        # GET, unaffected by dry_run.
         response = await self._request(
             "GET",
             "/manualimport",
@@ -174,13 +186,17 @@ class SonarrClient:
     async def execute_manual_import(
         self, files: list[dict[str, Any]], import_mode: str = "move"
     ) -> dict[str, Any]:
-        response = await self._request(
-            "POST",
-            "/command",
-            json={"name": "ManualImport", "files": files, "importMode": import_mode},
-        )
+        body = {"name": "ManualImport", "files": files, "importMode": import_mode}
+        if self.dry_run:
+            logger.warning("DRY-RUN: would POST /command %r", body)
+            return {"dryRun": True}
+        response = await self._request("POST", "/command", json=body)
         return response.json()
 
     async def command(self, name: str, **body: Any) -> dict[str, Any]:
-        response = await self._request("POST", "/command", json={"name": name, **body})
+        full_body = {"name": name, **body}
+        if self.dry_run:
+            logger.warning("DRY-RUN: would POST /command %r", full_body)
+            return {"dryRun": True}
+        response = await self._request("POST", "/command", json=full_body)
         return response.json()

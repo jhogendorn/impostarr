@@ -47,13 +47,19 @@ Results are zipped back against the window list in its original,
 distance-sorted order, so candidate ordering stays deterministic regardless
 of fetch completion order.
 
-Plugin config wiring: the loader (`plugins/loader.py`) validates
+Plugin config wiring: the loader (`impostarr.plugins.loader`) validates
 `Settings.plugins.identifiers["whisper-subs"].options` into `WhisperSubsConfig`
 and passes it to the constructor as `config`, per the `IdentifierPlugin` base
 class's `__init__(self, config=None)` convention (stored on `self.config`).
 This plugin overrides `__init__` only to default `self.config` to
 `WhisperSubsConfig()` when no config is supplied (e.g. direct instantiation
 in tests), rather than leaving it `None`.
+
+This package is a standalone, installable plugin — it depends on
+`impostarr` (for the `IdentifierPlugin` contract and `parse_srt`) but is not
+part of the `impostarr` package itself, exemplifying how a third-party
+identifier plugin is structured: own package, own `pyproject.toml` entry
+point, own config model, importing only from `impostarr.plugins.*`.
 """
 
 from __future__ import annotations
@@ -67,7 +73,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
-from .base import (
+from impostarr.plugins.base import (
     AssetBundle,
     Candidate,
     CandidateIdent,
@@ -76,6 +82,7 @@ from .base import (
     PluginResult,
     SeriesContext,
 )
+from impostarr.plugins.subtitles import parse_srt
 
 logger = logging.getLogger(__name__)
 
@@ -101,26 +108,6 @@ def _normalize(text: str) -> str:
     text = _PUNCT_RE.sub("", text)
     text = _WS_RE.sub(" ", text).strip()
     return text
-
-
-def parse_srt(text: str) -> list[str]:
-    """Parse SRT text into cue line texts (index/timestamp lines discarded;
-    multi-line cues joined with a space). A minimal regex/state-machine
-    parser — no subtitle-parsing dependency. Tolerates a leading UTF-8 BOM,
-    CRLF line endings, a missing/malformed index line (only the `-->` line
-    is required to locate a cue), and skips blocks with no timestamp line
-    at all (malformed cues) rather than raising."""
-    text = text.lstrip("\ufeff")
-    lines: list[str] = []
-    for block in re.split(r"\n\s*\n", text.strip()):
-        block_lines = block.splitlines()
-        ts_idx = next((i for i, line in enumerate(block_lines) if "-->" in line), None)
-        if ts_idx is None:
-            continue
-        cue = " ".join(line.strip() for line in block_lines[ts_idx + 1 :] if line.strip())
-        if cue:
-            lines.append(cue)
-    return lines
 
 
 def _match_ratio(transcript_segments: list[dict[str, Any]], srt_lines: list[str]) -> tuple[float, int]:

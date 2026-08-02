@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from impostarr.plugins import whisper_subs
 from impostarr.plugins.base import AssetBundle, ClaimedIdent, SeriesContext
-from impostarr.plugins.whisper_subs import WhisperSubsConfig, WhisperSubsPlugin
+from impostarr_plugin_whisper_subs import plugin as whisper_subs
+from impostarr_plugin_whisper_subs.plugin import WhisperSubsConfig, WhisperSubsPlugin
 
 
 class StubRefSubs:
