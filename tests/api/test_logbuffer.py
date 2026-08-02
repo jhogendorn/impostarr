@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 from impostarr.api.logbuffer import RingBufferHandler
 
@@ -28,6 +29,68 @@ def test_emit_captures_record_as_dict():
     assert entry["logger"] == "impostarr.foo"
     assert entry["message"] == "hello %s"
     assert "ts" in entry
+    assert entry["exc"] is None
+
+
+def test_emit_captures_traceback_for_exc_info():
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        record = logging.LogRecord(
+            name="impostarr.foo",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="it broke",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+
+    handler = RingBufferHandler()
+    handler.emit(record)
+
+    entry = handler.get_logs()[0]
+    assert entry["message"] == "it broke"
+    assert entry["exc"] is not None
+    assert "ValueError: boom" in entry["exc"]
+
+
+def test_emit_trims_traceback_to_last_n_lines():
+    def level_5():
+        raise ValueError("deep")
+
+    def level_4():
+        level_5()
+
+    def level_3():
+        level_4()
+
+    def level_2():
+        level_3()
+
+    def level_1():
+        level_2()
+
+    try:
+        level_1()
+    except ValueError:
+        record = logging.LogRecord(
+            name="impostarr.foo",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="deep failure",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+
+    handler = RingBufferHandler()
+    handler.emit(record)
+
+    entry = handler.get_logs()[0]
+    assert entry["exc"] is not None
+    assert len(entry["exc"].splitlines()) <= 5
+    assert "ValueError: deep" in entry["exc"]
 
 
 def test_ring_bounds_at_capacity():

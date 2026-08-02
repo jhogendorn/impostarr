@@ -106,6 +106,37 @@ describe('LogDrawer', () => {
     expect(scrollContainer).toHaveClass('overflow-y-auto', 'min-h-0')
   })
 
+  it('a record with exc shows a traceback toggle; other records do not', async () => {
+    render(<LogDrawer open />)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('button', { name: '▸ traceback' })).toBeInTheDocument()
+
+    const infoLine = screen.getByText('claimed job 42').closest('div')!
+    expect(within(infoLine).queryByText(/traceback/)).not.toBeInTheDocument()
+  })
+
+  it('clicking the traceback toggle reveals the trimmed traceback text, dimmed and monospace', async () => {
+    const user = userEvent.setup()
+    render(<LogDrawer open />)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByText(/ValueError: boom/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '▸ traceback' }))
+
+    const tracebackEl = screen.getByText(/ValueError: boom/)
+    expect(tracebackEl.tagName).toBe('PRE')
+    expect(tracebackEl).toHaveClass('text-slate-500')
+    expect(screen.getByRole('button', { name: '▾ traceback' })).toBeInTheDocument()
+  })
+
   it('selecting WARNING renders only the warning+error records the (level-aware) API returns, not the INFO-level default', async () => {
     // A level-aware mock, not the fixed fixture: this is what actually
     // proves the level filter's effect renders, not just that the fetch

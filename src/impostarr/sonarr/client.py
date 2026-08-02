@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_BACKOFF: tuple[float, ...] = (0.5, 1.0, 2.0)
 DEFAULT_TIMEOUT = httpx.Timeout(30)
 HISTORY_PAGE_SIZE = 100
+# Sonarr's HistoryEventType enum. `eventType` must be sent numerically —
+# the string form ("downloadFolderImported") is rejected with a 400.
+HISTORY_EVENT_DOWNLOAD_FOLDER_IMPORTED = 3
 
 
 class SonarrError(Exception):
@@ -106,12 +109,19 @@ class SonarrClient:
     async def history_since(self, history_id: int) -> list[HistoryRecord]:
         """Fetch new history records newer than `history_id`.
 
-        Pages newest-first (`sortDirection=descending`) so a poll only walks
-        the handful of pages since the last watermark instead of Sonarr's
-        entire lifetime history: stops as soon as a page yields a record at
-        or below the watermark (everything after it, on this page and any
-        further page, is older). Returned records are re-sorted ascending by
-        id, since callers rely on ascending order.
+        Sonarr doesn't support `sortKey=id` — it silently substitutes `date`
+        server-side, so pages are actually ordered newest-date-first, not
+        newest-id-first. id and date correlate but aren't guaranteed
+        identical order, so a page can interleave a record at/below the
+        watermark before a newer one. Stopping mid-page on the first id <=
+        watermark (as if pages were id-ordered) could therefore skip a
+        newer record appearing later in date order.
+
+        Instead: scan each FULL page, collecting every record with
+        id > history_id regardless of position, and only stop paging once a
+        page contributes zero such records (or is empty) — everything on or
+        after that page is guaranteed older/duplicate. Returned records are
+        re-sorted ascending by id, since callers rely on ascending order.
         """
         records: list[HistoryRecord] = []
         page = 1
@@ -120,8 +130,8 @@ class SonarrClient:
                 "GET",
                 "/history",
                 params={
-                    "eventType": "downloadFolderImported",
-                    "sortKey": "id",
+                    "eventType": HISTORY_EVENT_DOWNLOAD_FOLDER_IMPORTED,
+                    "sortKey": "date",
                     "sortDirection": "descending",
                     "pageSize": HISTORY_PAGE_SIZE,
                     "page": page,
@@ -130,14 +140,10 @@ class SonarrClient:
             batch = response.json().get("records", [])
             if not batch:
                 break
-            reached_watermark = False
-            for raw in batch:
-                if raw["id"] <= history_id:
-                    reached_watermark = True
-                    break
-                records.append(HistoryRecord.model_validate(raw))
-            if reached_watermark:
+            new_on_page = [raw for raw in batch if raw["id"] > history_id]
+            if not new_on_page:
                 break
+            records.extend(HistoryRecord.model_validate(raw) for raw in new_on_page)
             page += 1
         records.sort(key=lambda r: r.id)
         return records
