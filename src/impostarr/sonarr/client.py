@@ -78,14 +78,14 @@ class SonarrClient:
             except httpx.TransportError:
                 if attempt >= self._max_retries:
                     raise
-                await asyncio.sleep(self._backoff[attempt])
+                await asyncio.sleep(self._backoff[min(attempt, len(self._backoff) - 1)])
                 attempt += 1
                 continue
 
             if response.status_code >= 500:
                 if attempt >= self._max_retries:
                     raise SonarrError(response.status_code, response.text)
-                await asyncio.sleep(self._backoff[attempt])
+                await asyncio.sleep(self._backoff[min(attempt, len(self._backoff) - 1)])
                 attempt += 1
                 continue
 
@@ -99,6 +99,15 @@ class SonarrClient:
         return SystemStatus.model_validate(response.json())
 
     async def history_since(self, history_id: int) -> list[HistoryRecord]:
+        """Fetch new history records newer than `history_id`.
+
+        Pages newest-first (`sortDirection=descending`) so a poll only walks
+        the handful of pages since the last watermark instead of Sonarr's
+        entire lifetime history: stops as soon as a page yields a record at
+        or below the watermark (everything after it, on this page and any
+        further page, is older). Returned records are re-sorted ascending by
+        id, since callers rely on ascending order.
+        """
         records: list[HistoryRecord] = []
         page = 1
         while True:
@@ -108,7 +117,7 @@ class SonarrClient:
                 params={
                     "eventType": "downloadFolderImported",
                     "sortKey": "id",
-                    "sortDirection": "ascending",
+                    "sortDirection": "descending",
                     "pageSize": HISTORY_PAGE_SIZE,
                     "page": page,
                 },
@@ -116,10 +125,16 @@ class SonarrClient:
             batch = response.json().get("records", [])
             if not batch:
                 break
-            records.extend(
-                HistoryRecord.model_validate(raw) for raw in batch if raw["id"] > history_id
-            )
+            reached_watermark = False
+            for raw in batch:
+                if raw["id"] <= history_id:
+                    reached_watermark = True
+                    break
+                records.append(HistoryRecord.model_validate(raw))
+            if reached_watermark:
+                break
             page += 1
+        records.sort(key=lambda r: r.id)
         return records
 
     async def episode_files(self, series_id: int) -> list[EpisodeFile]:

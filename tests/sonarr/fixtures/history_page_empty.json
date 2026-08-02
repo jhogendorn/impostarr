@@ -2,7 +2,7 @@
   "page": 3,
   "pageSize": 100,
   "sortKey": "id",
-  "sortDirection": "ascending",
+  "sortDirection": "descending",
   "totalRecords": 2,
   "records": []
 }

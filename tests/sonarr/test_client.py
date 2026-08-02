@@ -16,7 +16,7 @@ API_KEY = "test-api-key"
 HISTORY_PARAMS = {
     "eventType": "downloadFolderImported",
     "sortKey": "id",
-    "sortDirection": "ascending",
+    "sortDirection": "descending",
     "pageSize": "100",
 }
 
@@ -39,6 +39,8 @@ async def test_system_status_happy_path():
 
 @respx.mock
 async def test_history_since_happy_path():
+    # Single page (ids 102, 101 — newest first) with nothing at/below the
+    # watermark, followed by an empty page that ends pagination normally.
     route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(
         side_effect=[
             httpx.Response(200, json=load_fixture("history_page.json")),
@@ -48,6 +50,8 @@ async def test_history_since_happy_path():
     async with SonarrClient(BASE_URL, API_KEY) as client:
         records = await client.history_since(0)
 
+    # Results are re-sorted ascending for callers regardless of the
+    # newest-first wire order.
     assert [r.id for r in records] == [101, 102]
     first = records[0]
     assert first.episode_ids == [555]
@@ -57,31 +61,34 @@ async def test_history_since_happy_path():
     assert first.episode_file_id == 9001
     assert first.guid == "abcdef0123456789"
     assert first.indexer == "NZBgeek"
+    assert route.call_count == 2
     assert route.calls[0].request.url.params["page"] == "1"
     assert route.calls[1].request.url.params["page"] == "2"
 
 
 @respx.mock
-async def test_history_since_filters_by_watermark():
+async def test_history_since_stops_paging_at_watermark():
+    # The single mocked page (ids 102, 101 descending) contains a record at
+    # the watermark (101). Pagination must stop as soon as that record is
+    # seen — a second page must never be requested.
     route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(
-        side_effect=[
-            httpx.Response(200, json=load_fixture("history_page.json")),
-            httpx.Response(200, json=load_fixture("history_page_empty.json")),
-        ]
+        side_effect=[httpx.Response(200, json=load_fixture("history_page.json"))]
     )
     async with SonarrClient(BASE_URL, API_KEY) as client:
         records = await client.history_since(101)
 
     assert [r.id for r in records] == [102]
+    assert route.call_count == 1
     assert route.calls[0].request.url.params["page"] == "1"
-    assert route.calls[1].request.url.params["page"] == "2"
 
 
 @respx.mock
-async def test_history_since_paginates_until_empty():
+async def test_history_since_paginates_across_pages():
+    # Watermark below all available ids, so no page hits the boundary;
+    # pagination continues (newest-first) until an empty page is returned.
     pages = {
-        "1": load_fixture("history_page.json"),
-        "2": load_fixture("history_page2.json"),
+        "1": load_fixture("history_page2.json"),  # ids 104, 103
+        "2": load_fixture("history_page.json"),  # ids 102, 101
         "3": load_fixture("history_page_empty.json"),
     }
 
@@ -92,7 +99,7 @@ async def test_history_since_paginates_until_empty():
     route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(side_effect=responder)
 
     async with SonarrClient(BASE_URL, API_KEY) as client:
-        records = await client.history_since(0)
+        records = await client.history_since(100)
 
     assert [r.id for r in records] == [101, 102, 103, 104]
     assert route.call_count == 3
@@ -100,8 +107,20 @@ async def test_history_since_paginates_until_empty():
 
 
 @respx.mock
+async def test_history_since_first_page_empty():
+    route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(
+        side_effect=[httpx.Response(200, json=load_fixture("history_page_empty.json"))]
+    )
+    async with SonarrClient(BASE_URL, API_KEY) as client:
+        records = await client.history_since(0)
+
+    assert records == []
+    assert route.call_count == 1
+
+
+@respx.mock
 async def test_episode_files_happy_path():
-    respx.get(f"{API_URL}/episodefile").mock(
+    route = respx.get(f"{API_URL}/episodefile").mock(
         return_value=httpx.Response(200, json=load_fixture("episode_files.json"))
     )
     async with SonarrClient(BASE_URL, API_KEY) as client:
@@ -110,6 +129,7 @@ async def test_episode_files_happy_path():
     assert [f.id for f in files] == [9001, 9002]
     assert files[0].path == "/tv/Show Name/Season 01/Show Name - S01E02 - Title.mkv"
     assert files[0].size == 1073741824
+    assert route.calls.last.request.url.params["seriesId"] == "42"
 
 
 @respx.mock
@@ -154,7 +174,7 @@ async def test_all_series_happy_path():
 
 @respx.mock
 async def test_episodes_happy_path():
-    respx.get(f"{API_URL}/episode").mock(
+    route = respx.get(f"{API_URL}/episode").mock(
         return_value=httpx.Response(200, json=load_fixture("episodes.json"))
     )
     async with SonarrClient(BASE_URL, API_KEY) as client:
@@ -167,6 +187,7 @@ async def test_episodes_happy_path():
     assert scene.scene_absolute_episode_number == 4
     no_file = episodes[2]
     assert no_file.has_file is False
+    assert route.calls.last.request.url.params["seriesId"] == "42"
 
 
 @respx.mock
