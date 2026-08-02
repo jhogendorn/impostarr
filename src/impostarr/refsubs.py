@@ -11,9 +11,12 @@ of crashing.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +42,11 @@ class RefSubService:
         self.cfg = cfg
         self.http = http
         self._token: str | None = None
+        # Guards check-and-reserve of the daily quota so two concurrent
+        # get() calls near the limit can't both pass the check before
+        # either increments (the check-then-network-then-increment window
+        # otherwise spans several awaits).
+        self._quota_lock = asyncio.Lock()
 
     async def get(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> Path | None:
         tvdb_id = series_ext_ids.get("tvdb")
@@ -56,29 +64,45 @@ class RefSubService:
         if not self.cfg.cache_dir:
             logger.warning("no cache_dir configured, cannot fetch reference subtitles")
             return None
+        cache_dir = Path(self.cfg.cache_dir)
 
-        cache_path = Path(self.cfg.cache_dir) / str(tvdb_id) / name
+        cache_path = cache_dir / str(tvdb_id) / name
         if cache_path.exists():
             return cache_path
 
-        if not self._quota_available():
+        if not await self._reserve_quota(cache_dir):
             logger.info("reference subtitle daily quota exhausted, skipping API fetch")
             return None
 
+        # Reservation is provisional until /download actually succeeds
+        # (the point OpenSubtitles debits its own remote quota) — released
+        # below if the chain fails before that point, so a search miss or
+        # transient error doesn't burn a real quota unit.
+        committed = False
         try:
-            return await self._fetch_via_api(tvdb_id, season, episode, cache_path)
+            file_id = await self._search(tvdb_id, season, episode)
+            if file_id is None:
+                return None
+            link = await self._download(file_id)
+            if link is None:
+                return None
+            committed = True
+            return await self._save(link, cache_path)
         except Exception:
             logger.exception("reference subtitle fetch failed unexpectedly")
             return None
+        finally:
+            if not committed:
+                await self._release_quota(cache_dir)
 
     # -- quota --------------------------------------------------------
 
-    def _quota_path(self) -> Path:
-        return Path(self.cfg.cache_dir) / "quota.json"  # type: ignore[arg-type]
+    def _quota_path(self, cache_dir: Path) -> Path:
+        return cache_dir / "quota.json"
 
-    def _load_quota(self) -> dict[str, Any]:
+    def _load_quota(self, cache_dir: Path) -> dict[str, Any]:
         today = datetime.datetime.now(datetime.UTC).date().isoformat()
-        path = self._quota_path()
+        path = self._quota_path(cache_dir)
         data: dict[str, Any] = {}
         if path.exists():
             try:
@@ -89,29 +113,29 @@ class RefSubService:
             data = {"date": today, "count": 0}
         return data
 
-    def _quota_available(self) -> bool:
-        return self._load_quota()["count"] < self.cfg.daily_quota
-
-    def _increment_quota(self) -> None:
-        data = self._load_quota()
-        data["count"] += 1
-        path = self._quota_path()
+    def _write_quota(self, cache_dir: Path, data: dict[str, Any]) -> None:
+        path = self._quota_path(cache_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data))
 
-    # -- OpenSubtitles API ----------------------------------------------
+    async def _reserve_quota(self, cache_dir: Path) -> bool:
+        """Atomically check-and-increment; False without writing if at quota."""
+        async with self._quota_lock:
+            data = self._load_quota(cache_dir)
+            if data["count"] >= self.cfg.daily_quota:
+                return False
+            data["count"] += 1
+            self._write_quota(cache_dir, data)
+            return True
 
-    async def _fetch_via_api(
-        self, tvdb_id: Any, season: int, episode: int, cache_path: Path
-    ) -> Path | None:
-        file_id = await self._search(tvdb_id, season, episode)
-        if file_id is None:
-            return None
-        link = await self._download(file_id)
-        if link is None:
-            return None
-        self._increment_quota()
-        return await self._save(link, cache_path)
+    async def _release_quota(self, cache_dir: Path) -> None:
+        """Roll back a reservation that didn't reach a real remote download."""
+        async with self._quota_lock:
+            data = self._load_quota(cache_dir)
+            data["count"] = max(0, data["count"] - 1)
+            self._write_quota(cache_dir, data)
+
+    # -- OpenSubtitles API ----------------------------------------------
 
     def _headers(self) -> dict[str, str]:
         headers = {"Api-Key": self.cfg.api_key or ""}
@@ -222,5 +246,17 @@ class RefSubService:
             logger.warning("failed to fetch reference subtitle link: %s -> %s", link, response.status_code)
             return None
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(response.content)
+        # Write to a temp file in the same directory then rename, so a
+        # concurrent reader (or a crash mid-write) never observes a
+        # partially-written subtitle at the final cache path.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "wb") as tmp_file:
+                tmp_file.write(response.content)
+            os.replace(tmp_name, cache_path)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
         return cache_path

@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 from pathlib import Path
@@ -245,3 +246,54 @@ async def test_login_401_then_relogin_once_succeeds(tmp_path):
     assert search_route.call_count == 2
     assert search_route.calls[0].request.headers["Authorization"] == "Bearer stale-token"
     assert search_route.calls[1].request.headers["Authorization"] == "Bearer fresh-token"
+
+
+@respx.mock
+async def test_concurrent_get_calls_respect_quota_reservation(tmp_path):
+    # One slot left in the quota; two concurrent get() calls (different
+    # episodes, same service instance) race for it. The reservation lock
+    # must ensure exactly one wins the slot rather than both passing the
+    # check before either writes the increment.
+    cfg = make_cfg(tmp_path, daily_quota=5)
+    quota_path = Path(cfg.cache_dir) / "quota.json"
+    quota_path.parent.mkdir(parents=True, exist_ok=True)
+    today = datetime.datetime.now(datetime.UTC).date().isoformat()
+    quota_path.write_text(json.dumps({"date": today, "count": cfg.daily_quota - 1}))
+
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    respx.get(f"{BASE_URL}/subtitles").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "attributes": {
+                            "download_count": 5,
+                            "language": "en",
+                            "files": [{"file_id": 1}],
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    respx.post(f"{BASE_URL}/download").mock(
+        return_value=httpx.Response(200, json={"link": "https://dl.opensubtitles.com/sub/1.srt"})
+    )
+    respx.get("https://dl.opensubtitles.com/sub/1.srt").mock(
+        return_value=httpx.Response(200, text="content")
+    )
+
+    service = await make_service(cfg)
+    results = await asyncio.gather(
+        service.get({"tvdb": 123456}, season=1, episode=1),
+        service.get({"tvdb": 123456}, season=1, episode=2),
+    )
+
+    successes = [r for r in results if r is not None]
+    failures = [r for r in results if r is None]
+    assert len(successes) == 1
+    assert len(failures) == 1
+
+    quota_data = json.loads(quota_path.read_text())
+    assert quota_data["count"] == cfg.daily_quota
