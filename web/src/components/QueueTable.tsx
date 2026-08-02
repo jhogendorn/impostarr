@@ -198,7 +198,7 @@ function QueueTable({
   const selectedJobs = items.filter((job) => selected.has(job.job_id))
 
   return (
-    <div className="glow-panel px-6 py-4">
+    <div className="px-6 py-4">
       <div className="mb-3 flex flex-wrap items-center gap-3">
         {instances.length > 1 && (
           <select

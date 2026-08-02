@@ -86,4 +86,23 @@ describe('App SSE wiring', () => {
     const lastCall = getQueueMock.mock.calls.at(-1)
     expect(lastCall?.[0]).toBe('quarantine')
   })
+
+  it('wraps the tab bar and table together in one inset glow-panel card (not separate full-bleed rings)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    render(<App />)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    const tabList = screen.getByRole('tablist')
+    // TabGroup (HeadlessUI) renders its own unstyled wrapper div around
+    // TabList, so the card is the tablist's grandparent, not its parent.
+    const card = tabList.parentElement!.parentElement!
+    expect(card).toHaveClass('glow-panel', 'rounded-xl')
+    // the table lives inside the same card as the tab bar
+    expect(card).toContainElement(screen.getByRole('table'))
+    // neither child re-applies its own ring now that the card owns it
+    expect(tabList).not.toHaveClass('glow-panel')
+  })
 })
