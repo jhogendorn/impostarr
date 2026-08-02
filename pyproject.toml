@@ -15,10 +15,14 @@ dependencies = [
     "xxhash>=3.8.1",
     "imagehash>=4.3",
     "pillow>=10",
+    "rapidfuzz==3.14.5",
 ]
 
 [project.optional-dependencies]
 whisper = ["faster-whisper>=1.0"]
+
+[project.entry-points."impostarr.identifiers"]
+whisper-subs = "impostarr.plugins.whisper_subs:WhisperSubsPlugin"
 
 [dependency-groups]
 dev = [
