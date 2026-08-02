@@ -13,12 +13,41 @@ API_URL = f"{BASE_URL}/api/v3"
 API_KEY = "test-api-key"
 
 # Fixed history query params (page varies per call, so it's checked separately).
+# eventType=3 is Sonarr's numeric HistoryEventType.downloadFolderImported —
+# the string form 400s. sortKey=date because Sonarr doesn't honor
+# sortKey=id (silently substitutes date server-side).
 HISTORY_PARAMS = {
-    "eventType": "downloadFolderImported",
-    "sortKey": "id",
+    "eventType": "3",
+    "sortKey": "date",
     "sortDirection": "descending",
     "pageSize": "100",
 }
+
+
+def history_record_raw(id_, *, episode_id=555, series_id=42, date="2026-07-30T10:15:00Z"):
+    return {
+        "id": id_,
+        "episodeId": episode_id,
+        "seriesId": series_id,
+        "sourceTitle": "Show.Name.S01E02.1080p.WEB-DL",
+        "downloadId": "abcdef0123456789",
+        "eventType": "downloadFolderImported",
+        "date": date,
+        "quality": {"quality": {"id": 7, "name": "WEBDL-1080p"}},
+        "languages": [{"id": 1, "name": "English"}],
+        "data": {"fileId": "9001", "guid": "abcdef0123456789", "indexer": "NZBgeek"},
+    }
+
+
+def history_page_raw(records: list[dict]) -> dict:
+    return {
+        "page": 1,
+        "pageSize": 100,
+        "sortKey": "date",
+        "sortDirection": "descending",
+        "totalRecords": len(records),
+        "records": records,
+    }
 
 
 def load_fixture(name: str):
@@ -67,19 +96,44 @@ async def test_history_since_happy_path():
 
 
 @respx.mock
-async def test_history_since_stops_paging_at_watermark():
-    # The single mocked page (ids 102, 101 descending) contains a record at
-    # the watermark (101). Pagination must stop as soon as that record is
-    # seen — a second page must never be requested.
+async def test_history_since_stops_paging_when_page_has_zero_new_records():
+    # The single mocked page (ids 102, 101 descending) has nothing above the
+    # watermark (102): every record on it is at/below history_id. Under the
+    # full-page-scan rule, pagination stops right there — a second page must
+    # never be requested.
     route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(
         side_effect=[httpx.Response(200, json=load_fixture("history_page.json"))]
     )
     async with SonarrClient(BASE_URL, API_KEY) as client:
-        records = await client.history_since(101)
+        records = await client.history_since(102)
 
-    assert [r.id for r in records] == [102]
+    assert records == []
     assert route.call_count == 1
     assert route.calls[0].request.url.params["page"] == "1"
+
+
+@respx.mock
+async def test_history_since_captures_interleaved_new_record_and_keeps_paging():
+    # Sonarr actually sorts by date, not id, so a page can interleave a
+    # record at/below the watermark BEFORE a newer one. The old "stop at
+    # the first id <= watermark" rule would have missed id=105 here. The
+    # full-page scan must still capture it, and since the page had at
+    # least one new record, paging must continue to page 2 (which also has
+    # one new record, id=106) and only stop at the empty page 3.
+    watermark = 100
+    route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(
+        side_effect=[
+            httpx.Response(200, json=history_page_raw([history_record_raw(99), history_record_raw(105)])),
+            httpx.Response(200, json=history_page_raw([history_record_raw(106)])),
+            httpx.Response(200, json=load_fixture("history_page_empty.json")),
+        ]
+    )
+    async with SonarrClient(BASE_URL, API_KEY) as client:
+        records = await client.history_since(watermark)
+
+    assert [r.id for r in records] == [105, 106]
+    assert route.call_count == 3
+    assert [call.request.url.params["page"] for call in route.calls] == ["1", "2", "3"]
 
 
 @respx.mock

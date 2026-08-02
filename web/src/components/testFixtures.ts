@@ -60,14 +60,21 @@ export const statusWithActiveJobsFixture: StatusResponse = {
 }
 
 export const logRecordsFixture: LogRecord[] = [
-  { ts: '2026-08-02T00:00:00Z', level: 'INFO', logger: 'impostarr.worker', message: 'claimed job 42' },
+  { ts: '2026-08-02T00:00:00Z', level: 'INFO', logger: 'impostarr.worker', message: 'claimed job 42', exc: null },
   {
     ts: '2026-08-02T00:00:01Z',
     level: 'WARNING',
     logger: 'impostarr.sonarr.client',
     message: 'DRY-RUN: would DELETE /episodefile/9001',
+    exc: null,
   },
-  { ts: '2026-08-02T00:00:02Z', level: 'ERROR', logger: 'impostarr.pipeline', message: 'plugin crashed' },
+  {
+    ts: '2026-08-02T00:00:02Z',
+    level: 'ERROR',
+    logger: 'impostarr.pipeline',
+    message: 'plugin crashed',
+    exc: 'Traceback (most recent call last):\n  File "pipeline.py", line 42, in run\n    plugin.identify(job)\nValueError: boom',
+  },
 ]
 
 export const queuePageFixture: QueuePage = {

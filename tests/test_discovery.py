@@ -18,8 +18,8 @@ API_URL = f"{BASE_URL}/api/v3"
 API_KEY = "test-api-key"
 
 HISTORY_PARAMS = {
-    "eventType": "downloadFolderImported",
-    "sortKey": "id",
+    "eventType": "3",
+    "sortKey": "date",
     "sortDirection": "descending",
     "pageSize": "100",
 }
@@ -82,7 +82,7 @@ def history_page(records: list[dict]) -> dict:
     return {
         "page": 1,
         "pageSize": 100,
-        "sortKey": "id",
+        "sortKey": "date",
         "sortDirection": "descending",
         "totalRecords": len(records),
         "records": records,
@@ -92,7 +92,7 @@ def history_page(records: list[dict]) -> dict:
 EMPTY_HISTORY_PAGE = {
     "page": 1,
     "pageSize": 100,
-    "sortKey": "id",
+    "sortKey": "date",
     "sortDirection": "descending",
     "totalRecords": 0,
     "records": [],

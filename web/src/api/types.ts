@@ -258,6 +258,7 @@ export interface LogRecord {
   level: string
   logger: string
   message: string
+  exc: string | null
 }
 
 export interface LogsResponse {

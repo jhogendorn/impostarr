@@ -12,6 +12,7 @@ are silently dropped once the buffer is full.
 from __future__ import annotations
 
 import logging
+import traceback
 from collections import deque
 from datetime import UTC, datetime
 from typing import TypedDict
@@ -21,12 +22,29 @@ DEFAULT_CAPACITY = 1000
 # Ascending severity, matching the stdlib's level names.
 _LEVEL_ORDER = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
 
+# Traceback lines kept when a record carries exc_info, trimmed to the
+# tail (deepest frames + the exception line) since that's what's actionable
+# in a bounded in-memory log viewer.
+EXC_TRACEBACK_TAIL_LINES = 5
+
 
 class LogRecordDict(TypedDict):
     ts: str
     level: str
     logger: str
     message: str
+    exc: str | None
+
+
+def _format_exc(record: logging.LogRecord) -> str | None:
+    """Render `record.exc_info` (set by `logger.exception`/`exc_info=True`)
+    as plain text, trimmed to its last `EXC_TRACEBACK_TAIL_LINES` lines —
+    the deepest frames and the exception line, which is what's actionable
+    without the full traceback the ring buffer doesn't retain otherwise."""
+    if record.exc_info is None:
+        return None
+    lines = "".join(traceback.format_exception(*record.exc_info)).splitlines()
+    return "\n".join(lines[-EXC_TRACEBACK_TAIL_LINES:])
 
 
 class RingBufferHandler(logging.Handler):
@@ -44,6 +62,7 @@ class RingBufferHandler(logging.Handler):
                 "level": record.levelname,
                 "logger": record.name,
                 "message": record.getMessage(),
+                "exc": _format_exc(record),
             }
         )
 
