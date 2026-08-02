@@ -416,7 +416,7 @@ function InspectModal({ jobId, open, onClose, onChanged, dryRun = false }: Inspe
     <Dialog open={open} onClose={onClose} className="relative z-50">
       <DialogBackdrop className="fixed inset-0 bg-black/70" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-6 text-slate-100">
+        <DialogPanel className="glow-elevated max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-slate-900 p-6 text-slate-100">
           <div className="flex items-start justify-between gap-4">
             <DialogTitle className="text-lg font-semibold text-indigo-400">
               {detail ? (detail.external_ids?.title ?? `Series ${detail.file.series_id}`) : `Job #${jobId}`}

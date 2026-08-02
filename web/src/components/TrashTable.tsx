@@ -81,7 +81,7 @@ function TrashTable() {
   }
 
   return (
-    <div className="px-6 py-4">
+    <div className="glow-panel px-6 py-4">
       {error && (
         <p className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
           {error}

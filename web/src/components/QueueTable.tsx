@@ -198,7 +198,7 @@ function QueueTable({
   const selectedJobs = items.filter((job) => selected.has(job.job_id))
 
   return (
-    <div className="px-6 py-4">
+    <div className="glow-panel px-6 py-4">
       <div className="mb-3 flex flex-wrap items-center gap-3">
         {instances.length > 1 && (
           <select
@@ -231,7 +231,7 @@ function QueueTable({
         role="group"
         aria-label="Bulk actions"
         className={`mb-3 flex h-10 flex-wrap items-center gap-3 rounded-lg px-3 text-sm text-slate-200 ${
-          selected.size > 0 ? 'border border-indigo-500/30 bg-indigo-500/10 py-2' : ''
+          selected.size > 0 ? 'glow-live bg-indigo-500/10 py-2' : ''
         }`}
       >
         {selected.size > 0 && (

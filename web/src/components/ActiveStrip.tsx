@@ -44,7 +44,7 @@ function ActiveStrip({ activeJobs, system }: ActiveStripProps) {
 
   return (
     <section className="px-6 pt-4">
-      <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
+      <div className="glow-live rounded-lg bg-slate-900/40 px-4 py-3">
         <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Active</h2>
         {activeJobs.length === 0 ? (
           <div className="flex items-center justify-between gap-4">
