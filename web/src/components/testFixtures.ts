@@ -141,3 +141,19 @@ export const jobDetailFixture: JobDetail = {
   ],
   frame_hash_present: true,
 }
+
+/** quarantine job carrying a human `is_other` verdict — human_ident set,
+ * no proposed_action (backend only resolves target_episode_ids at
+ * approve-time), source: 'human'. */
+export const jobDetailHumanIdentFixture: JobDetail = {
+  ...jobDetailFixture,
+  verdict: {
+    s_claimed: null,
+    s_alt: null,
+    outcome: 'quarantine',
+    proposed_action: null,
+    remediation_log: null,
+    source: 'human',
+    human_ident: { season: 2, episodes: [3, 4] },
+  },
+}

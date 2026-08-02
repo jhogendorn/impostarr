@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client'
 import VerdictActions from './VerdictActions'
-import { jobDetailFixture } from './testFixtures'
+import { jobDetailFixture, jobDetailHumanIdentFixture } from './testFixtures'
 
 const { approveJobMock, rejectJobMock, postVerdictMock } = vi.hoisted(() => ({
   approveJobMock: vi.fn(),
@@ -42,6 +42,7 @@ describe('VerdictActions', () => {
 
     const approveButton = screen.getByRole('button', { name: 'Approve action' })
     expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument()
+    expect(screen.getByText('Proposed: remap → episodes 100')).toBeInTheDocument()
 
     await user.click(approveButton)
 
@@ -52,6 +53,31 @@ describe('VerdictActions', () => {
     resolveApprove({ result: 'matched' })
     await waitFor(() => expect(approveButton).not.toBeDisabled())
     expect(onChanged).toHaveBeenCalled()
+  })
+
+  it('shows Approve/Reject for a human is_other verdict (human_ident, no proposed_action)', async () => {
+    const user = userEvent.setup()
+    approveJobMock.mockResolvedValue({ result: 'matched' })
+    render(<VerdictActions job={jobDetailHumanIdentFixture} onChanged={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: 'Approve action' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument()
+    expect(screen.getByText('Proposed: remap → S2E3,4')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Approve action' }))
+
+    expect(approveJobMock).toHaveBeenCalledWith(42)
+  })
+
+  it('omits Rerun for a remediated job (no remediated→pending transition exists)', () => {
+    render(
+      <VerdictActions
+        job={{ ...jobDetailFixture, job: { ...jobDetailFixture.job, status: 'remediated' } }}
+        onChanged={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Rerun' })).not.toBeInTheDocument()
   })
 
   it('is_other form submits parsed season/episodes', async () => {

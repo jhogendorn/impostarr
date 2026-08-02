@@ -7,10 +7,35 @@ interface VerdictActionsProps {
   onChanged: () => void
 }
 
-const RERUN_STATUSES = new Set(['matched', 'error', 'remediated', 'quarantine', 'inconclusive'])
+// No remediated→pending edge exists in the backend transition table (a
+// remediated job's replacement file arrives as a new discovery instead),
+// so Rerun would always 409 there — omit it.
+const RERUN_STATUSES = new Set(['matched', 'error', 'quarantine', 'inconclusive'])
 
 const BUTTON_CLASS =
   'rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40'
+
+/** Text for the not-yet-approved action, from either an auto-computed
+ * `proposed_action` or a human `is_other` verdict's `human_ident` — the
+ * latter has no `target_episode_ids` until approve resolves it against
+ * Sonarr, so it's described by season/episode numbers instead. */
+function describeProposal(verdict: JobDetail['verdict']): string | null {
+  if (!verdict) return null
+  const action = verdict.proposed_action
+  if (action !== null && typeof action === 'object') {
+    const record = action as Record<string, unknown>
+    if (record.kind === 'remap') {
+      const ids = record.target_episode_ids
+      return `Proposed: remap → episodes ${Array.isArray(ids) ? ids.join(', ') : '?'}`
+    }
+    if (record.kind === 'replace') return 'Proposed: replace'
+  }
+  if (verdict.source === 'human' && verdict.human_ident) {
+    const { season, episodes } = verdict.human_ident
+    return `Proposed: remap → S${season}E${episodes.join(',')}`
+  }
+  return null
+}
 
 function formatError(err: unknown): string {
   if (err instanceof ApiError) {
@@ -66,10 +91,13 @@ function VerdictActions({ job, onChanged }: VerdictActionsProps) {
   }
 
   const showVerdictButtons = status === 'quarantine' || status === 'inconclusive'
-  const showApproveReject = status === 'quarantine' && job.verdict?.proposed_action != null
+  const showApproveReject =
+    status === 'quarantine' &&
+    (job.verdict?.proposed_action != null || (job.verdict?.source === 'human' && job.verdict?.human_ident != null))
   const showPark = status === 'pending'
   const showUnpark = status === 'hold'
   const showRerun = RERUN_STATUSES.has(status)
+  const proposalText = showApproveReject ? describeProposal(job.verdict) : null
 
   return (
     <div className="border-t border-slate-800 pt-4">
@@ -78,6 +106,7 @@ function VerdictActions({ job, onChanged }: VerdictActionsProps) {
           {error}
         </p>
       )}
+      {proposalText && <p className="mb-2 text-sm text-slate-400">{proposalText}</p>}
       <div className="flex flex-wrap gap-2">
         {showVerdictButtons && (
           <>
