@@ -23,6 +23,7 @@ whisper = ["faster-whisper>=1.0"]
 
 [project.entry-points."impostarr.identifiers"]
 whisper-subs = "impostarr.plugins.whisper_subs:WhisperSubsPlugin"
+subs-llm = "impostarr.plugins.subs_llm:SubsLlmPlugin"
 
 [dependency-groups]
 dev = [

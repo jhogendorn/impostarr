@@ -140,11 +140,23 @@ config, cache layout, and any fork/vendoring decision:
   (librosa → numba 0.53 → llvmlite 0.36) hard-caps at Python <3.10, so the
   plugin was implemented natively (approach 3) with rapidfuzz; no TMDB key
   needed.*
-- `subs-llm` — tvidentify internals: embedded subs (SRT or OCR'd PGS/VobSub)
-  + LLM episode identification. Requires: an LLM provider (OpenAI-compatible
-  endpoint or Ollama; provider, base URL, model, API key in plugin config)
-  and OCR/system deps (`tesseract`, `mkvtoolnix`, `ffmpeg`/`ffprobe`) which
-  ship in the image.
+- `subs-llm` — embedded subs (text SRT only in the PoC) + LLM episode
+  identification. Requires: an LLM provider (OpenAI-compatible endpoint or
+  Ollama; base URL, model, API key in plugin config). *Implementation note
+  (2026-08-02): approach 2 (tvidentify) installed cleanly under this
+  project's Python 3.12 pin — unlike whisper-subs's mkv-episode-matcher —
+  and its internals were importable, but `identify_episode`'s LLM call is
+  hardwired to the `openai`/`google-genai` SDKs with no `base_url` override
+  (Ollama unreachable), reads API keys only from env vars (not injectable
+  via plugin config), returns a `{season, episode}` 0-100-confidence schema
+  instead of this project's `{season, episodes, confidence 0..1,
+  reasoning}` contract, and retries malformed JSON with a best-effort regex
+  rather than a bounded reminder-and-retry. None of that is reachable
+  without forking, so the plugin was implemented natively (approach 3) with
+  a direct `httpx` call to the chat-completions endpoint; no `openai` SDK or
+  `tvidentify` dependency. Its OCR path (PGS/VobSub via tesseract) is
+  correspondingly out of scope: image subs are unsupported and the plugin
+  abstains for them.*
 
 ### Plugin loading
 
