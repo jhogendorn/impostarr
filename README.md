@@ -213,6 +213,37 @@ Install it by adding a pinned pip spec to `plugins.sources` in
 `impostarr.yml` (e.g. `git+https://...@v1.0#subdirectory=my-plugin`) —
 Impostarr installs it into a dedicated venv overlay at container boot.
 
+## Demo / e2e
+
+One command spins up a complete, throwaway Impostarr deployment against a
+real Sonarr instance and a synthetic library — no copyrighted media
+involved, everything is generated locally by ffmpeg:
+
+```sh
+bash demo/e2e.sh
+```
+
+What it builds: Sonarr + Impostarr (`dry_run: true`) + a stub
+OpenAI-compatible transcription server, via `demo/compose.yml`. It
+generates a synthetic 4-episode library (`demo/generate_media.py`, testsrc2
+video + sine audio + embedded/reference subtitles — a TVDB-real series,
+"Pioneer One" by default, falling back to another well-known title if
+SkyHook lookup fails), seeds it into Sonarr (`demo/seed.sh`), then triggers
+an Impostarr backfill and polls until every file is verified. One file
+(`S01E04`) is deliberately mislabeled — it's really episode 5's content —
+so the run asserts 3 files come back `matched` and 1 comes back
+`remediated` with a `DRY-RUN`-prefixed remediation log proposing the
+correct remap to `S01E05`.
+
+The stack is left running afterwards for interactive inspection at
+`http://localhost:8484` — open the queue, click into the remediated job,
+and look at its plugin results and remediation log. Pass `--down` for CI
+mode (tears the stack down after asserting).
+
+Teardown: `(cd demo && docker compose down -v)`. Every run starts by
+wiping `demo/volumes/` and rebuilding from scratch, so re-running is always
+safe.
+
 ## Development
 
 - Tool versions via [mise](https://mise.jdx.dev/) (`mise.toml`: Python 3.12, Node 24).

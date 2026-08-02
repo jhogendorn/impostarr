@@ -1,0 +1,45 @@
+# Demo/e2e stack: real Sonarr + a synthetic library + a stub transcriber +
+# Impostarr itself (dry_run always on — see impostarr.demo.yml). Driven by
+# e2e.sh; see README "Demo / e2e" section. Run from this directory (`cd
+# demo && docker compose ...`) — e2e.sh does this for you.
+services:
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: Etc/UTC
+    volumes:
+      - ./volumes/sonarr-config:/config
+      - ./volumes/media:/media
+    ports:
+      - "8989:8989"
+    restart: unless-stopped
+
+  stub-transcriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./volumes/manifest:/manifest:ro
+    restart: unless-stopped
+
+  impostarr:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    depends_on:
+      - sonarr
+      - stub-transcriber
+    volumes:
+      - ./volumes/config:/config
+      - ./volumes/assets:/assets
+      - ./volumes/models:/models
+      - ./volumes/media:/media:ro
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      IMPOSTARR_CONFIG: /config/impostarr.yml
+    ports:
+      - "8484:8484"
+    restart: unless-stopped
