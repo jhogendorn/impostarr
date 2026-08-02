@@ -119,6 +119,9 @@ def ensure_external_plugins(specs: list[str], state_dir: Path, venv_dir: Path) -
     step, logs and leaves the lock file untouched so the app continues
     without the plugin(s) rather than crashing or retrying every boot.
     """
+    if not specs:
+        return
+
     lock_path = state_dir / LOCK_FILENAME
     digest = hashlib.sha256("\n".join(sorted(specs)).encode()).hexdigest()
 

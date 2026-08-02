@@ -49,11 +49,11 @@ list/object-valued keys) — env always wins over the file.
 | `/media`  | Library mount                                                    | Read-only unless remap staging (hardlink + manual import) is used. |
 
 SQLite (the default) implies a single replica. For multiple replicas, set
-`db.dsn` to a Postgres connection string and run the `postgres` compose
-profile — see the comment block in
-[docker/compose.yml](docker/compose.yml) (note: a Postgres driver isn't
-currently pinned in `pyproject.toml`; add one — `psycopg[binary]` or
-similar — before relying on this).
+`db.dsn` to a Postgres connection string (`postgresql+psycopg://...`) and
+run the `postgres` compose profile — see the comment block in
+[docker/compose.yml](docker/compose.yml). Both docker images include the
+`postgres` extra (psycopg) already; outside Docker, install it with
+`uv sync --extra postgres`.
 
 ## GPU (whisper transcription)
 

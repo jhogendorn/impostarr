@@ -166,6 +166,20 @@ def _existing_venv(venv_dir):
     return python
 
 
+def test_ensure_external_plugins_noop_on_empty_specs(tmp_path, monkeypatch):
+    venv_dir = tmp_path / "venv"
+
+    def fake_run(*args, **kwargs):
+        raise AssertionError("subprocess should not be called for empty specs")
+
+    monkeypatch.setattr(loader.subprocess, "run", fake_run)
+
+    loader.ensure_external_plugins([], tmp_path, venv_dir)
+
+    assert not (tmp_path / "plugins.lock").exists()
+    assert not venv_dir.exists()
+
+
 def test_ensure_external_plugins_noop_on_unchanged_hash(tmp_path, monkeypatch):
     specs = ["pkg-a==1.0", "pkg-b==2.0"]
     (tmp_path / "plugins.lock").write_text(_hash(specs))

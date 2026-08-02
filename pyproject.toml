@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 whisper = ["faster-whisper>=1.0"]
+postgres = ["psycopg[binary]>=3.2"]
 
 [project.entry-points."impostarr.identifiers"]
 whisper-subs = "impostarr.plugins.whisper_subs:WhisperSubsPlugin"
@@ -31,6 +32,9 @@ dev = [
     "pytest-asyncio",
     "respx",
     "ruff",
+    # Needed for tests/test_db.py's postgresql+psycopg dialect check (SQLAlchemy
+    # resolves the DBAPI module at create_engine() time even without connecting).
+    "psycopg[binary]>=3.2",
 ]
 
 [build-system]

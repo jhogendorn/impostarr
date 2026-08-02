@@ -86,6 +86,9 @@ auth:
   #   key: CHANGE_ME
 
 # Database. Absent dsn -> SQLite at <state_dir>/impostarr.db.
+# Postgres requires the `postgres` extra (psycopg) — install with
+# `uv sync --extra postgres`, or use a docker image built from this repo
+# (both docker/Dockerfile and docker/Dockerfile.cuda include it).
 db:
   dsn: null
   # dsn: postgresql+psycopg://user:pass@postgres:5432/impostarr
