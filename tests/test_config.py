@@ -5,7 +5,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from impostarr.config import PathMapping, Settings, load_settings
+from impostarr.config import DEFAULT_CONFIG_PATH, PathMapping, Settings, load_settings
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +113,12 @@ def test_json_list_env_override(tmp_path, monkeypatch):
     assert len(settings.sonarr) == 1
     assert settings.sonarr[0].name == "env-instance"
     assert settings.sonarr[0].poll_interval_s == 300
+
+
+def test_bare_settings_defaults_to_standard_config_path():
+    # Direct instantiation (no load_settings) must still read the standard
+    # /config/impostarr.yml path rather than silently skipping the file.
+    assert Settings.model_config["yaml_file"] == DEFAULT_CONFIG_PATH
 
 
 def test_duplicate_sonarr_instance_names_rejected():

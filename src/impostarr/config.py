@@ -91,7 +91,9 @@ class WorkersConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="IMPOSTARR__", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(
+        env_prefix="IMPOSTARR__", env_nested_delimiter="__", yaml_file=DEFAULT_CONFIG_PATH
+    )
 
     sonarr: list[SonarrInstance] = Field(default_factory=list)
     thresholds: Thresholds = Field(default_factory=Thresholds)
@@ -146,9 +148,7 @@ def load_settings(path: Path | None = None) -> Settings:
     # throwaway subclass's model_config (YamlConfigSettingsSource falls
     # back to settings_cls.model_config["yaml_file"] when not passed
     # explicitly).
-    settings_cls = type(
-        "_SettingsWithYaml",
-        (Settings,),
-        {"model_config": SettingsConfigDict(**{**Settings.model_config, "yaml_file": resolved})},
-    )
-    return settings_cls()
+    class _SettingsWithYaml(Settings):
+        model_config = SettingsConfigDict(**{**Settings.model_config, "yaml_file": resolved})
+
+    return _SettingsWithYaml()
