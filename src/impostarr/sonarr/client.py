@@ -108,7 +108,7 @@ class SonarrClient:
                 params={
                     "eventType": "downloadFolderImported",
                     "sortKey": "id",
-                    "sortDir": "asc",
+                    "sortDirection": "ascending",
                     "pageSize": HISTORY_PAGE_SIZE,
                     "page": page,
                 },

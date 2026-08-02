@@ -12,6 +12,14 @@ BASE_URL = "http://sonarr.test:8989"
 API_URL = f"{BASE_URL}/api/v3"
 API_KEY = "test-api-key"
 
+# Fixed history query params (page varies per call, so it's checked separately).
+HISTORY_PARAMS = {
+    "eventType": "downloadFolderImported",
+    "sortKey": "id",
+    "sortDirection": "ascending",
+    "pageSize": "100",
+}
+
 
 def load_fixture(name: str):
     return json.loads((FIXTURES / name).read_text())
@@ -31,7 +39,7 @@ async def test_system_status_happy_path():
 
 @respx.mock
 async def test_history_since_happy_path():
-    respx.get(f"{API_URL}/history").mock(
+    route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(
         side_effect=[
             httpx.Response(200, json=load_fixture("history_page.json")),
             httpx.Response(200, json=load_fixture("history_page_empty.json")),
@@ -49,11 +57,13 @@ async def test_history_since_happy_path():
     assert first.episode_file_id == 9001
     assert first.guid == "abcdef0123456789"
     assert first.indexer == "NZBgeek"
+    assert route.calls[0].request.url.params["page"] == "1"
+    assert route.calls[1].request.url.params["page"] == "2"
 
 
 @respx.mock
 async def test_history_since_filters_by_watermark():
-    respx.get(f"{API_URL}/history").mock(
+    route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(
         side_effect=[
             httpx.Response(200, json=load_fixture("history_page.json")),
             httpx.Response(200, json=load_fixture("history_page_empty.json")),
@@ -63,6 +73,8 @@ async def test_history_since_filters_by_watermark():
         records = await client.history_since(101)
 
     assert [r.id for r in records] == [102]
+    assert route.calls[0].request.url.params["page"] == "1"
+    assert route.calls[1].request.url.params["page"] == "2"
 
 
 @respx.mock
@@ -77,13 +89,14 @@ async def test_history_since_paginates_until_empty():
         page = request.url.params.get("page", "1")
         return httpx.Response(200, json=pages[page])
 
-    route = respx.get(f"{API_URL}/history").mock(side_effect=responder)
+    route = respx.get(f"{API_URL}/history", params=HISTORY_PARAMS).mock(side_effect=responder)
 
     async with SonarrClient(BASE_URL, API_KEY) as client:
         records = await client.history_since(0)
 
     assert [r.id for r in records] == [101, 102, 103, 104]
     assert route.call_count == 3
+    assert [call.request.url.params["page"] for call in route.calls] == ["1", "2", "3"]
 
 
 @respx.mock
