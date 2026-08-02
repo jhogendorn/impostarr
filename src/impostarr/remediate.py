@@ -139,7 +139,8 @@ class Remediator:
                     verdict,
                     "mark_history_failed",
                     True,
-                    "unblocklistable: no grab history captured",
+                    "no download history exists for this file, so the release cannot be "
+                    "blocklisted — deleting and re-searching only",
                 )
 
             try:
@@ -153,7 +154,7 @@ class Remediator:
                 verdict,
                 "delete_episode_file",
                 True,
-                f"episode_file_id={file.episode_file_id}",
+                f"removed file via Sonarr (episode_file_id={file.episode_file_id})",
             )
 
             try:
@@ -235,7 +236,8 @@ class Remediator:
             season = target_episodes[0].season_number
             ep_numbers = [ep.episode_number for ep in target_episodes]
             ep_part = "-".join(f"E{n:02d}" for n in ep_numbers)
-            staged_name = f"S{season:02d}{ep_part}{local_path.suffix}"
+            sxxeyy = f"S{season:02d}{ep_part}"
+            staged_name = f"{sxxeyy}{local_path.suffix}"
             staging_dir = Path(self.instance_cfg.staging_dir)
             staged_path = staging_dir / staged_name
 
@@ -243,7 +245,9 @@ class Remediator:
                 # No staging dir created, no hardlink/copy: nothing under
                 # the media library is touched. The log records the path
                 # that would have been staged.
-                self._log(session, verdict, "hardlink", True, f"staged={staged_path}")
+                self._log(
+                    session, verdict, "hardlink", True, f"preserved file data in staging: {staged_path}"
+                )
             else:
                 try:
                     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +276,9 @@ class Remediator:
                         )
                         jobs.release(session, db_job, "quarantine", worker_id)
                         return
-                self._log(session, verdict, "hardlink", True, f"staged={staged_path}")
+                self._log(
+                    session, verdict, "hardlink", True, f"preserved file data in staging: {staged_path}"
+                )
 
             try:
                 await self.client.delete_episode_file(file.episode_file_id)
@@ -291,7 +297,8 @@ class Remediator:
                 verdict,
                 "delete_episode_file",
                 True,
-                f"episode_file_id={file.episode_file_id}",
+                f"released the mislabelled file record from Sonarr "
+                f"(episode_file_id={file.episode_file_id}; file data preserved in staging)",
             )
 
             if self.dry_run:
@@ -304,7 +311,7 @@ class Remediator:
                     verdict,
                     "manual_import",
                     True,
-                    f"would manual-import {staged_path.name} as episodes {sorted(resolved_ids)}",
+                    f"imported staged file as {sxxeyy} (episode ids {sorted(resolved_ids)})",
                 )
                 jobs.release(session, db_job, "remediated", worker_id)
                 return
@@ -372,7 +379,7 @@ class Remediator:
                 verdict,
                 "execute_manual_import",
                 True,
-                f"episode_ids={sorted(resolved_ids)}",
+                f"imported staged file as {sxxeyy} (episode ids {sorted(resolved_ids)})",
             )
 
             jobs.release(session, db_job, "remediated", worker_id)

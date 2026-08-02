@@ -77,6 +77,11 @@ class Replace(BaseModel):
 class InstanceFlags(BaseModel):
     auto_remap: bool
     auto_replace: bool
+    # When true, no auto decision is ever returned (see route()) — every
+    # remediation candidate demotes to quarantine with a proposed action,
+    # regardless of auto_remap/auto_replace. Populated from the top-level
+    # Settings.approval_required flag by the pipeline.
+    approval_required: bool = False
 
 
 class RoutingDecision(BaseModel):
@@ -228,7 +233,11 @@ def route(sheet: ScoreSheet, thresholds: Thresholds, flags: InstanceFlags) -> Ro
         action_kind = "replace"
 
     flag = flags.auto_remap if action_kind == "remap" else flags.auto_replace
-    auto = sheet.applicable_count >= thresholds.auto_min_evidence and flag
+    auto = (
+        sheet.applicable_count >= thresholds.auto_min_evidence
+        and flag
+        and not flags.approval_required
+    )
     outcome = "remediate" if auto else "quarantine"
 
     s_alt_str = f"{sheet.s_alt:.3f}" if sheet.s_alt is not None else "None"
@@ -238,9 +247,12 @@ def route(sheet: ScoreSheet, thresholds: Thresholds, flags: InstanceFlags) -> Ro
         f"(s_alt={s_alt_str}); proposing {action_kind}"
     )
     if not auto:
-        reason += (
-            f"; not auto (applicable_count={sheet.applicable_count} vs "
-            f"auto_min_evidence={thresholds.auto_min_evidence}, {action_kind} flag={flag})"
-        )
+        if flags.approval_required:
+            reason += "; not auto (approval_required mode: awaiting human approval)"
+        else:
+            reason += (
+                f"; not auto (applicable_count={sheet.applicable_count} vs "
+                f"auto_min_evidence={thresholds.auto_min_evidence}, {action_kind} flag={flag})"
+            )
 
     return RoutingDecision(outcome=outcome, action=action, auto=auto, reason=reason)

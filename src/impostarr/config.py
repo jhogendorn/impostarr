@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     # still run, since those are impostarr's own artifacts, not the library.
     dry_run: bool = False
 
+    # When true, `scoring.route()` never returns an auto decision: every
+    # remediation candidate demotes to quarantine with a proposed action
+    # for human approval, regardless of the per-instance auto_remap/
+    # auto_replace flags.
+    approval_required: bool = False
+
     state_dir: Path = Path("/config")
     assets_dir: Path = Path("/assets")
     models_dir: Path = Path("/models")

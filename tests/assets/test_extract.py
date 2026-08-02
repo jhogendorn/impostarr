@@ -62,6 +62,12 @@ async def test_sample_frames_returns_16_hashes_and_thumbnails(test_video: Path, 
             assert img.width <= 480
 
 
+async def test_sample_frames_tool_meta_carries_timestamp_s(test_video: Path, tmp_path: Path) -> None:
+    seq, assets = await extract.sample_frames(test_video, tmp_path, n=16)
+    for asset, expected_ts in zip(assets, seq.timestamps, strict=True):
+        assert asset.tool_meta["timestamp_s"] == expected_ts
+
+
 async def test_sample_frames_deterministic_across_runs(test_video: Path, tmp_path: Path) -> None:
     seq_a, _ = await extract.sample_frames(test_video, tmp_path / "run1", n=16)
     seq_b, _ = await extract.sample_frames(test_video, tmp_path / "run2", n=16)

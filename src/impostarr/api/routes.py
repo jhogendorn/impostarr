@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import psutil
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -102,6 +104,14 @@ def _queue_counts(session) -> dict[str, int]:
     return counts
 
 
+def _instance_names_by_id(session) -> dict[int, str]:
+    return dict(session.execute(select(Instance.id, Instance.name)).all())
+
+
+def _iso(dt: Any) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
 def _instance_runtime_for_file(request: Request, file: File):
     with _session_factory(request)() as session:
         instance = session.get(Instance, file.instance_id)
@@ -155,13 +165,52 @@ def get_status(request: Request) -> dict:
                 "url": i.url,
                 "history_watermark": i.history_watermark,
                 "backfill_cursor": i.backfill_cursor,
+                "last_polled_at": _iso(i.last_polled_at),
+                "last_backfilled_at": _iso(i.last_backfilled_at),
             }
             for i in instances
         ]
         queues = _queue_counts(session)
+
+        instance_names = _instance_names_by_id(session)
+        active_jobs = []
+        active_job_rows = session.execute(select(Job).where(Job.status == "active")).scalars().all()
+        now = datetime.now(UTC)
+        for job in active_job_rows:
+            file = session.get(File, job.file_id)
+            active_jobs.append(
+                {
+                    "job_id": job.id,
+                    "instance": instance_names.get(file.instance_id) if file else None,
+                    "series_id": file.series_id if file else None,
+                    "sonarr_path": file.sonarr_path if file else None,
+                    "claimed_by": job.claimed_by,
+                    "claimed_at": _iso(job.claimed_at),
+                    "elapsed_s": (now - job.claimed_at).total_seconds() if job.claimed_at else None,
+                }
+            )
+
+    summary = {
+        "unprocessed": queues["hold"] + queues["pending"] + queues["active"],
+        "processed": (
+            queues["matched"]
+            + queues["quarantine"]
+            + queues["inconclusive"]
+            + queues["error"]
+            + queues["remediated"]
+        ),
+    }
+    system = {
+        "cpu_percent": psutil.cpu_percent(interval=None),
+        "mem_percent": psutil.virtual_memory().percent,
+    }
     return {
         "instances": instances_out,
         "queues": queues,
+        "summary": summary,
+        "system": system,
+        "approval_required": request.app.state.settings.approval_required,
+        "active_jobs": active_jobs,
         "workers": {"pool_size": request.app.state.pool_size},
         "dry_run": request.app.state.settings.dry_run,
     }
@@ -170,24 +219,43 @@ def get_status(request: Request) -> dict:
 # -- queues / job detail --------------------------------------------------
 
 
+QUEUE_SORT_FIELDS = {"updated_at": Job.updated_at, "created_at": Job.created_at}
+
+
 @router.get("/queues/{status}")
-def get_queue(status: str, request: Request, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+def get_queue(
+    status: str,
+    request: Request,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    instance: str | None = None,
+    sort: Literal["updated_at", "created_at"] = "updated_at",
+    dir: Literal["asc", "desc"] = "desc",
+) -> dict:
     if status not in JOB_STATUSES:
         raise HTTPException(400, f"invalid status: {status!r}")
     page_size = min(page_size, MAX_PAGE_SIZE)
+    sort_column = QUEUE_SORT_FIELDS[sort]
+    order = sort_column.asc() if dir == "asc" else sort_column.desc()
     with _session_factory(request)() as session:
-        total = session.execute(select(func.count(Job.id)).where(Job.status == status)).scalar_one()
-        job_rows = (
-            session.execute(
-                select(Job)
-                .where(Job.status == status)
-                .order_by(Job.updated_at.desc())
-                .offset((page - 1) * page_size)
-                .limit(page_size)
-            )
-            .scalars()
-            .all()
-        )
+        base_where = [Job.status == status]
+        joins: list = []
+        if instance is not None:
+            joins = [(File, Job.file_id == File.id), (Instance, File.instance_id == Instance.id)]
+            base_where.append(Instance.name == instance)
+
+        count_query = select(func.count(Job.id))
+        job_query = select(Job)
+        for target, on_clause in joins:
+            count_query = count_query.join(target, on_clause)
+            job_query = job_query.join(target, on_clause)
+        count_query = count_query.where(*base_where)
+        job_query = job_query.where(*base_where).order_by(order).offset((page - 1) * page_size).limit(page_size)
+
+        total = session.execute(count_query).scalar_one()
+        job_rows = session.execute(job_query).scalars().all()
+
+        instance_names = _instance_names_by_id(session)
         items = []
         for job in job_rows:
             file = session.get(File, job.file_id)
@@ -196,6 +264,7 @@ def get_queue(status: str, request: Request, page: int = 1, page_size: int = DEF
                 {
                     "job_id": job.id,
                     "status": job.status,
+                    "instance": instance_names.get(file.instance_id) if file else None,
                     "file": {
                         "series_id": file.series_id,
                         "sonarr_path": file.sonarr_path,
@@ -210,7 +279,7 @@ def get_queue(status: str, request: Request, page: int = 1, page_size: int = DEF
                     "updated_at": job.updated_at.isoformat(),
                 }
             )
-    return {"total": total, "items": items}
+    return {"total": total, "page_size": page_size, "items": items}
 
 
 @router.get("/jobs/{job_id}")
@@ -230,6 +299,7 @@ def get_job_detail(job_id: int, request: Request) -> dict:
             .scalars()
             .first()
         )
+        instance_row = session.get(Instance, file.instance_id)
         return {
             "job": {
                 "id": job.id,
@@ -238,6 +308,7 @@ def get_job_detail(job_id: int, request: Request) -> dict:
                 "created_at": job.created_at.isoformat(),
                 "updated_at": job.updated_at.isoformat(),
             },
+            "instance": instance_row.name if instance_row is not None else None,
             "file": {
                 "series_id": file.series_id,
                 "episode_ids": file.episode_ids,
@@ -274,6 +345,7 @@ def get_job_detail(job_id: int, request: Request) -> dict:
                     "remediation_log": verdict.remediation_log,
                     "source": verdict.source,
                     "human_ident": verdict.human_ident,
+                    "dupe_info": verdict.dupe_info,
                 }
                 if verdict is not None
                 else None

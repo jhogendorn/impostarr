@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import xxhash
@@ -30,6 +31,10 @@ from impostarr.sonarr.types import EpisodeFile
 logger = logging.getLogger(__name__)
 
 HASH_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def hash_file(path: Path) -> str:
@@ -198,6 +203,10 @@ class Discoverer:
 
         records = await self.client.history_since(watermark)
         if not records:
+            with self.session_factory() as session:
+                instance = session.get(Instance, instance_id)
+                instance.last_polled_at = _utcnow()
+                session.commit()
             return 0
 
         created = 0
@@ -264,6 +273,7 @@ class Discoverer:
                 ):
                     created += 1
             instance.history_watermark = last_id
+            instance.last_polled_at = _utcnow()
             session.commit()
         return created
 
@@ -344,5 +354,6 @@ class Discoverer:
                 new_cursor = None
 
             instance.backfill_cursor = new_cursor
+            instance.last_backfilled_at = _utcnow()
             session.commit()
         return created

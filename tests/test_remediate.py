@@ -202,7 +202,7 @@ async def test_replace_without_grab_history_calls_two_apis_and_notes_unblocklist
     log = get_remediation_log(session_factory, job_id)
     assert len(log) == 3
     assert log[0]["ok"] is True
-    assert "unblocklistable" in log[0]["detail"]
+    assert "cannot be blocklisted" in log[0]["detail"]
     assert get_job_status(session_factory, job_id) == "remediated"
 
 
@@ -719,7 +719,7 @@ async def test_remap_dry_run_skips_filesystem_and_manual_import_but_remediates(
     assert steps == ["hardlink", "delete_episode_file", "manual_import"]
     assert all(step["ok"] for step in log)
     assert all(step["detail"].startswith("DRY-RUN: ") for step in log)
-    assert "would manual-import" in log[2]["detail"]
+    assert "imported staged file as S01E03" in log[2]["detail"]
     assert "777" in log[2]["detail"]
     assert get_job_status(session_factory, job_id) == "remediated"
 

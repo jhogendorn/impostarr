@@ -55,7 +55,7 @@ list/object-valued keys) — env always wins over the file.
 `dry_run: true` (top-level in `impostarr.yml`) is strongly recommended for
 first runs against a real library: no files are touched, no Sonarr state
 is changed. Every action that would otherwise mutate something is instead
-logged as `DRY-RUN: would ...` — visible live in the [log viewer](#log-viewer)
+logged as `DRY-RUN: would ...` — visible live via `GET /api/v1/logs`
 (lines highlighted amber) and, for remediation, in the job's
 `remediation_log` audit trail.
 
@@ -68,13 +68,6 @@ and transition to `remediated` normally, so the queue flow is observable
 end-to-end; the audit trail marks what would have happened instead of
 actually happening. When active, the UI shows an amber "DRY RUN" badge in
 the header.
-
-## Log viewer
-
-The "Logs" button in the header opens a bottom drawer with a live tail of
-the last 1000 log records (`GET /api/v1/logs`), filterable by level
-(INFO/WARNING/ERROR), polling every 3 seconds while open. DRY-RUN lines are
-highlighted amber.
 
 ## Volumes
 
@@ -163,7 +156,7 @@ endpoint and asks it which episode the cues belong to.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `base_url` | `https://api.openai.com/v1` | OpenAI-compatible endpoint; point this at a local [Ollama](https://ollama.com/) instance to run without a paid API. |
+| `base_url` | `https://api.openai.com/v1` | OpenAI-compatible endpoint — any OpenAI-compatible server works (e.g. [Ollama](https://ollama.com/), LocalAI, llama.cpp server, vLLM); point this at one to run without a paid API. |
 | `model` | `gpt-4o-mini` | Model name passed to the endpoint. |
 | `api_key` | `""` | Bearer token; leave empty for endpoints that don't require one (e.g. local Ollama). |
 | `max_cues` | 80 | Max subtitle cues sent per request. |

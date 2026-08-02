@@ -402,6 +402,47 @@ async def test_poll_once_watermark_advances_only_on_success(tmp_path, session_fa
         assert instance.history_watermark == 0
 
 
+# -- sync timestamps -------------------------------------------------------
+
+
+@respx.mock
+async def test_poll_once_sets_last_polled_at_on_success(tmp_path, session_factory):
+    cfg = make_instance_cfg(tmp_path)
+    local_path = tmp_path / "tv" / "Show" / "S01E02.mkv"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"episode content")
+
+    mock_history_once([history_record(101, file_id=9001)])
+    respx.get(f"{API_URL}/episodefile/9001").mock(
+        return_value=httpx.Response(200, json=episode_file_json(9001, path="/tv/Show/S01E02.mkv"))
+    )
+    mock_episodes(42, [episode_json(555, episode_file_id=9001)])
+
+    async with make_client() as client:
+        discoverer = Discoverer(cfg, client, session_factory)
+        await discoverer.poll_once()
+
+    with session_factory() as session:
+        instance = session.query(Instance).one()
+        assert instance.last_polled_at is not None
+        assert instance.last_backfilled_at is None
+
+
+@respx.mock
+async def test_poll_once_sets_last_polled_at_even_when_no_new_records(tmp_path, session_factory):
+    cfg = make_instance_cfg(tmp_path)
+    mock_history_once([])
+
+    async with make_client() as client:
+        discoverer = Discoverer(cfg, client, session_factory)
+        created = await discoverer.poll_once()
+
+    assert created == 0
+    with session_factory() as session:
+        instance = session.query(Instance).one()
+        assert instance.last_polled_at is not None
+
+
 # -- backfill_step ----------------------------------------------------
 
 
@@ -463,3 +504,36 @@ async def test_backfill_step_cursor_resumes_mid_series(tmp_path, session_factory
         assert instance.backfill_cursor is None
         file_303 = session.query(File).filter_by(episode_file_id=303).one()
         assert file_303.episode_ids == [703]
+
+
+@respx.mock
+async def test_backfill_step_sets_last_backfilled_at(tmp_path, session_factory):
+    cfg = make_instance_cfg(tmp_path)
+    tv_dir = tmp_path / "tv"
+    tv_dir.mkdir()
+    (tv_dir / "ep301.mkv").write_bytes(b"content-301")
+
+    respx.get(f"{API_URL}/series").mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"id": 42, "title": "Show Name", "tvdbId": 1, "imdbId": None, "tmdbId": None, "titleSlug": "show"}],
+        )
+    )
+    respx.get(f"{API_URL}/episodefile", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(200, json=[episode_file_json(301, path="/tv/ep301.mkv")])
+    )
+    respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"id": 701, "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 301, "hasFile": True}],
+        )
+    )
+
+    async with make_client() as client:
+        discoverer = Discoverer(cfg, client, session_factory)
+        await discoverer.backfill_step(batch_size=10)
+
+    with session_factory() as session:
+        instance = session.query(Instance).one()
+        assert instance.last_backfilled_at is not None
+        assert instance.last_polled_at is None

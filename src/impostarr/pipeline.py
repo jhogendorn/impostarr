@@ -20,12 +20,11 @@ the claimed ident, and a digest of the series context, so any of those
 changing invalidates the cache and re-runs `identify()`.
 
 Dupe detection (spec: "Dupe check"): frame-hash similarity against other
-files' stored `frame_hashes` is computed and logged (`log.warning`) when
-`hamming_similarity >= 0.9`, but is **not persisted** in this task — the
-spec's data model has no column for it (see the plan doc's Task 14 dupe
-check note) and adding one would ripple into other tasks' schema
-assumptions. TODO(api-task): surface dupe info via the HTTP API/verdict
-once that task adds a place to show it.
+files' stored `frame_hashes` is computed and logged (`log.warning`) for
+every other file scoring `hamming_similarity >= 0.9`; the best (highest
+similarity) match is also persisted on the verdict as `dupe_info`
+(`duplicate_of_file_id`, `similarity`, `sonarr_path`) and served via the
+job detail API.
 
 DB access is synchronous throughout this module — every `session.*` call
 runs directly in the coroutine, not dispatched via `asyncio.to_thread`.
@@ -384,12 +383,17 @@ async def _stage_transcript(
     return payload
 
 
-def _check_duplicates(session: Session, file: File, frame_seq: extract.FrameHashSeq) -> None:
-    """Log-only dupe check against other files' stored frame hashes. See
-    module docstring for why this isn't persisted in this task."""
+def _check_duplicates(
+    session: Session, file: File, frame_seq: extract.FrameHashSeq
+) -> dict[str, Any] | None:
+    """Dupe check against other files' stored frame hashes: every match
+    scoring `hamming_similarity >= DUPLICATE_SIMILARITY_THRESHOLD` is
+    logged, and the best (highest-similarity) match is returned for
+    persistence on the verdict. `None` if no file scored above threshold."""
     others = session.execute(
         select(FrameHash).where(FrameHash.file_id != file.id)
     ).scalars().all()
+    best: dict[str, Any] | None = None
     for other in others:
         other_seq = extract.FrameHashSeq(
             algo=other.algo, version=other.version,
@@ -401,6 +405,13 @@ def _check_duplicates(session: Session, file: File, frame_seq: extract.FrameHash
                 "possible duplicate: file %s looks like file %s (similarity=%.3f)",
                 file.id, other.file_id, similarity,
             )
+            if best is None or similarity > best["similarity"]:
+                best = {"duplicate_of_file_id": other.file_id, "similarity": similarity}
+    if best is None:
+        return None
+    dupe_file = session.get(File, best["duplicate_of_file_id"])
+    best["sonarr_path"] = dupe_file.sonarr_path if dupe_file is not None else None
+    return best
 
 
 # -- plugin stage ------------------------------------------------------
@@ -576,8 +587,7 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
                 session, file, audio_asset, deps.transcriber
             )
 
-            if frame_seq is not None:
-                _check_duplicates(session, file, frame_seq)
+            dupe_info = _check_duplicates(session, file, frame_seq) if frame_seq is not None else None
 
             bundle = AssetBundle(
                 probe=probe_asset.payload if probe_asset else None,
@@ -603,7 +613,9 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
 
             sheet = aggregate(outcomes, frozenset(claimed.episode_ids))
             flags = InstanceFlags(
-                auto_remap=deps.instance_cfg.auto_remap, auto_replace=deps.instance_cfg.auto_replace
+                auto_remap=deps.instance_cfg.auto_remap,
+                auto_replace=deps.instance_cfg.auto_replace,
+                approval_required=deps.settings.approval_required,
             )
             decision = route(sheet, deps.settings.thresholds, flags)
 
@@ -618,6 +630,7 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
                 outcome=decision.outcome,
                 proposed_action=proposed_action,
                 source="auto",
+                dupe_info=dupe_info,
             )
             session.add(verdict)
             session.commit()

@@ -161,6 +161,64 @@ def test_files_uniqueness_constraint(engine):
             session.commit()
 
 
+def test_instance_sync_timestamps_round_trip(engine):
+    session_factory = make_session_factory(engine)
+    with session_factory() as session:
+        instance = Instance(name="main", url="http://sonarr:8989")
+        session.add(instance)
+        session.commit()
+        instance_id = instance.id
+        assert instance.last_polled_at is None
+        assert instance.last_backfilled_at is None
+
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        instance = session.get(Instance, instance_id)
+        instance.last_polled_at = now
+        instance.last_backfilled_at = now
+        session.commit()
+
+    with session_factory() as session:
+        reloaded = session.get(Instance, instance_id)
+        assert reloaded.last_polled_at == now
+        assert reloaded.last_backfilled_at == now
+
+
+def test_verdict_dupe_info_round_trip(engine):
+    session_factory = make_session_factory(engine)
+    with session_factory() as session:
+        instance = Instance(name="main", url="http://sonarr:8989")
+        session.add(instance)
+        session.flush()
+        file = File(
+            instance_id=instance.id,
+            sonarr_path="/tv/Show/S01E01.mkv",
+            local_path="/media/tv/Show/S01E01.mkv",
+            size=1,
+            content_hash="hash",
+            series_id=1,
+            episode_ids=[1],
+            episode_file_id=1,
+            quality={},
+            languages=[],
+        )
+        session.add(file)
+        session.flush()
+        job = Job(file_id=file.id, status="pending")
+        session.add(job)
+        session.flush()
+
+        dupe_info = {"duplicate_of_file_id": 999, "similarity": 0.95, "sonarr_path": "/tv/Other.mkv"}
+        verdict = Verdict(job_id=job.id, outcome="quarantine", source="auto", dupe_info=dupe_info)
+        session.add(verdict)
+        session.commit()
+        verdict_id = verdict.id
+
+    with session_factory() as session:
+        reloaded = session.get(Verdict, verdict_id)
+        assert reloaded.dupe_info == dupe_info
+
+
 def test_json_columns_round_trip(engine):
     session_factory = make_session_factory(engine)
     cursor = {"series_id": 5, "episode_file_id": 42}

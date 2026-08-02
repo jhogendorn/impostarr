@@ -100,6 +100,8 @@ class Instance(Base):
     url: Mapped[str] = mapped_column()
     history_watermark: Mapped[int | None] = mapped_column(default=None)
     backfill_cursor: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON), default=None)
+    last_polled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    last_backfilled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
 
 
 class File(Base):
@@ -203,6 +205,7 @@ class Verdict(Base):
     remediation_log: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list)
     source: Mapped[str] = mapped_column()
     human_ident: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON), default=None)
+    dupe_info: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON), default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 
     __table_args__ = (CheckConstraint(_enum_check("source", VERDICT_SOURCES), name="source_valid"),)
