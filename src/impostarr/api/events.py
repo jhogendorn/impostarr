@@ -12,12 +12,25 @@ that call returns, even if it hasn't started iterating `sub` yet. If queue
 registration were deferred to the generator's first resumption, a publish
 racing between `subscribe()` and the first `anext()` would be silently
 dropped.
+
+Each subscriber's queue is bounded (`MAX_QUEUE_SIZE`): a slow or stalled SSE
+client (a stuck TCP connection, a browser tab backgrounded) must not let
+its queue grow unboundedly while the rest of the process keeps running.
+`publish()` drops the oldest queued event to make room rather than
+blocking the publisher or dropping the new event — SSE consumers care
+about current state more than a complete history, so keeping the freshest
+events is the right trade-off here.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
+
+logger = logging.getLogger(__name__)
+
+MAX_QUEUE_SIZE = 100
 
 
 class EventBus:
@@ -25,7 +38,7 @@ class EventBus:
         self._subscribers: list[asyncio.Queue[dict]] = []
 
     def subscribe(self) -> AsyncIterator[dict]:
-        queue: asyncio.Queue[dict] = asyncio.Queue()
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
         self._subscribers.append(queue)
         return self._iter_queue(queue)
 
@@ -38,4 +51,9 @@ class EventBus:
 
     def publish(self, event: dict) -> None:
         for queue in self._subscribers:
-            queue.put_nowait(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                dropped = queue.get_nowait()
+                logger.debug("subscriber queue full (%d); dropping oldest event: %r", MAX_QUEUE_SIZE, dropped)
+                queue.put_nowait(event)

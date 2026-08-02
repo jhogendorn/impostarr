@@ -51,16 +51,21 @@ TERMINAL_STATUSES = frozenset(
 # source of truth for every status change in this module.
 #
 # The terminal-status entries (matched/quarantine/inconclusive/error) exist
-# for two API-driven paths, not the worker pool: `requeue` (rerun, any of
-# them -> pending) and `claim_for_api` (approve, quarantine -> active only,
-# distinct from `claim_next`'s pending -> active claim).
+# for API-driven paths, not the worker pool: `requeue` (rerun, any of them
+# -> pending), `claim_for_api` (approve, quarantine -> active only, distinct
+# from `claim_next`'s pending -> active claim), and `set_status_checked`
+# (human verdicts from quarantine/inconclusive, via api/routes.py's
+# post_verdict — is_claimed -> matched, is_other -> quarantine, ignore ->
+# inconclusive; the quarantine->quarantine and inconclusive->inconclusive
+# self-transitions cover is_other/ignore landing on the status the job
+# already had).
 VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "hold": frozenset({"pending"}),
     "pending": frozenset({"hold", "active"}),
     "active": frozenset({"pending"} | TERMINAL_STATUSES),
     "matched": frozenset({"pending"}),
-    "quarantine": frozenset({"pending", "active"}),
-    "inconclusive": frozenset({"pending"}),
+    "quarantine": frozenset({"pending", "active", "matched", "quarantine", "inconclusive"}),
+    "inconclusive": frozenset({"pending", "matched", "quarantine", "inconclusive"}),
     "error": frozenset({"pending"}),
 }
 
@@ -284,5 +289,36 @@ def claim_for_api(session: Session, job: Job, worker_id: str) -> Job:
     job.claimed_by = worker_id
     job.claimed_at = now
     job.heartbeat_at = now
+    session.commit()
+    return job
+
+
+def set_status_checked(
+    session: Session, job: Job, new_status: str, expected_current: str
+) -> Job:
+    """Direct (unleased) status write, fenced on the job still being
+    `expected_current` in the DB. For API-driven human-verdict transitions
+    (post_verdict) where the job isn't leased by any worker, so
+    `release()`'s `claimed_by` fencing doesn't apply — this fences on
+    status alone instead: two verdict submissions racing against the same
+    starting status can't both silently win. The loser's UPDATE matches
+    zero rows and raises `InvalidTransition` rather than clobbering (or
+    duplicating the effect of) the first write.
+
+    `expected_current` is a separate argument rather than `job.status`
+    itself so the caller reads the job's status once, up front, before any
+    other work (e.g. writing a verdict row) — fencing against a status
+    re-read later would just move the race, not close it.
+    """
+    _check_transition(expected_current, new_status, job.id)
+    result = session.execute(
+        update(Job).where(Job.id == job.id, Job.status == expected_current).values(status=new_status)
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise InvalidTransition(
+            f"job {job.id} was no longer {expected_current!r} when setting status to {new_status!r}"
+        )
+    job.status = new_status
     session.commit()
     return job

@@ -19,6 +19,7 @@ from impostarr.jobs import (
     reap_stale,
     release,
     requeue,
+    set_status_checked,
     unpark,
 )
 from impostarr.models import File, Instance, Job
@@ -428,6 +429,69 @@ def test_claim_for_api_on_pending_job_raises_invalid_transition(session_factory)
 
         with pytest.raises(InvalidTransition):
             claim_for_api(session, job, "api-alice")
+
+
+def test_set_status_checked_updates_status_when_expected_matches(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        job = create_job(session, file_id)
+        job.status = "quarantine"
+        session.commit()
+
+        updated = set_status_checked(session, job, "matched", "quarantine")
+
+        assert updated.status == "matched"
+
+
+def test_set_status_checked_raises_when_status_already_moved(session_factory):
+    with session_factory() as session:
+        file_id = _make_file(session)
+        job = create_job(session, file_id)
+        job.status = "matched"  # actual DB status no longer "quarantine"
+        session.commit()
+
+        with pytest.raises(InvalidTransition):
+            set_status_checked(session, job, "matched", "quarantine")
+
+
+def test_set_status_checked_concurrent_double_verdict_exactly_one_wins(session_factory):
+    # Mirrors test_claim_next_concurrent_claimers_exactly_one_wins: two real
+    # threads, each with its own session, racing to fence the same
+    # quarantine -> matched transition. Exactly one must succeed; the loser
+    # must see InvalidTransition (rowcount 0), never a silent clobber.
+    with session_factory() as setup_session:
+        file_id = _make_file(setup_session)
+        job = create_job(setup_session, file_id)
+        job.status = "quarantine"
+        setup_session.commit()
+        job_id = job.id
+
+    barrier = threading.Barrier(2)
+    results: dict[str, Exception | None] = {}
+
+    def attempt(name):
+        with session_factory() as session:
+            job = session.get(Job, job_id)
+            barrier.wait()
+            try:
+                set_status_checked(session, job, "matched", "quarantine")
+                results[name] = None
+            except InvalidTransition as exc:
+                results[name] = exc
+
+    threads = [threading.Thread(target=attempt, args=(name,)) for name in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    successes = [name for name, exc in results.items() if exc is None]
+    failures = [name for name, exc in results.items() if exc is not None]
+    assert len(successes) == 1
+    assert len(failures) == 1
+
+    with session_factory() as verify_session:
+        assert verify_session.get(Job, job_id).status == "matched"
 
 
 def test_job_datetimes_are_tz_aware_in_a_fresh_session(session_factory):

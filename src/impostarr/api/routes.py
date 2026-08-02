@@ -306,14 +306,6 @@ def get_job_asset(job_id: int, asset_id: int, request: Request) -> Response:
 # -- verdict / approve / reject --------------------------------------------
 
 
-def _set_job_status(session, job: Job, status: str) -> None:
-    """Direct status write, bypassing `jobs.py`'s lease fencing: these
-    human-verdict transitions apply to a job that isn't leased by any
-    worker (settled queues only, enforced by the 409 check in callers)."""
-    job.status = status
-    session.commit()
-
-
 def _latest_frame_hash(session, file_id: int) -> FrameHash | None:
     return (
         session.execute(select(FrameHash).where(FrameHash.file_id == file_id).order_by(FrameHash.id.desc()))
@@ -355,22 +347,34 @@ async def post_verdict(job_id: int, body: VerdictRequest, request: Request) -> d
         job = session.get(Job, job_id)
         if job is None:
             raise HTTPException(404, "job not found")
-        if job.status not in VERDICT_ALLOWED_STATUSES:
+        expected_current = job.status
+        if expected_current not in VERDICT_ALLOWED_STATUSES:
             raise HTTPException(
-                409, f"job is {job.status!r}; verdicts only apply to quarantine/inconclusive jobs"
+                409, f"job is {expected_current!r}; verdicts only apply to quarantine/inconclusive jobs"
             )
+        if body.verdict == "is_other" and body.ident is None:
+            raise HTTPException(400, "ident is required for is_other")
         file = session.get(File, job.file_id)
+
+        # Fence the status transition FIRST, before writing the verdict row:
+        # if a concurrent verdict submission already moved the job off
+        # `expected_current`, this raises InvalidTransition (-> 409) and no
+        # verdict row is written at all — a losing race leaves exactly the
+        # winner's single verdict row, not an orphaned extra one.
+        target_status = {"is_claimed": "matched", "is_other": "quarantine", "ignore": "inconclusive"}[
+            body.verdict
+        ]
+        try:
+            jobs.set_status_checked(session, job, target_status, expected_current)
+        except InvalidTransition as exc:
+            raise HTTPException(409, str(exc)) from exc
 
         proposed_remap: dict[str, Any] | None = None
 
         if body.verdict == "is_claimed":
-            verdict = Verdict(
-                job_id=job_id, outcome="matched", source="human", s_claimed=1.0
-            )
+            verdict = Verdict(job_id=job_id, outcome="matched", source="human", s_claimed=1.0)
             session.add(verdict)
             session.commit()
-            if job.status in ("quarantine", "inconclusive"):
-                _set_job_status(session, job, "matched")
             frame_hash = _latest_frame_hash(session, file.id)
             if frame_hash is not None:
                 runtime = _instance_runtime_for_file(request, file)
@@ -378,8 +382,6 @@ async def post_verdict(job_id: int, body: VerdictRequest, request: Request) -> d
                 _write_phash_corpus_for_verdict(session, file, frame_hash, episodes, 1.0, "human")
 
         elif body.verdict == "is_other":
-            if body.ident is None:
-                raise HTTPException(400, "ident is required for is_other")
             verdict = Verdict(
                 job_id=job_id,
                 outcome="quarantine",
@@ -388,7 +390,6 @@ async def post_verdict(job_id: int, body: VerdictRequest, request: Request) -> d
             )
             session.add(verdict)
             session.commit()
-            _set_job_status(session, job, "quarantine")
             target_ids = await _resolve_human_ident_ids(request, file, body.ident)
             if target_ids is not None:
                 proposed_remap = {"kind": "remap", "target_episode_ids": sorted(target_ids)}
@@ -397,7 +398,6 @@ async def post_verdict(job_id: int, body: VerdictRequest, request: Request) -> d
             verdict = Verdict(job_id=job_id, outcome="inconclusive", source="human")
             session.add(verdict)
             session.commit()
-            _set_job_status(session, job, "inconclusive")
 
         result_status = job.status
 

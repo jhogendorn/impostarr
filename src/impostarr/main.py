@@ -57,6 +57,26 @@ class InstanceRuntime:
     discoverer: Discoverer
 
 
+def _resolve_web_dist() -> Path:
+    """Locate `web/dist` (Task 16's frontend build output).
+
+    Anchored to this source file's location first — `<repo>/web/dist`,
+    computed from `main.py`'s own path (`src/impostarr/main.py`, so the
+    repo root is two parents up from the package dir) — so it resolves
+    correctly regardless of the process's current working directory (e.g.
+    uvicorn launched from an arbitrary cwd during dev). Falls back to
+    `./web/dist` relative to cwd for layouts where that anchor doesn't
+    hold — e.g. an installed wheel's `main.py` living under
+    `site-packages/impostarr/`, where `parents[2]` isn't the repo root at
+    all; the container image (Task 18) is expected to set its cwd to
+    wherever it copied `web/dist`, matching this fallback.
+    """
+    anchored = Path(__file__).resolve().parents[2] / "web" / "dist"
+    if anchored.is_dir():
+        return anchored
+    return Path("web/dist")
+
+
 def _build_transcriber(settings: Settings) -> Transcriber:
     if _FASTER_WHISPER_AVAILABLE and settings.workers.whisper_model:
         from impostarr.assets.transcribe import FasterWhisperTranscriber
@@ -133,7 +153,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     fastapi_app.add_middleware(AuthMiddleware, settings=settings)
     fastapi_app.include_router(router)
 
-    web_dist = Path("web/dist")
+    web_dist = _resolve_web_dist()
     if web_dist.is_dir():
         fastapi_app.mount("/", StaticFiles(directory=web_dist, html=True), name="static")
 

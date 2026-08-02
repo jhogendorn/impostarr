@@ -470,6 +470,33 @@ def test_verdict_is_other_returns_proposed_remap(app):
     assert _get_job(session_factory, job_id).status == "quarantine"
 
 
+def test_verdict_double_submission_second_409s_single_verdict_row(app):
+    # End-to-end regression for the fenced status-transition-before-verdict-
+    # write ordering: a double submission against the same job (e.g. a
+    # double-click, or a genuine race — exercised directly against
+    # jobs.set_status_checked in tests/test_jobs.py) must leave exactly the
+    # first submission's verdict row, not two. is_claimed (target "matched",
+    # outside VERDICT_ALLOWED_STATUSES) rather than ignore/is_other: those
+    # target quarantine/inconclusive, which are self-loop-valid transitions
+    # (needed so is_other/ignore work starting from either allowed status),
+    # so a second identical submission would legitimately succeed again
+    # rather than 409 — not the scenario under test here.
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        first = client.post(f"{API_PREFIX}/jobs/{job_id}/verdict", json={"verdict": "is_claimed"})
+        second = client.post(f"{API_PREFIX}/jobs/{job_id}/verdict", json={"verdict": "is_claimed"})
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    with session_factory() as session:
+        verdicts = session.execute(select(Verdict).where(Verdict.job_id == job_id)).scalars().all()
+        assert len(verdicts) == 1
+
+
 # -- approve / reject -----------------------------------------------------
 
 
