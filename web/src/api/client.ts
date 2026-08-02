@@ -50,6 +50,12 @@ export function getJob(id: number): Promise<JobDetail> {
   return api<JobDetail>(`/jobs/${id}`)
 }
 
+/** URL for an asset's raw bytes (frame thumbnails etc) — for use as an
+ * `<img src>`, not fetched through the `api()` JSON helper. */
+export function assetUrl(jobId: number, assetId: number): string {
+  return `${API_BASE}/jobs/${jobId}/assets/${assetId}`
+}
+
 export function postVerdict(id: number, req: VerdictRequest): Promise<VerdictResponse> {
   return api<VerdictResponse>(`/jobs/${id}/verdict`, {
     method: 'POST',
