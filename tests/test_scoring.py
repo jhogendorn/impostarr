@@ -153,6 +153,36 @@ def test_aggregate_alt_is_max_across_non_claimed_keys():
     assert sheet.alt_key == other_alt
 
 
+def test_aggregate_claimed_vs_alt_denominator_asymmetry():
+    # CRITICAL invariant: the claimed key's denominator always includes every
+    # applicable plugin (via the 0.0-injection rule), but a non-claimed key's
+    # denominator only includes plugins that actually reported it. p2 doesn't
+    # report ALT at all, so s_alt must be p1's raw 0.9 - NOT averaged/halved
+    # against p2's weight as if p2 had implicitly reported 0.0 there too.
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.1, IN(CLAIMED)), (0.9, IN(ALT))]),
+        outcome("p2", 1.0, pairs=[(0.05, IN(CLAIMED))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED)
+    assert sheet.s_claimed == pytest.approx(0.075)  # (1*0.1 + 1*0.05) / 2
+    assert sheet.s_alt == pytest.approx(0.9)  # (1*0.9) / 1 - p2 never reported ALT
+
+
+def test_aggregate_alt_tie_break_is_deterministic():
+    tied_a = frozenset({11})
+    tied_b = frozenset({12})
+    outcomes = [
+        outcome(
+            "p1",
+            1.0,
+            pairs=[(0.1, IN(CLAIMED)), (0.7, IN(tied_a)), (0.7, IN(tied_b))],
+        )
+    ]
+    sheet = aggregate(outcomes, CLAIMED)
+    assert sheet.s_alt == pytest.approx(0.7)
+    assert sheet.alt_key == tied_a  # "in_series:11" sorts before "in_series:12"
+
+
 def test_aggregate_cross_series_key_and_kind():
     outcomes = [outcome("p1", 1.0, pairs=[(0.1, IN(CLAIMED)), (0.9, CROSS)])]
     sheet = aggregate(outcomes, CLAIMED)
