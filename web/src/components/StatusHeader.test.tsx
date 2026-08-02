@@ -33,10 +33,10 @@ describe('StatusHeader', () => {
     expect(onToggleLogs).toHaveBeenCalledTimes(1)
   })
 
-  it('shows the unprocessed/processed summary from status.summary', () => {
+  it('shows the queued/processed summary from status.summary', () => {
     render(<StatusHeader status={statusFixture} connected onToggleLogs={vi.fn()} />)
 
-    expect(screen.getByText('6 unprocessed · 30 processed')).toBeInTheDocument()
+    expect(screen.getByText('6 queued · 30 processed')).toBeInTheDocument()
   })
 
   it('renders an instance chip with a last-sync/last-backfill tooltip', () => {

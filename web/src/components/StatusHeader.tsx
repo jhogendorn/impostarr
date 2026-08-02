@@ -16,7 +16,7 @@ function instanceTooltip(instance: InstanceSummary): string {
   return `last sync ${lastSync}; last backfill ${lastBackfill}`
 }
 
-/** Presentational: instances (chips with sync/backfill tooltips), unprocessed/processed
+/** Presentational: instances (chips with sync/backfill tooltips), queued/processed
  * summary, worker pool size, SSE connection dot, dry-run badge, logs drawer toggle. Data
  * owned/fetched by the parent. */
 function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
@@ -46,7 +46,7 @@ function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
       </div>
       <div className="flex items-center gap-5 text-sm text-slate-400">
         <span>
-          {status ? `${status.summary.unprocessed} unprocessed · ${status.summary.processed} processed` : '—'}
+          {status ? `${status.summary.unprocessed} queued · ${status.summary.processed} processed` : '—'}
         </span>
         <span>workers: {status?.workers.pool_size ?? '—'}</span>
         <button

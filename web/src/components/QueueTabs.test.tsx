@@ -16,7 +16,7 @@ const EXPECTED_TABS: [label: string, count: number][] = [
 ]
 
 describe('QueueTabs', () => {
-  it('renders 8 tabs (no "Active" tab) grouped under Unprocessed/Results, with counts from status', () => {
+  it('renders 8 tabs (no "Active" tab) grouped under Queued/Processed, with counts from status', () => {
     render(<QueueTabs status={statusFixture} active="hold" onChange={vi.fn()} />)
 
     expect(screen.getAllByRole('tab')).toHaveLength(8)
@@ -27,11 +27,15 @@ describe('QueueTabs', () => {
     }
   })
 
-  it('renders the Unprocessed and Results group labels', () => {
+  it('renders the Queued and Processed group labels, styled as non-interactive text above each cluster', () => {
     render(<QueueTabs status={statusFixture} active="hold" onChange={vi.fn()} />)
 
-    expect(screen.getByText('Unprocessed')).toBeInTheDocument()
-    expect(screen.getByText('Results')).toBeInTheDocument()
+    const queuedLabel = screen.getByText('Queued')
+    const processedLabel = screen.getByText('Processed')
+    expect(queuedLabel).toHaveClass('text-xs', 'uppercase', 'text-slate-500')
+    expect(processedLabel).toHaveClass('text-xs', 'uppercase', 'text-slate-500')
+    expect(queuedLabel.tagName).not.toBe('BUTTON')
+    expect(processedLabel.tagName).not.toBe('BUTTON')
   })
 
   it('the Trash tab shows trash_count', () => {

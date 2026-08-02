@@ -26,8 +26,9 @@ const defaultProps = {
   instances: statusFixture.instances,
   selectedInstance: undefined,
   onInstanceChange: vi.fn(),
+  sortField: 'updated_at' as const,
   sortDir: 'desc' as const,
-  onSortDirChange: vi.fn(),
+  onSortChange: vi.fn(),
   onChanged: vi.fn(),
 }
 
@@ -41,7 +42,7 @@ function mixedStatusPage(): QueuePage {
 }
 
 describe('QueueTable', () => {
-  it('renders rows: "Labelled episode" header spans Series+Episode, Instance, percent Confidence badge, Updated', () => {
+  it('renders rows: "Labelled episode" header spans Series+Episode, separate File column, percent Confidence badge', () => {
     render(<QueueTable page={queuePageFixture} {...defaultProps} />)
 
     expect(screen.getByText('Labelled episode')).toBeInTheDocument()
@@ -72,16 +73,32 @@ describe('QueueTable', () => {
     expect(onInspect).toHaveBeenCalledWith(1)
   })
 
-  it('the Inspect action button also fires onInspect without double-firing the row handler', async () => {
+  it('has no Inspect action button in the row (the row click already inspects)', async () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    expect(screen.queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument()
+  })
+
+  it('clicking a row checkbox toggles its checked DOM state and does not open inspect', async () => {
     const user = userEvent.setup()
     const onInspect = vi.fn()
     render(<QueueTable page={queuePageFixture} {...defaultProps} onInspect={onInspect} />)
 
-    const firstRow = screen.getByText('Show.S01E01.mkv').closest('tr')!
-    await user.click(within(firstRow).getByRole('button', { name: 'Inspect' }))
+    const checkbox = screen.getByLabelText('Select job 1') as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
 
-    expect(onInspect).toHaveBeenCalledTimes(1)
-    expect(onInspect).toHaveBeenCalledWith(1)
+    await user.click(checkbox)
+
+    expect(checkbox.checked).toBe(true)
+    expect(onInspect).not.toHaveBeenCalled()
+  })
+
+  it('checkboxes carry dark-appropriate styling (sized, accent-colored)', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    const checkbox = screen.getByLabelText('Select job 1')
+    expect(checkbox).toHaveClass('accent-indigo-500')
+    expect(checkbox).toHaveClass('h-4', 'w-4')
   })
 
   it('changing the page size fires onPageSizeChange', async () => {
@@ -92,6 +109,15 @@ describe('QueueTable', () => {
     await user.selectOptions(screen.getByLabelText('Page size'), '100')
 
     expect(onPageSizeChange).toHaveBeenCalledWith(100)
+  })
+
+  it('the page-size select sits in the same bottom bar as the pagination range and Prev/Next', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    const bar = screen.getByLabelText('Page size').closest('div')!.parentElement!
+    expect(within(bar).getByText('1–4 of 4')).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: 'Prev' })).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: 'Next' })).toBeInTheDocument()
   })
 
   it('hides the instance filter when there is only one instance', () => {
@@ -118,14 +144,54 @@ describe('QueueTable', () => {
     expect(onInstanceChange).toHaveBeenCalledWith('backup')
   })
 
-  it('clicking the Updated header toggles sort direction', async () => {
+  it('clicking the active sort field header (Updated) toggles its direction', async () => {
     const user = userEvent.setup()
-    const onSortDirChange = vi.fn()
-    render(<QueueTable page={queuePageFixture} {...defaultProps} sortDir="desc" onSortDirChange={onSortDirChange} />)
+    const onSortChange = vi.fn()
+    render(
+      <QueueTable
+        page={queuePageFixture}
+        {...defaultProps}
+        sortField="updated_at"
+        sortDir="desc"
+        onSortChange={onSortChange}
+      />,
+    )
 
     await user.click(screen.getByRole('button', { name: /Updated/ }))
 
-    expect(onSortDirChange).toHaveBeenCalledWith('asc')
+    expect(onSortChange).toHaveBeenCalledWith('updated_at', 'asc')
+    // active field shows a bright directional arrow
+    expect(screen.getByRole('button', { name: /Updated/ })).toHaveTextContent('▼')
+  })
+
+  it.each([
+    ['Series', 'series'],
+    ['Instance', 'instance'],
+    ['Confidence', 'confidence'],
+  ] as const)('clicking the %s header switches sort to %s, defaulting to desc', async (label, field) => {
+    const user = userEvent.setup()
+    const onSortChange = vi.fn()
+    render(
+      <QueueTable
+        page={queuePageFixture}
+        {...defaultProps}
+        sortField="updated_at"
+        sortDir="desc"
+        onSortChange={onSortChange}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: new RegExp(label) }))
+
+    expect(onSortChange).toHaveBeenCalledWith(field, 'desc')
+  })
+
+  it('inactive sortable headers show a dim neutral indicator, not the active arrow', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} sortField="updated_at" sortDir="desc" />)
+
+    expect(screen.getByRole('button', { name: /Series \(id\)/ })).toHaveTextContent('⇅')
+    expect(screen.getByRole('button', { name: /Instance/ })).toHaveTextContent('⇅')
+    expect(screen.getByRole('button', { name: /Confidence/ })).toHaveTextContent('⇅')
   })
 
   it('the free-text filter narrows rows by path or series id, client-side over the current page', async () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getQueue, getStatus } from './api/client'
 import { useEvents } from './api/sse'
-import type { QueuePage, SortDir, SseEvent, StatusResponse } from './api/types'
+import type { QueuePage, QueueSortField, SortDir, SseEvent, StatusResponse } from './api/types'
 import ActiveStrip from './components/ActiveStrip'
 import InspectModal from './components/InspectModal'
 import LogDrawer from './components/LogDrawer'
@@ -19,6 +19,7 @@ function App() {
   const [pageIndex, setPageIndex] = useState(1)
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [instanceFilter, setInstanceFilter] = useState<string | undefined>(undefined)
+  const [sortField, setSortField] = useState<QueueSortField>('updated_at')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [queuePage, setQueuePage] = useState<QueuePage | null>(null)
   const [inspectJobId, setInspectJobId] = useState<number | null>(null)
@@ -34,6 +35,8 @@ function App() {
   pageSizeRef.current = pageSize
   const instanceFilterRef = useRef(instanceFilter)
   instanceFilterRef.current = instanceFilter
+  const sortFieldRef = useRef(sortField)
+  sortFieldRef.current = sortField
   const sortDirRef = useRef(sortDir)
   sortDirRef.current = sortDir
 
@@ -54,10 +57,17 @@ function App() {
   }, [])
 
   const fetchQueue = useCallback(
-    (tab: QueueTab, page: number, size: number, instance: string | undefined, dir: SortDir) => {
+    (
+      tab: QueueTab,
+      page: number,
+      size: number,
+      instance: string | undefined,
+      field: QueueSortField,
+      dir: SortDir,
+    ) => {
       if (tab === 'trash') return // TrashTable owns its own fetch, /trash isn't a job-status queue
       const token = ++queueTokenRef.current
-      getQueue(tab, { page, pageSize: size, instance, sort: 'updated_at', dir })
+      getQueue(tab, { page, pageSize: size, instance, sort: field, dir })
         .then((data) => {
           if (token === queueTokenRef.current) setQueuePage(data)
         })
@@ -71,8 +81,8 @@ function App() {
   }, [fetchStatus])
 
   useEffect(() => {
-    fetchQueue(activeTab, pageIndex, pageSize, instanceFilter, sortDir)
-  }, [fetchQueue, activeTab, pageIndex, pageSize, instanceFilter, sortDir])
+    fetchQueue(activeTab, pageIndex, pageSize, instanceFilter, sortField, sortDir)
+  }, [fetchQueue, activeTab, pageIndex, pageSize, instanceFilter, sortField, sortDir])
 
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -88,7 +98,14 @@ function App() {
       if (debounceTimer.current !== null) clearTimeout(debounceTimer.current)
       debounceTimer.current = setTimeout(() => {
         debounceTimer.current = null
-        fetchQueue(activeTabRef.current, pageIndexRef.current, pageSizeRef.current, instanceFilterRef.current, sortDirRef.current)
+        fetchQueue(
+          activeTabRef.current,
+          pageIndexRef.current,
+          pageSizeRef.current,
+          instanceFilterRef.current,
+          sortFieldRef.current,
+          sortDirRef.current,
+        )
         fetchStatus()
       }, JOB_UPDATE_DEBOUNCE_MS)
     },
@@ -118,8 +135,14 @@ function App() {
     setPageIndex(1)
   }
 
+  function handleSortChange(field: QueueSortField, dir: SortDir) {
+    setSortField(field)
+    setSortDir(dir)
+    setPageIndex(1)
+  }
+
   function handleModalChanged() {
-    fetchQueue(activeTab, pageIndex, pageSize, instanceFilter, sortDir)
+    fetchQueue(activeTab, pageIndex, pageSize, instanceFilter, sortField, sortDir)
     fetchStatus()
   }
 
@@ -141,8 +164,9 @@ function App() {
           instances={status?.instances ?? []}
           selectedInstance={instanceFilter}
           onInstanceChange={handleInstanceChange}
+          sortField={sortField}
           sortDir={sortDir}
-          onSortDirChange={setSortDir}
+          onSortChange={handleSortChange}
           onChanged={handleModalChanged}
         />
       )}

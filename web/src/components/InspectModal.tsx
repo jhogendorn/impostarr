@@ -75,11 +75,27 @@ function isCandidate(value: unknown): value is Candidate {
   if (typeof value !== 'object' || value === null) return false
   const record = value as Record<string, unknown>
   if (typeof record.confidence !== 'number') return false
+  if (typeof record.evidence !== 'object' || record.evidence === null) return false
   if (record.numbering != null && typeof record.numbering !== 'string') return false
   if (record.ident != null && !isCandidateIdent(record.ident)) return false
   return true
 }
 
+/** Plain-language translation of a normalized candidate's `kind`, so the
+ * plugin-results table never leaks raw in_series/cross_series/junk tokens. */
+function describeNormalized(entry: unknown): string {
+  if (typeof entry !== 'object' || entry === null) return String(entry)
+  const record = entry as Record<string, unknown>
+  if (record.kind === 'in_series') return `matches this series: episodes ${(record.episode_ids as number[]).join(', ')}`
+  if (record.kind === 'cross_series') return `different series: ${JSON.stringify(record.external_ids)}`
+  if (record.kind === 'junk') return 'no match'
+  if (typeof record.reason === 'string') return `could not map: ${record.reason}`
+  return JSON.stringify(entry)
+}
+
+/** Used only by the "Labelled as"/"Identification" derivations below — the
+ * plugin-results table above uses its own inline (unpadded) formatting,
+ * unchanged from the restored version. */
 function normalizedKind(value: unknown): NormalizedKind | 'unnormalizable' | 'unknown' {
   if (typeof value !== 'object' || value === null) return 'unknown'
   const record = value as Record<string, unknown>
@@ -187,7 +203,7 @@ function seasonEpisodeLabel(ident: { season: number; episodes: number[] }): stri
   return `S${season}${ident.episodes.map((ep) => `E${String(ep).padStart(2, '0')}`).join('')}`
 }
 
-// -- "identified as" derivation -------------------------------------------
+// -- single identification statement --------------------------------------
 //
 // Tied to the server's own routing decision (`verdict.proposed_action`)
 // rather than re-deriving scoring from scratch client-side: `remap` names
@@ -254,32 +270,48 @@ function identifiedAs(detail: JobDetail): IdentifiedAs {
   return { kind: 'matches' }
 }
 
-function IdentifiedAsText({ result }: { result: IdentifiedAs }) {
-  switch (result.kind) {
-    case 'matches':
-      return <span>Matches the labelled episode.</span>
-    case 'human':
-      return <span>{result.seasonEpisode ? seasonEpisodeLabel(result.seasonEpisode) : '—'} (human override)</span>
-    case 'remap':
-      return (
-        <span>
-          {result.seasonEpisode ? seasonEpisodeLabel(result.seasonEpisode) : 'a different episode'} at{' '}
-          {formatPercent(result.confidence ?? null)}
-        </span>
-      )
+/** ONE sentence covering both "what was identified" and "how confident" —
+ * replaces the old separate Identified-as/Confidence sections, which read
+ * as two disconnected facts about the same result. */
+function identificationStatement(
+  detail: JobDetail,
+  identified: IdentifiedAs,
+  labelledSeasonEpisode: CandidateIdent | null,
+): ReactNode {
+  const verdict = detail.verdict
+  if (!verdict) return 'Not yet processed.'
+  // Checked before the s_claimed-null guard below: a human `is_other`
+  // verdict never carries a numeric confidence (a human isn't scored), so
+  // it would otherwise be misreported as "no usable evidence".
+  if (identified.kind === 'human') {
+    return `Manually identified as ${identified.seasonEpisode ? seasonEpisodeLabel(identified.seasonEpisode) : '—'} (human override).`
+  }
+  if (verdict.s_claimed === null) return 'Could not be identified — no usable evidence.'
+
+  const labelText = labelledSeasonEpisode ? seasonEpisodeLabel(labelledSeasonEpisode) : 'the labelled episode'
+
+  switch (identified.kind) {
+    case 'remap': {
+      const altText = identified.seasonEpisode ? seasonEpisodeLabel(identified.seasonEpisode) : 'a different episode'
+      return `This file appears to be ${altText} (${formatPercent(identified.confidence ?? null)} confidence), not the labelled ${labelText} (${formatPercent(verdict.s_claimed)}).`
+    }
     case 'cross_series':
       return (
-        <span>
-          Identified as a different series
-          <ExternalLinks ids={result.externalIds} />
-        </span>
+        <>
+          This file appears to be a different series entirely ({formatPercent(identified.confidence ?? null)} confidence).
+          <ExternalLinks ids={identified.externalIds} />
+        </>
       )
     case 'junk':
-      return <span>Content didn't match any episode.</span>
+      return `This file's content didn't match any known episode (${formatPercent(identified.confidence ?? null)} confidence).`
+    case 'matches':
     case 'uncertain':
-      return <span>No confident alternative found ({formatPercent(result.confidence ?? null)}).</span>
+      if (verdict.outcome === 'matched') {
+        return `Verified as ${labelText} — ${formatPercent(verdict.s_claimed)} confidence.`
+      }
+      return `Uncertain match to the labelled episode (${formatPercent(verdict.s_claimed)} confidence) — needs review.`
     default:
-      return <span>Could not identify.</span>
+      return 'Could not be identified.'
   }
 }
 
@@ -303,59 +335,28 @@ function outcomeSentence(verdict: JobDetailVerdict | null, jobStatus: string, dr
   }
 }
 
-// -- plugin candidate chip -------------------------------------------------
-
-function CandidateChip({ candidate, normalized }: { candidate: Candidate; normalized: unknown }) {
-  const kind = normalizedKind(normalized)
-  const title = candidate.evidence ? JSON.stringify(candidate.evidence) : undefined
-
-  let body: ReactNode
-  if (kind === 'in_series' && candidate.ident) {
-    body = `${seasonEpisodeLabel(candidate.ident)} — ${formatPercent(candidate.confidence)}`
-  } else if (kind === 'cross_series') {
-    body = (
-      <>
-        identified as a different series <ExternalLinks ids={(normalized as NormalizedCrossSeries).external_ids} />
-      </>
-    )
-  } else if (kind === 'junk') {
-    body = "content didn't match any episode"
-  } else if (kind === 'unnormalizable') {
-    body = "couldn't map to a known episode"
-  } else if (candidate.ident) {
-    // The normalized companion entry is missing/misaligned, but the
-    // candidate itself is well-formed — fall back to its own ident rather
-    // than the "unrecognized entry" wording reserved for genuinely
-    // malformed candidate objects (see the fallback below).
-    body = `${seasonEpisodeLabel(candidate.ident)} — ${formatPercent(candidate.confidence)}`
-  } else {
-    body = `confidence ${formatPercent(candidate.confidence)}`
+/** Whether the plain-language outcome line adds anything beyond the single
+ * identification statement above it — shown only when it does, to avoid
+ * saying the same thing twice (e.g. "Verified match." right under "Verified
+ * as S01E01 — 92% confidence." is pure noise; "Fix applied." under a
+ * mislabel statement is new information — an action was actually taken). */
+function shouldShowOutcomeLine(identified: IdentifiedAs, verdict: JobDetailVerdict): boolean {
+  if (verdict.outcome === 'remediate') return true
+  if (verdict.outcome === 'matched') return false
+  if (verdict.outcome === 'inconclusive') return false
+  if (verdict.outcome === 'quarantine') {
+    // The uncertain/matches-but-unconfident statement already ends in
+    // "— needs review", so "Waiting for human review." is pure repetition.
+    return identified.kind !== 'uncertain' && identified.kind !== 'matches'
   }
-
-  return (
-    <li title={title} className="rounded border border-slate-700 bg-slate-800/60 px-2 py-1 text-xs text-slate-300">
-      {body}
-    </li>
-  )
+  return true
 }
 
-const STATUS_CHIP_CLASS: Record<string, string> = {
-  ok: 'bg-emerald-500/15 text-emerald-400',
-  abstain: 'bg-slate-700 text-slate-300',
-  error: 'bg-red-500/15 text-red-400',
-}
-
-function statusChipText(status: string, reason: string | null): string {
-  if (status === 'ok') return 'found evidence'
-  if (status === 'abstain') return `skipped: ${reason ?? 'no reason given'}`
-  if (status === 'error') return `failed: ${reason ?? 'unknown error'}`
-  return status
-}
-
-/** Fetches job detail on open; renders a plain-language identification
- * summary, per-plugin results, transcript excerpt, framegrab strip (with
- * timestamp badges), probe summary, dupe warning, remediation log, and the
- * VerdictActions footer. */
+/** Fetches job detail on open; renders the labelled mapping, a single
+ * identification statement, a fingerprint/dupe summary, the restored
+ * per-plugin results table, transcript excerpt, framegrab strip (with
+ * timestamp badges), probe summary, remediation log, and the VerdictActions
+ * footer. */
 function InspectModal({ jobId, open, onClose, onChanged, dryRun = false }: InspectModalProps) {
   const [detail, setDetail] = useState<JobDetail | null>(null)
   const [loading, setLoading] = useState(false)
@@ -443,66 +444,95 @@ function InspectModal({ jobId, open, onClose, onChanged, dryRun = false }: Inspe
               </section>
 
               <section>
-                <h3 className="mb-1 font-medium text-slate-300">Identified as</h3>
-                <p className="text-slate-400">
-                  <IdentifiedAsText result={identified} />
-                </p>
+                <h3 className="mb-1 font-medium text-slate-300">Identification</h3>
+                <p className="text-slate-400">{identificationStatement(detail, identified, labelledSeasonEpisode)}</p>
+                {detail.verdict && shouldShowOutcomeLine(identified, detail.verdict) && (
+                  <p className="text-slate-400">{outcomeSentence(detail.verdict, detail.job.status, dryRun)}</p>
+                )}
               </section>
 
-              <section>
-                <h3 className="mb-1 font-medium text-slate-300">Confidence</h3>
-                <p className="text-slate-400">
-                  Confidence it is the labelled episode: {formatPercent(detail.verdict?.s_claimed ?? null)}
-                </p>
-                <p className="text-slate-400">{outcomeSentence(detail.verdict, detail.job.status, dryRun)}</p>
-              </section>
-
-              {detail.verdict?.dupe_info && (
+              {(detail.frame_hash || detail.verdict?.dupe_info) && (
                 <section>
-                  <h3 className="mb-1 font-medium text-slate-300">Possible duplicate</h3>
-                  <p className="text-amber-400">
-                    Visually near-identical to{' '}
-                    {detail.verdict.dupe_info.sonarr_path ? pathBasename(detail.verdict.dupe_info.sonarr_path) : 'another file'}{' '}
-                    (similarity {formatPercent(detail.verdict.dupe_info.similarity)})
-                  </p>
+                  <h3 className="mb-1 font-medium text-slate-300">Fingerprint</h3>
+                  {detail.frame_hash && (
+                    <p className="text-slate-400">
+                      Perceptual hash: {detail.frame_hash.n_frames} frames ({detail.frame_hash.algo} v
+                      {detail.frame_hash.version})
+                      {detail.phash_corpus && (
+                        <>
+                          {' '}
+                          · stored in corpus ({detail.phash_corpus.source}, {formatPercent(detail.phash_corpus.confidence)})
+                        </>
+                      )}
+                    </p>
+                  )}
+                  {detail.verdict?.dupe_info && (
+                    <p className="text-amber-400">
+                      Visually near-identical to{' '}
+                      {detail.verdict.dupe_info.sonarr_path
+                        ? pathBasename(detail.verdict.dupe_info.sonarr_path)
+                        : 'another file'}{' '}
+                      (similarity {formatPercent(detail.verdict.dupe_info.similarity)})
+                    </p>
+                  )}
                 </section>
               )}
 
               <section>
                 <h3 className="mb-1 font-medium text-slate-300">Plugin results</h3>
-                <ul className="space-y-2">
-                  {detail.plugin_results.map((result) => (
-                    <li key={`${result.name}-${result.version}`} className="text-slate-300">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-slate-500">
+                    <tr>
+                      <th className="py-1 pr-2">Plugin</th>
+                      <th className="py-1 pr-2">Status</th>
+                      <th className="py-1 pr-2">Reason</th>
+                      <th className="py-1 pr-2">Candidates</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.plugin_results.map((result) => (
+                      <tr key={`${result.name}-${result.version}`} className="align-top text-slate-300">
+                        <td className="py-1 pr-2">
                           {result.name} v{result.version}
-                        </span>
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-xs ${STATUS_CHIP_CLASS[result.status] ?? 'bg-slate-700 text-slate-300'}`}
-                        >
-                          {statusChipText(result.status, result.reason)}
-                        </span>
-                      </div>
-                      {Array.isArray(result.candidates) && result.candidates.length > 0 && (
-                        <ul className="mt-1 flex flex-wrap gap-1.5">
-                          {result.candidates.map((candidate, i) =>
-                            isCandidate(candidate) ? (
-                              <CandidateChip
-                                key={i}
-                                candidate={candidate}
-                                normalized={Array.isArray(result.normalized) ? result.normalized[i] : undefined}
-                              />
-                            ) : (
-                              <li key={i} className="text-slate-600">
-                                unrecognized entry
-                              </li>
-                            ),
+                        </td>
+                        <td className="py-1 pr-2">{result.status}</td>
+                        <td className="py-1 pr-2 text-slate-500">{result.reason ?? '—'}</td>
+                        <td className="py-1 pr-2">
+                          {Array.isArray(result.candidates) && result.candidates.length > 0 ? (
+                            <ul className="space-y-0.5">
+                              {result.candidates.map((candidate, i) =>
+                                isCandidate(candidate) ? (
+                                  <li
+                                    key={i}
+                                    title={candidate.evidence ? JSON.stringify(candidate.evidence) : undefined}
+                                  >
+                                    conf {formatPercent(candidate.confidence)} · {candidate.numbering ?? '—'}{' '}
+                                    {candidate.ident
+                                      ? `S${candidate.ident.season}E${candidate.ident.episodes.join(',')}`
+                                      : ''}
+                                  </li>
+                                ) : (
+                                  <li key={i} className="text-slate-600">
+                                    unrecognized entry
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          ) : (
+                            '—'
                           )}
-                        </ul>
-                      )}
-                    </li>
-                  ))}
-                </ul>
+                          {Array.isArray(result.normalized) && result.normalized.length > 0 && (
+                            <ul className="mt-1 space-y-0.5 text-slate-500">
+                              {result.normalized.map((entry, i) => (
+                                <li key={i}>{describeNormalized(entry)}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </section>
 
               {transcript?.segments && transcript.segments.length > 0 && (

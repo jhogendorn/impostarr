@@ -79,7 +79,11 @@ function LogDrawer({ open }: LogDrawerProps) {
           ))}
         </div>
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-2 font-mono text-xs">
+      {/* min-h-0 is load-bearing: a flex child's default min-height is
+       * "auto", which lets it grow to fit its content and overrides the
+       * fixed-height parent instead of scrolling within it — flex-1 alone
+       * does not fix this (classic flexbox-overflow gotcha). */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-2 font-mono text-xs">
         {logs.map((log, i) => (
           <div
             key={`${log.ts}-${i}`}

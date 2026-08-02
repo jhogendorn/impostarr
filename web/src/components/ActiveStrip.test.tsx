@@ -21,6 +21,15 @@ describe('ActiveStrip', () => {
     expect(screen.getByText('MEM 61%')).toBeInTheDocument()
   })
 
+  it('renders as its own bordered section with an "Active" title, not a bar', () => {
+    render(<ActiveStrip activeJobs={[]} system={statusFixture.system} />)
+
+    const title = screen.getByRole('heading', { name: 'Active' })
+    expect(title).toBeInTheDocument()
+    const panel = title.parentElement!
+    expect(panel).toHaveClass('rounded-lg', 'border', 'border-slate-800')
+  })
+
   it('renders a card per active job with instance, path, claimed_by, and elapsed', () => {
     render(<ActiveStrip activeJobs={activeJobsFixture} system={statusFixture.system} />)
 
