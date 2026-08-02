@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings",
     "httpx",
     "pyyaml",
+    "xxhash>=3.8.1",
 ]
 
 [dependency-groups]
