@@ -10,7 +10,14 @@ services:
       - ./config:/config
       - ./assets:/assets
       - ./models:/models
-      - ${MEDIA_PATH}:/media:ro
+      - ${MEDIA_PATH:?set MEDIA_PATH}:/media:ro
+    environment:
+      # Remaps the container's `impostarr` user to this uid/gid before it
+      # drops privileges (docker/entrypoint.sh) — set to match whoever owns
+      # ./config, ./assets, ./models on the host. Defaults to 1000:1000,
+      # matching the `chown -R 1000:1000` quickstart guidance in README.
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
     # Copy compose.example.env to compose.env, fill in real values, then
     # uncomment (env_file values become container env vars, e.g.
     # IMPOSTARR__SONARR / MEDIA_PATH):

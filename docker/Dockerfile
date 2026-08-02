@@ -21,13 +21,22 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS python-builder
 # be relative to the source tree layout); --no-editable makes the venv
 # self-contained (project installed as a real package) so it survives being
 # copied into the runtime stage without src/ needing to be a sibling.
-ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
-    UV_NO_CACHE=1
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv
 
 WORKDIR /app
+
+# Dependency layer: only pyproject.toml/uv.lock invalidate this, so editing
+# src/ doesn't force re-resolving/re-downloading dependencies on rebuild.
+# The cache mount persists uv's wheel cache across builds (BuildKit-only).
 COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project --extra postgres
+
+# Project layer: install the project itself as a real (non-editable)
+# package now that src/ is present.
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable --extra postgres
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-editable --extra postgres
 
 # ---- Stage 3: runtime -------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
@@ -37,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       mkvtoolnix \
       tesseract-ocr \
       curl \
+      gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # `uv` binary is needed at boot: create_app() -> ensure_external_plugins()
@@ -66,5 +76,7 @@ EXPOSE 8484
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8484/api/v1/healthz || exit 1
 
-USER impostarr
+# Stays root: entrypoint.sh always drops to `impostarr` (optionally
+# remapped to PUID/PGID first) via gosu before exec'ing the app — the app
+# itself never runs as root. See docker/entrypoint.sh and README.
 ENTRYPOINT ["/entrypoint.sh"]

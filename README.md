@@ -24,12 +24,24 @@ Implementation is tracked task-by-task in
 cd docker
 cp compose.example.env compose.env   # fill in MEDIA_PATH, etc.
 mkdir -p config assets models
+sudo chown -R 1000:1000 config assets models   # match the container's default uid/gid
 cp ../examples/impostarr.yml config/impostarr.yml   # edit: sonarr instances, plugin keys, ...
 docker compose --env-file compose.env up -d
 ```
 
 The UI/API is then at `http://localhost:8484`. Health check:
 `curl http://localhost:8484/api/v1/healthz`.
+
+### Container user (PUID/PGID)
+
+The image starts as root and immediately drops privileges
+(`docker/entrypoint.sh`, via `gosu`) to a built-in `impostarr` user, uid/gid
+1000 by default — the app itself never runs as root. If your host uid/gid
+isn't 1000, either `chown` `./config`, `./assets`, `./models` to 1000:1000
+(as above), or set `PUID`/`PGID` in `compose.env` to your host uid/gid
+instead — the container remaps `impostarr` to match before dropping
+privileges, so it can write to directories owned by any uid/gid without a
+`chown`.
 
 ## Configuration
 

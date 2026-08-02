@@ -25,15 +25,18 @@ mkdir -p "$TMPDIR_SMOKE/config" "$TMPDIR_SMOKE/assets" "$TMPDIR_SMOKE/models" "$
 cat > "$TMPDIR_SMOKE/config/impostarr.yml" <<'EOF'
 sonarr: []
 EOF
-# Container runs as uid 1000; host uid running this script may differ (e.g.
-# in CI), so open up the throwaway dirs rather than chown.
-chmod -R 777 "$TMPDIR_SMOKE"
 
 PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')"
 
 echo "==> Starting container on port $PORT"
+# PUID/PGID matching this script's uid/gid: docker/entrypoint.sh remaps the
+# container's impostarr user to match before dropping privileges, so it
+# can write the throwaway dirs above (owned by whoever ran this script)
+# without needing to loosen their permissions.
 docker run -d --name "$CONTAINER_NAME" \
   -p "${PORT}:8484" \
+  -e PUID="$(id -u)" \
+  -e PGID="$(id -g)" \
   -v "$TMPDIR_SMOKE/config:/config" \
   -v "$TMPDIR_SMOKE/assets:/assets" \
   -v "$TMPDIR_SMOKE/models:/models" \
