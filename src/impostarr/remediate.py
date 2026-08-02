@@ -292,14 +292,28 @@ class Remediator:
 
             occupied = [ep for ep in target_episodes if ep.has_file]
             if occupied:
+                occupied_labels = ", ".join(
+                    f"S{ep.season_number:02d}E{ep.episode_number:02d}" for ep in occupied
+                )
                 self._log(
                     session,
                     verdict,
                     "occupied_check",
                     False,
                     f"refusing remap: target episode(s) already have a file: "
-                    f"{[ep.id for ep in occupied]}",
+                    f"{occupied_labels} (ids={[ep.id for ep in occupied]})",
                 )
+                # Routing already decided this remap was worth attempting
+                # (that's why remap() was called at all) — recording the
+                # target here, even though it's being refused, lets the
+                # quarantined job's proposed_action still surface "what
+                # would have happened" to the operator/UI, same as the
+                # non-auto quarantine path already does via
+                # `pipeline.process_job`.
+                verdict.proposed_action = {
+                    "kind": "remap",
+                    "target_episode_ids": sorted(target_episode_ids),
+                }
                 jobs.release(session, db_job, "quarantine", worker_id)
                 return
 
