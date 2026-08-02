@@ -54,6 +54,16 @@ def _mint_worker_id(base_worker_id: str, task_index: int) -> str:
     return f"{base_worker_id}-{task_index}"
 
 
+def _do_heartbeat(deps: PipelineDeps, job_id: int) -> None:
+    """Blocking: load the job and heartbeat it in one `to_thread` dispatch
+    (session.get is itself a blocking DB call — dispatching only
+    `jobs.heartbeat` and doing `session.get` inline on the event loop was
+    still blocking it)."""
+    with deps.session_factory() as session:
+        job = session.get(Job, job_id)
+        jobs.heartbeat(session, job, deps.worker_id)
+
+
 class WorkerPool:
     def __init__(
         self,
@@ -144,15 +154,13 @@ class WorkerPool:
         interval = self.lease_timeout_s / 3
         while True:
             await asyncio.sleep(interval)
-            with deps.session_factory() as session:
-                job = session.get(Job, job_id)
-                try:
-                    await asyncio.to_thread(jobs.heartbeat, session, job, deps.worker_id)
-                except LeaseLost:
-                    logger.warning("lease lost for job %s; cancelling processing", job_id)
-                    lease_lost.set()
-                    process_task.cancel()
-                    return
+            try:
+                await asyncio.to_thread(_do_heartbeat, deps, job_id)
+            except LeaseLost:
+                logger.warning("lease lost for job %s; cancelling processing", job_id)
+                lease_lost.set()
+                process_task.cancel()
+                return
 
     # -- reaper / discovery -----------------------------------------------
 

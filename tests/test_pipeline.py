@@ -383,6 +383,31 @@ async def test_inconclusive_outcome_when_all_plugins_abstain(tmp_path, session_f
 
 
 @respx.mock
+async def test_unexpected_exception_in_a_stage_helper_fast_fails_to_error(
+    tmp_path, session_factory, monkeypatch
+):
+    """Regression: a deterministic bug in a stage helper must not leave the
+    job silently active until the reaper's lease timeout — process_job's
+    catch-all should release it to `error` immediately."""
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(session_factory, tmp_path, [loaded(plugin)])
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("stage helper exploded")
+
+    monkeypatch.setattr("impostarr.pipeline._stage_probe", boom)
+
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    job = get_job(session_factory, job_id)
+    assert job.status == "error"
+    assert plugin.call_count == 0
+
+
+@respx.mock
 async def test_auto_replace_invokes_remediator(tmp_path, session_factory):
     mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
     job_id, _ = make_pending_job(session_factory, tmp_path, history_id=None)

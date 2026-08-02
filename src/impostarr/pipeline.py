@@ -26,6 +26,21 @@ spec's data model has no column for it (see the plan doc's Task 14 dupe
 check note) and adding one would ripple into other tasks' schema
 assumptions. TODO(api-task): surface dupe info via the HTTP API/verdict
 once that task adds a place to show it.
+
+DB access is synchronous throughout this module — every `session.*` call
+runs directly in the coroutine, not dispatched via `asyncio.to_thread`.
+Accepted for the PoC: SQLite is single-writer regardless, and at PoC
+worker-pool scale the blocked-event-loop window per query is small relative
+to the ffmpeg/plugin work each job already does. Revisit (to_thread, or an
+async engine) if worker concurrency against Postgres becomes a bottleneck.
+
+Unexpected-exception handling: `process_job`'s body runs under a catch-all
+that releases the job to `error` on any exception it doesn't already handle
+explicitly (a stage helper bug, a scoring/routing bug, etc.), so a
+deterministic bug fails the job immediately instead of leaving it `active`
+until the reaper's lease timeout expires. `LeaseLost` and
+`asyncio.CancelledError` are re-raised rather than swallowed — both are
+the caller's (worker.py's) concern, not a pipeline failure.
 """
 
 from __future__ import annotations
@@ -503,108 +518,136 @@ def _write_phash_corpus(
 async def process_job(job_id: int, deps: PipelineDeps) -> None:
     """Run one job through the full pipeline. `deps.worker_id` must already
     hold the job's active lease (the caller's claim) — this function trusts
-    that and does not re-validate job status itself."""
+    that and does not re-validate job status itself.
+
+    The body runs under a catch-all (see module docstring): any exception
+    not already handled explicitly below releases the job to `error` rather
+    than leaving it `active` for the reaper. `jobs.LeaseLost` and
+    `asyncio.CancelledError` are re-raised, not swallowed — both are the
+    caller's (worker.py's) concern, not a pipeline failure.
+    """
     with deps.session_factory() as session:
         job = session.get(Job, job_id)
         file = session.get(File, job.file_id)
 
-        ctx = await _get_series_context(deps, file.series_id)
-        claimed = _build_claimed_ident(file, ctx.episodes)
-        if claimed is None:
-            logger.error(
-                "job %s: none of file.episode_ids=%s matched series %s episodes",
-                job_id, file.episode_ids, file.series_id,
+        try:
+            ctx = await _get_series_context(deps, file.series_id)
+            claimed = _build_claimed_ident(file, ctx.episodes)
+            if claimed is None:
+                logger.error(
+                    "job %s: none of file.episode_ids=%s matched series %s episodes",
+                    job_id, file.episode_ids, file.series_id,
+                )
+                jobs.release(session, job, "error", deps.worker_id)
+                return
+
+            path = Path(file.local_path)
+            out_dir = deps.settings.assets_dir / str(file.id)
+
+            probe_asset = await _stage_probe(session, file, path)
+            audio_asset = await _stage_audio(session, file, path, out_dir, probe_asset)
+            subs_assets = await _stage_subs(session, file, path, out_dir, probe_asset)
+            frame_seq, frame_hash_row = await _stage_frames(
+                session, file, path, out_dir, probe_asset
             )
-            jobs.release(session, job, "error", deps.worker_id)
-            return
 
-        path = Path(file.local_path)
-        out_dir = deps.settings.assets_dir / str(file.id)
+            if sum(x is None for x in (probe_asset, audio_asset, subs_assets, frame_seq)) == 4:
+                logger.error("job %s: all asset extraction stages failed", job_id)
+                jobs.release(session, job, "error", deps.worker_id)
+                return
 
-        probe_asset = await _stage_probe(session, file, path)
-        audio_asset = await _stage_audio(session, file, path, out_dir, probe_asset)
-        subs_assets = await _stage_subs(session, file, path, out_dir, probe_asset)
-        frame_seq, frame_hash_row = await _stage_frames(session, file, path, out_dir, probe_asset)
+            transcript_payload = await _stage_transcript(
+                session, file, audio_asset, deps.transcriber
+            )
 
-        if sum(x is None for x in (probe_asset, audio_asset, subs_assets, frame_seq)) == 4:
-            logger.error("job %s: all asset extraction stages failed", job_id)
-            jobs.release(session, job, "error", deps.worker_id)
-            return
+            if frame_seq is not None:
+                _check_duplicates(session, file, frame_seq)
 
-        transcript_payload = await _stage_transcript(session, file, audio_asset, deps.transcriber)
+            bundle = AssetBundle(
+                probe=probe_asset.payload if probe_asset else None,
+                audio_path=audio_asset.path if audio_asset else None,
+                transcript=transcript_payload,
+                sub_paths=[a.path for a in subs_assets] if subs_assets else [],
+                frame_hashes=frame_seq.model_dump(mode="json") if frame_seq else None,
+            )
+            asset_fingerprints = {
+                "probe": probe_asset.input_fingerprint if probe_asset else None,
+                "audio": audio_asset.input_fingerprint if audio_asset else None,
+                "subs": [a.input_fingerprint for a in subs_assets] if subs_assets else [],
+                "transcript": (
+                    audio_asset.input_fingerprint if transcript_payload is not None else None
+                ),
+                "frames": xxhash.xxh64(":".join(frame_seq.hashes).encode()).hexdigest()
+                if frame_seq else None,
+            }
 
-        if frame_seq is not None:
-            _check_duplicates(session, file, frame_seq)
+            outcomes = await _run_plugin_stage(
+                session, job, deps, bundle, claimed, ctx, asset_fingerprints
+            )
 
-        bundle = AssetBundle(
-            probe=probe_asset.payload if probe_asset else None,
-            audio_path=audio_asset.path if audio_asset else None,
-            transcript=transcript_payload,
-            sub_paths=[a.path for a in subs_assets] if subs_assets else [],
-            frame_hashes=frame_seq.model_dump(mode="json") if frame_seq else None,
-        )
-        asset_fingerprints = {
-            "probe": probe_asset.input_fingerprint if probe_asset else None,
-            "audio": audio_asset.input_fingerprint if audio_asset else None,
-            "subs": [a.input_fingerprint for a in subs_assets] if subs_assets else [],
-            "transcript": audio_asset.input_fingerprint if transcript_payload is not None else None,
-            "frames": xxhash.xxh64(":".join(frame_seq.hashes).encode()).hexdigest()
-            if frame_seq else None,
-        }
+            sheet = aggregate(outcomes, frozenset(claimed.episode_ids))
+            flags = InstanceFlags(
+                auto_remap=deps.instance_cfg.auto_remap, auto_replace=deps.instance_cfg.auto_replace
+            )
+            decision = route(sheet, deps.settings.thresholds, flags)
 
-        outcomes = await _run_plugin_stage(session, job, deps, bundle, claimed, ctx, asset_fingerprints)
+            proposed_action = None
+            if not decision.auto and decision.action is not None:
+                proposed_action = decision.action.model_dump(mode="json")
 
-        sheet = aggregate(outcomes, frozenset(claimed.episode_ids))
-        flags = InstanceFlags(
-            auto_remap=deps.instance_cfg.auto_remap, auto_replace=deps.instance_cfg.auto_replace
-        )
-        decision = route(sheet, deps.settings.thresholds, flags)
+            verdict = Verdict(
+                job_id=job.id,
+                s_claimed=sheet.s_claimed,
+                s_alt=sheet.s_alt,
+                outcome=decision.outcome,
+                proposed_action=proposed_action,
+                source="auto",
+            )
+            session.add(verdict)
+            session.commit()
 
-        proposed_action = None
-        if not decision.auto and decision.action is not None:
-            proposed_action = decision.action.model_dump(mode="json")
-
-        verdict = Verdict(
-            job_id=job.id,
-            s_claimed=sheet.s_claimed,
-            s_alt=sheet.s_alt,
-            outcome=decision.outcome,
-            proposed_action=proposed_action,
-            source="auto",
-        )
-        session.add(verdict)
-        session.commit()
-
-        final_status = decision.outcome
-        if decision.outcome in ("matched", "quarantine", "inconclusive"):
-            jobs.release(session, job, decision.outcome, deps.worker_id)
-        else:  # "remediate" -- route() only sets this outcome when auto is True.
-            remediator = Remediator(deps.sonarr_client, deps.instance_cfg, deps.session_factory)
-            if isinstance(decision.action, Remap):
-                await remediator.remap(job, decision.action.target_episode_ids, deps.worker_id)
-            else:
-                await remediator.replace(job, deps.worker_id)
-            with deps.session_factory() as check_session:
-                final_status = check_session.get(Job, job.id).status
-
-        if frame_hash_row is not None:
-            threshold = deps.settings.thresholds.phash_store
-            if (
-                final_status == "matched"
-                and sheet.s_claimed is not None
-                and sheet.s_claimed >= threshold
-            ):
-                _write_phash_corpus(
-                    session, frame_hash_row, ctx.series, claimed.episode_ids, ctx.episodes,
-                    sheet.s_claimed,
+            final_status = decision.outcome
+            if decision.outcome in ("matched", "quarantine", "inconclusive"):
+                jobs.release(session, job, decision.outcome, deps.worker_id)
+            else:  # "remediate" -- route() only sets this outcome when auto is True.
+                remediator = Remediator(
+                    deps.sonarr_client, deps.instance_cfg, deps.session_factory
                 )
-            elif (
-                final_status == "remediated"
-                and isinstance(decision.action, Remap)
-                and sheet.s_alt is not None
-                and sheet.s_alt >= threshold
-            ):
-                _write_phash_corpus(
-                    session, frame_hash_row, ctx.series, decision.action.target_episode_ids,
-                    ctx.episodes, sheet.s_alt,
-                )
+                if isinstance(decision.action, Remap):
+                    await remediator.remap(
+                        job, decision.action.target_episode_ids, deps.worker_id
+                    )
+                else:
+                    await remediator.replace(job, deps.worker_id)
+                with deps.session_factory() as check_session:
+                    final_status = check_session.get(Job, job.id).status
+
+            if frame_hash_row is not None:
+                threshold = deps.settings.thresholds.phash_store
+                if (
+                    final_status == "matched"
+                    and sheet.s_claimed is not None
+                    and sheet.s_claimed >= threshold
+                ):
+                    _write_phash_corpus(
+                        session, frame_hash_row, ctx.series, claimed.episode_ids, ctx.episodes,
+                        sheet.s_claimed,
+                    )
+                elif (
+                    final_status == "remediated"
+                    and isinstance(decision.action, Remap)
+                    and sheet.s_alt is not None
+                    and sheet.s_alt >= threshold
+                ):
+                    _write_phash_corpus(
+                        session, frame_hash_row, ctx.series, decision.action.target_episode_ids,
+                        ctx.episodes, sheet.s_alt,
+                    )
+        except jobs.LeaseLost:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("job %s: unexpected pipeline error", job_id)
+            if job.status == "active":
+                jobs.release(session, job, "error", deps.worker_id)
