@@ -6,12 +6,16 @@ create_app()` — the latter would run settings/DB/plugin loading as an
 import-time side effect, which is exactly what tests construct their own
 `Settings` to avoid.
 
-Known PoC gap: plugins are constructed by `plugins.loader.load_plugins`
-without any per-request/per-instance dependency injection (no shared
-`httpx.AsyncClient` handed to them), so a plugin like `subs-llm` that wants
-its own HTTP client builds one internally. Documented rather than "fixed"
-here — reworking the loader's construction protocol is out of scope for
-this task.
+Known PoC gap: plugins themselves are constructed by
+`plugins.loader.load_plugins` without any per-plugin dependency injection
+from this module — a plugin like `subs-llm` that wants its own HTTP client
+builds one internally rather than receiving one from here. That's
+independent of `RefSubService` below: refsubs is a shared service *this*
+module constructs and threads through `PipelineDeps.refsubs` (plugins read
+it off `ctx.refsubs`, e.g. `whisper-subs`), not something the loader
+injects into a plugin's constructor. Documented rather than "fixed" here —
+reworking the loader's construction protocol is out of scope for this
+task.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +39,7 @@ from impostarr.db import init_db, make_session_factory
 from impostarr.discovery import Discoverer
 from impostarr.pipeline import PipelineDeps
 from impostarr.plugins.loader import activate_plugin_overlay, ensure_external_plugins, load_plugins
+from impostarr.refsubs import RefSubService
 from impostarr.sonarr import SonarrClient
 from impostarr.worker import WorkerPool
 
@@ -103,6 +109,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     transcriber = _build_transcriber(settings)
     event_bus = EventBus()
 
+    # RefSubService is instance-agnostic (no per-Sonarr-instance state), so
+    # one shared instance + one shared httpx.AsyncClient serves every
+    # instance's PipelineDeps below. cache_dir defaults to a subdirectory
+    # under state_dir when unset in config, so the service actually caches
+    # (and can therefore serve requests) out of the box rather than staying
+    # permanently disabled (RefSubService.get() logs+returns None with no
+    # cache_dir at all — see its docstring); manual_dir staying unset is a
+    # legitimate "no manual overrides configured" state and is left as-is.
+    refsubs_cfg = settings.refsubs
+    if refsubs_cfg.cache_dir is None:
+        refsubs_cfg = refsubs_cfg.model_copy(
+            update={"cache_dir": str(settings.state_dir / "refsubs_cache")}
+        )
+    refsubs_http_client = httpx.AsyncClient()
+    refsub_service = RefSubService(refsubs_cfg, refsubs_http_client)
+
     instances: dict[str, InstanceRuntime] = {}
     deps_per_instance: dict[str, PipelineDeps] = {}
     for instance_cfg in settings.sonarr:
@@ -116,7 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             instance_cfg=instance_cfg,
             plugins=loaded_plugins,
             transcriber=transcriber,
-            refsubs=None,
+            refsubs=refsub_service,
             worker_id=f"pool-{instance_cfg.name}",
             event_bus=event_bus,
         )
@@ -142,12 +164,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await worker_pool.stop()
             for runtime in instances.values():
                 await runtime.client.close()
+            await refsubs_http_client.aclose()
 
     fastapi_app = FastAPI(lifespan=lifespan)
     fastapi_app.state.settings = settings
     fastapi_app.state.session_factory = session_factory
     fastapi_app.state.event_bus = event_bus
     fastapi_app.state.instances = instances
+    fastapi_app.state.deps_per_instance = deps_per_instance
     fastapi_app.state.pool_size = settings.workers.pool_size if deps_per_instance else 0
 
     fastapi_app.add_middleware(AuthMiddleware, settings=settings)

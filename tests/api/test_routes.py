@@ -27,6 +27,7 @@ from impostarr.models import (
     Verdict,
 )
 from impostarr.models import PluginResult as PluginResultRow
+from impostarr.refsubs import RefSubService
 
 API_PREFIX = "/api/v1"
 BASE_URL = "http://sonarr.test:8989"
@@ -180,6 +181,36 @@ def test_create_app_with_empty_sonarr_boots_without_workers(app_no_instance):
     with TestClient(app_no_instance) as client:
         response = client.get(f"{API_PREFIX}/healthz")
     assert response.status_code == 200
+
+
+def test_create_app_wires_shared_refsubservice_into_every_instance_deps(tmp_path, monkeypatch):
+    # Regression: create_app used to pass refsubs=None into every
+    # PipelineDeps, so whisper-subs' ctx.refsubs.get(...) call always
+    # failed (caught internally -> status "error"), permanently dead.
+    # No respx mocking needed: RefSubService/httpx.AsyncClient construction
+    # makes no network calls.
+    monkeypatch.setattr(Discoverer, "poll_once", AsyncMock(return_value=0))
+    settings = Settings(
+        state_dir=tmp_path / "state",
+        sonarr=[
+            SonarrInstance(
+                name="one", url=BASE_URL, api_key=API_KEY, staging_dir=str(tmp_path / "staging1")
+            ),
+            SonarrInstance(
+                name="two", url=BASE_URL, api_key=API_KEY, staging_dir=str(tmp_path / "staging2")
+            ),
+        ],
+        workers=WorkersConfig(pool_size=0),
+    )
+    app = create_app(settings)
+
+    deps_per_instance = app.state.deps_per_instance
+    assert set(deps_per_instance) == {"one", "two"}
+    refsubs_one = deps_per_instance["one"].refsubs
+    refsubs_two = deps_per_instance["two"].refsubs
+    assert refsubs_one is not None
+    assert isinstance(refsubs_one, RefSubService)
+    assert refsubs_one is refsubs_two  # instance-agnostic service, shared
 
 
 def test_static_mount_absent_api_still_up(tmp_path, monkeypatch):

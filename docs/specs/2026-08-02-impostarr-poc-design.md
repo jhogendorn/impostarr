@@ -1,7 +1,7 @@
 # Impostarr — PoC Design
 
 **Date:** 2026-08-02
-**Status:** CONVERGED (buddysystem codex loop, 4 rounds, 2026-08-02) — ready for implementation planning
+**Status:** IMPLEMENTED (PoC complete, 2026-08-02) — see Implementation deviations
 
 ## Purpose
 
@@ -374,8 +374,45 @@ container. Read-and-act only (no config editing):
     (hardlink + manual import); read-only otherwise.
 - Postgres, when used, runs as its own container/service.
 
+## Implementation deviations
+
+Where the implemented PoC differs from this spec's original design,
+consolidated from inline implementation notes elsewhere in this document:
+
+- **whisper-subs plugin**: implemented natively (rapidfuzz-based line
+  comparison) rather than importing mkv-episode-matcher — its dependency
+  chain (librosa → numba 0.53 → llvmlite 0.36) hard-caps at Python <3.10,
+  incompatible with this project's 3.12 pin. See the Plugin contract
+  section's inline note. No TMDB key needed as a result.
+- **subs-llm plugin**: implemented natively (a direct `httpx` call to an
+  OpenAI-compatible chat-completions endpoint) rather than importing
+  tvidentify — tvidentify's LLM call is hardwired to the `openai`/
+  `google-genai` SDKs with no `base_url` override, reads API keys only
+  from env vars, and returns an incompatible confidence schema. See the
+  Plugin contract section's inline note. Its OCR path (PGS/VobSub via
+  tesseract) is correspondingly out of scope; the plugin abstains on image
+  subs.
+- **subs-llm owns its own HTTP client**: self-constructed inside the
+  plugin rather than injected by the plugin loader — the loader's
+  construction protocol (`plugin_cls(config=...)`) has no per-plugin
+  dependency-injection seam in this PoC. (`RefSubService`'s shared
+  `httpx.AsyncClient`, constructed once in `main.py` and threaded through
+  `PipelineDeps.refsubs`, is unaffected — that's a service the pipeline
+  wires directly, not something routed through the plugin loader.)
+- **UI queue tabs**: ships 8 tabs (one per `jobs.status` value: hold,
+  pending, active, matched, quarantine, inconclusive, error, remediated)
+  rather than this spec's 7 (which combined matched/error/remediated under
+  one "history" tab) — no combined-history endpoint was built; each status
+  gets its own queue view instead.
+- **Dupe detection**: frame-hash similarity against the local phash corpus
+  is computed and logged during the pipeline (`pipeline.py`'s dupe check),
+  but not yet surfaced through the HTTP API or UI — see Open questions.
+
 ## Open questions / future work
 
+- Surface dupe-detection results (computed during asset extraction against
+  the local phash corpus, currently log-only) via the HTTP API and UI
+  inspect modal.
 - Threshold defaults need empirical tuning against a real library.
 - Numbering-offset learning (detect systematic scene↔TVDB offsets per series
   and suggest/apply mapping) — future; PoC only avoids the failure mode by
