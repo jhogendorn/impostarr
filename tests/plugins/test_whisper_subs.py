@@ -260,7 +260,16 @@ async def test_abstain_when_zero_episodes_have_reference_subs(tmp_path):
     assert result.reason == "no reference subtitles"
 
 
-async def test_claimed_without_subs_but_others_compared(tmp_path):
+# NOTE: this used to assert status="ok" with a fabricated confidence=0.0
+# candidate for the claimed episode (evidence note "no reference subs for
+# claimed"). Production data (job 14, American Dad S05E07) showed this
+# exact shape poisoning aggregate scoring: a 0.0 the plugin never actually
+# measured read downstream as "certain non-match" and dragged s_claimed
+# into quarantine even though other plugins agreed on a high-confidence
+# match. Fixed to abstain instead -- see plugin.py's "Evidence integrity"
+# docstring section. Updated (not deleted) per instruction to document the
+# change rather than silently drop the regression coverage.
+async def test_claimed_without_subs_but_others_compared_abstains(tmp_path):
     e16_path = tmp_path / "S01E16.srt"
     e18_path = tmp_path / "S01E18.srt"
     write_srt(e16_path, ["some content here", "more lines follow"])
@@ -277,11 +286,39 @@ async def test_claimed_without_subs_but_others_compared(tmp_path):
     plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=2))
     result = await plugin.identify(claimed, assets, ctx)
 
+    assert result.status == "abstain"
+    assert result.reason == "no reference subtitles for the claimed episode"
+    assert result.candidates == []
+
+
+async def test_claimed_refsub_present_but_scores_zero_stays_ok(tmp_path, monkeypatch):
+    """Claimed episode's refsub IS available (measured), but comparison
+    legitimately yields 0.0 (garbage/unmatchable reference content) -- this
+    is a real measurement, not an abstention, and must be reported as-is.
+    `_match_ratio` is forced to 0.0 rather than relied on to land there
+    naturally, since fuzzy string matching can return small nonzero ratios
+    even for unrelated content -- this test is about the plugin's handling
+    of a genuine zero score, not about crafting adversarial fuzz input."""
+    e17_path = tmp_path / "S01E17.srt"
+    write_srt(e17_path, ["asdf qwer zxcv poiu", "lkjh mnbv trew yuio"])
+    transcript = make_transcript(["completely different actual dialogue here"])
+
+    episodes = [make_episode(1, 17)]
+    refsubs = StubRefSubs({(1, 17): e17_path})
+    ctx = make_ctx(make_series(), episodes, refsubs)
+    claimed = make_claimed(season=1, episodes=[17])
+    assets = AssetBundle(transcript=transcript)
+
+    monkeypatch.setattr(whisper_subs, "_match_ratio", lambda segments, srt_lines: (0.0, len(srt_lines)))
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=1, min_compared=1))
+    result = await plugin.identify(claimed, assets, ctx)
+
     assert result.status == "ok"
     by_ep = {c.ident.episodes[0]: c for c in result.candidates}
-    assert set(by_ep) == {16, 17, 18}
     assert by_ep[17].confidence == 0.0
-    assert "no reference subs for claimed" in by_ep[17].evidence.get("note", "")
+    assert by_ep[17].evidence["refsub_path"] == str(e17_path)
+    assert "note" not in by_ep[17].evidence
 
 
 async def test_library_exception_path_returns_error(tmp_path, monkeypatch):
