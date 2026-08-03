@@ -31,7 +31,14 @@ vi.mock('../api/client', async (importOriginal) => {
 
 /** Renders ActionBar with the same derived candidates/allEpisodes/default
  * selection InspectModal computes, plus a controllable selection so tests
- * can drive the two-step Apply Remap flow (item 1). */
+ * can drive the two-step Apply Remap flow (item 1).
+ *
+ * `hoverKey`/`setHoverKey` (item 2) are lifted to InspectModal in the real
+ * app — ActionBar itself only ever calls `setHoverKey`, never reads the
+ * current value, so a plain spy backed by a local variable is enough here
+ * to assert which key gets reported on hover/focus; the actual explanation
+ * TEXT this drives is the Proposed Action banner's concern, covered in
+ * InspectModal.test.tsx where both components are mounted together. */
 function renderActionBar(
   job: JobDetail,
   { onChanged = vi.fn(), initialSelection }: { onChanged?: () => void; initialSelection?: number } = {},
@@ -43,6 +50,10 @@ function renderActionBar(
   const onSelectEpisode = vi.fn((id: number) => {
     selected = id
   })
+  let hoverKey: string | null = null
+  const setHoverKey = vi.fn((update: string | null | ((current: string | null) => string | null)) => {
+    hoverKey = typeof update === 'function' ? update(hoverKey) : update
+  })
   const utils = render(
     <ActionBar
       job={job}
@@ -51,9 +62,11 @@ function renderActionBar(
       onSelectEpisode={onSelectEpisode}
       candidates={candidates}
       allEpisodes={allEpisodes}
+      hoverKey={null}
+      setHoverKey={setHoverKey}
     />,
   )
-  return { ...utils, onSelectEpisode, getSelected: () => selected }
+  return { ...utils, onSelectEpisode, getSelected: () => selected, getHoverKey: () => hoverKey }
 }
 
 describe('ActionBar', () => {
@@ -161,7 +174,18 @@ describe('ActionBar', () => {
   })
 
   it('Dismiss only renders when a proposal exists', () => {
-    const { rerender } = render(<ActionBar job={jobDetailFixture} onChanged={vi.fn()} selectedEpisodeId={100} onSelectEpisode={vi.fn()} candidates={[]} allEpisodes={[]} />)
+    const { rerender } = render(
+      <ActionBar
+        job={jobDetailFixture}
+        onChanged={vi.fn()}
+        selectedEpisodeId={100}
+        onSelectEpisode={vi.fn()}
+        candidates={[]}
+        allEpisodes={[]}
+        hoverKey={null}
+        setHoverKey={vi.fn()}
+      />,
+    )
     expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
 
     rerender(
@@ -172,6 +196,8 @@ describe('ActionBar', () => {
         onSelectEpisode={vi.fn()}
         candidates={[]}
         allEpisodes={[]}
+        hoverKey={null}
+        setHoverKey={vi.fn()}
       />,
     )
     expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument()
@@ -233,29 +259,18 @@ describe('ActionBar', () => {
     expect(screen.getByRole('button', { name: 'Reidentify' })).toHaveClass('border-slate-700')
   })
 
-  it('a permanently-allocated explanation block (not an overlay) defaults to the current proposal\'s explanation and swaps on hover', async () => {
+  it('reports the hovered/focused button\'s key via setHoverKey, clearing it back to null on unhover/blur (item 2 — the explanation text itself now lives in the Proposed Action banner, see InspectModal.test.tsx)', async () => {
     const user = userEvent.setup()
-    renderActionBar(jobDetailFixture) // has a remap proposal
-
-    // Default content is populated (the current proposal's explanation) —
-    // not empty, and not absolutely positioned (permanent flow space, item 6).
-    const explanation = screen.getByText(/Re-links this file to the selected episode/)
-    expect(explanation.tagName).toBe('P')
-    expect(explanation).not.toHaveClass('absolute')
+    const { getHoverKey } = renderActionBar(jobDetailFixture) // has a remap proposal
+    expect(getHoverKey()).toBeNull()
 
     await user.hover(screen.getByRole('button', { name: 'Mark Correct' }))
-    expect(screen.getByText(/Confirms this file is the labelled episode/)).toBeInTheDocument()
+    expect(getHoverKey()).toBe('markCorrect')
+
+    await user.unhover(screen.getByRole('button', { name: 'Mark Correct' }))
+    expect(getHoverKey()).toBeNull()
 
     await user.hover(screen.getByRole('button', { name: 'Trash and Regrab' }))
-    expect(screen.getByText(/Removes this file/)).toBeInTheDocument()
-    expect(screen.queryByText(/Confirms this file is the labelled episode/)).not.toBeInTheDocument()
-
-    await user.unhover(screen.getByRole('button', { name: 'Trash and Regrab' }))
-    expect(screen.getByText(/Re-links this file to the selected episode/)).toBeInTheDocument()
-  })
-
-  it('defaults the explanation to "No proposed action" copy when there is no proposal', () => {
-    renderActionBar({ ...jobDetailFixture, verdict: { ...jobDetailFixture.verdict!, proposed_action: null } })
-    expect(screen.getByText(/Nothing is proposed for this file/)).toBeInTheDocument()
+    expect(getHoverKey()).toBe('trashRegrab')
   })
 })

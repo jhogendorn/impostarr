@@ -388,6 +388,34 @@ export function proposalTone(detail: JobDetail): 'remap' | 'replace' | null {
   return null
 }
 
+// -- action explanations (item 2: rendered in the Proposed Action banner's
+// second line, not in ActionBar itself) -------------------------------------
+
+export const EXPLAINERS: Record<string, string> = {
+  markCorrect: 'Confirms this file is the labelled episode. Moves it to Matched.',
+  applyRemap: 'Re-links this file to the selected episode in Sonarr. Moves it to Remediated.',
+  trashRegrab:
+    'Removes this file (a copy is kept in Trash) and asks Sonarr for a replacement. Moves it to Remediated.',
+  dismiss: 'Clears the suggested fix. The file stays in Quarantine.',
+  ignoreMismatch: 'Stops flagging this file without confirming it. Moves it to Inconclusive.',
+  reidentify: 'Runs identification again. The file returns to Pending.',
+  park: 'Holds this file so no worker picks it up.',
+  unpark: 'Releases this file back to Pending.',
+}
+
+export const NO_PROPOSAL_EXPLANATION = 'Nothing is proposed for this file. Hover an action to see what it does.'
+
+/** The Proposed Action banner's default second-line text — the CURRENT
+ * proposed action's explainer, always populated. Swapped for
+ * `EXPLAINERS[hoverKey]` while a Action Bar button is hovered/focused
+ * (hoverKey state lifted to InspectModal, shared by both). */
+export function defaultExplanation(detail: JobDetail): string {
+  const tone = proposalTone(detail)
+  if (tone === 'remap') return EXPLAINERS.applyRemap
+  if (tone === 'replace') return EXPLAINERS.trashRegrab
+  return NO_PROPOSAL_EXPLANATION
+}
+
 /** Resolves proposed-action target episode ids to a linked "S05E03" (via
  * `job.episode_labels`, which carries each id's tvdb_id — see
  * `EpisodeRef`). Falls back to plain-language "episode(s) 684" only if the

@@ -99,8 +99,55 @@ describe('InspectModal (v4)', () => {
     getJobMock.mockResolvedValue({ ...jobDetailFixture, verdict: { ...jobDetailFixture.verdict!, proposed_action: { kind: 'replace' } } })
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    const banner = (await screen.findByText(/Replace —/)).closest('div')!.parentElement!
+    // Item 2/3 restructure: the description sits two levels below the
+    // tone-classed outer banner element now (description row, then the
+    // banner itself, which also holds the second explanation line).
+    const banner = (await screen.findByText(/Replace —/)).closest('div')!.parentElement!.parentElement!
     expect(banner).toHaveClass('bg-red-500/10')
+  })
+
+  // -- item 2/3: explanation lives in the banner's second line, one shared section --
+
+  it('the banner\'s second line defaults to the current proposal\'s explanation and swaps to the hovered action bar button\'s explainer, left-aligned under the main line', async () => {
+    const user = userEvent.setup()
+    getJobMock.mockResolvedValue(jobDetailFixture) // has a remap proposal
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    await screen.findByRole('combobox', { name: 'Apply Remap' })
+
+    // Default content is populated (the current proposal's explanation) —
+    // a real flow-space line under the banner's main line, not an overlay.
+    const explanation = screen.getByText(/Re-links this file to the selected episode/)
+    expect(explanation.tagName).toBe('P')
+    expect(explanation).toHaveClass('text-left')
+    expect(explanation).not.toHaveClass('absolute')
+
+    await user.hover(screen.getByRole('button', { name: 'Mark Correct' }))
+    expect(screen.getByText(/Confirms this file is the labelled episode/)).toBeInTheDocument()
+
+    await user.hover(screen.getByRole('button', { name: 'Trash and Regrab' }))
+    expect(screen.getByText(/Removes this file/)).toBeInTheDocument()
+    expect(screen.queryByText(/Confirms this file is the labelled episode/)).not.toBeInTheDocument()
+
+    await user.unhover(screen.getByRole('button', { name: 'Trash and Regrab' }))
+    expect(screen.getByText(/Re-links this file to the selected episode/)).toBeInTheDocument()
+  })
+
+  it('defaults the banner\'s second line to "Nothing is proposed" copy when there is no proposal', async () => {
+    getJobMock.mockResolvedValue({ ...jobDetailFixture, verdict: { ...jobDetailFixture.verdict!, proposed_action: null } })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    expect(await screen.findByText(/Nothing is proposed for this file/)).toBeInTheDocument()
+  })
+
+  it('the Proposed Action banner and the action bar sit in one bordered/glow section (item 3)', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const applyRemapButton = await screen.findByRole('button', { name: 'Apply Remap' })
+    const description = screen.getByText((_, el) => el?.tagName === 'SPAN' && el.textContent === 'Remap to S01E01')
+    const section = applyRemapButton.closest('.glow-panel')!
+    expect(section).toContainElement(description)
   })
 
   // -- rename sweep: Reidentify, never "Rerun" -----------------------------

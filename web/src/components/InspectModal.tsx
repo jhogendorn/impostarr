@@ -54,6 +54,10 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
   // manual pick doesn't leak across jobs; otherwise falls back to
   // `defaultPreviewEpisodeId` (items 13 + 16) recomputed fresh each render.
   const [manualSelection, setManualSelection] = useState<{ jobId: number; episodeId: number } | null>(null)
+  // Which action's explainer the Proposed Action banner's second line shows
+  // (item 2) — lifted here since ActionBar (whose buttons set it on
+  // hover/focus) and ProposedActionBanner (which reads it) are siblings.
+  const [hoverKey, setHoverKey] = useState<string | null>(null)
 
   const labelledIds = useMemo(() => new Set(detail?.file.episode_ids ?? []), [detail])
   const candidates = useMemo(() => (detail ? collectAlternates(detail, labelledIds) : []), [detail, labelledIds])
@@ -120,23 +124,26 @@ function InspectModal({ jobId, open, onClose, onChanged }: InspectModalProps) {
             >
               ✕
             </button>
-            {/* pr-10 clears the absolutely-positioned close button — kept
-             * on the banner alone (not the whole header) so ActionBar's
-             * own row keeps the DialogPanel's full content width, which
-             * ComparisonSection's grid below also uses unmodified: that's
-             * what makes ActionBar's Apply Remap group pixel-match the
-             * RHS panel's width (item 2/10) — see lib/layout.ts. */}
-            <div className="pr-10">{detail && <ProposedActionBanner job={detail} />}</div>
-            {detail && selectedEpisodeId !== null && (
-              <ActionBar
-                job={detail}
-                onChanged={handleChanged}
-                selectedEpisodeId={selectedEpisodeId}
-                onSelectEpisode={onSelectEpisode}
-                candidates={candidates}
-                allEpisodes={allEpisodes}
-              />
-            )}
+            {/* Sections A (banner) + B (action bar) now share one
+             * bordered/glow section (item 3) instead of two separate
+             * blocks. pr-10 clears the absolutely-positioned close button
+             * — kept on the banner's own line only (not the whole section)
+             * so ActionBar's row keeps its full width. */}
+            <div className="glow-panel rounded-lg p-4">
+              <div className="pr-10">{detail && <ProposedActionBanner job={detail} hoverKey={hoverKey} />}</div>
+              {detail && selectedEpisodeId !== null && (
+                <ActionBar
+                  job={detail}
+                  onChanged={handleChanged}
+                  selectedEpisodeId={selectedEpisodeId}
+                  onSelectEpisode={onSelectEpisode}
+                  candidates={candidates}
+                  allEpisodes={allEpisodes}
+                  hoverKey={hoverKey}
+                  setHoverKey={setHoverKey}
+                />
+              )}
+            </div>
           </div>
 
           {loading && <p className="mt-4 text-sm text-slate-400">Loading…</p>}

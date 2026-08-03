@@ -20,13 +20,16 @@ import RhsPanel from './RhsPanel'
  * 4, directly below Framegrabs) rather than spanning above both columns.
  *
  * LHS and RHS are each a single CSS-grid child using `grid-template-rows:
- * subgrid` against this component's own 3 explicit row tracks (header,
- * ident, content — the links row folds into ident as inline title chips,
- * item 14) — that's what keeps header/ident/content row-aligned between
- * the two columns. The confidence badge sits in a zero-width middle grid
- * column (the visual seam between the two boxes) and is itself
- * `position: absolute` within it — out of flow, centered exactly on the
- * boundary, row-placed to line up with the ident row.
+ * subgrid` against this component's own 4 explicit row tracks (header,
+ * ident, media, text — the links row folds into header as top-right DB
+ * chips, item 5/v5) — that's what keeps header/ident/media/text
+ * row-aligned between the two columns: RHS's "Reference Subtitles" panel
+ * (row 4) lines up with LHS's Embedded Subtitles/Transcript row, not with
+ * Framegrabs (row 3), since RHS renders nothing into row 3 and subgrid
+ * still gives it that row's real height. The confidence badge sits in a
+ * zero-width middle grid column (the visual seam between the two boxes)
+ * and is itself `position: absolute` within it — out of flow, centered
+ * exactly on the boundary, row-placed to line up with the ident row.
  *
  * `selectedEpisodeId`/`candidates` are owned by InspectModal (shared with
  * ActionBar's Apply Remap combobox, item 1) — this component only reads
@@ -81,8 +84,8 @@ function ComparisonSection({
     : []
 
   return (
-    <section className={`relative ${TWO_COLUMN_GRID_CLASS} grid-rows-[auto_auto_auto] gap-y-3`}>
-      <div className="glow-panel row-span-3 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 3' }}>
+    <section className={`relative ${TWO_COLUMN_GRID_CLASS} grid-rows-[auto_auto_auto_auto] gap-y-3`}>
+      <div className="glow-panel row-span-4 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 4' }}>
         <LhsPanel
           instanceName={detail.instance}
           episodeIds={detail.file.episode_ids}
@@ -103,7 +106,7 @@ function ComparisonSection({
         <ConfidenceBadge confidence={confidence} />
       </div>
 
-      <div className="glow-panel row-span-3 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 3' }}>
+      <div className="glow-panel row-span-4 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 4' }}>
         <RhsPanel detail={detail} selectedEpisodeId={selectedEpisodeId} referenceSources={referenceSources} scrubTimeS={scrubTimeS} />
       </div>
     </section>

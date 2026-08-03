@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { parkJob, rerunJob, unparkJob } from '../api/client'
 import type { InstanceSummary, JobStatus, JobSummary, QueuePage, QueueSortField, SortDir } from '../api/types'
-import { capitalize, formatPercent, pathBasename, relativeTime, scoreBandClass } from '../lib/format'
+import { formatPercent, pathBasename, relativeTime, scoreBandClass } from '../lib/format'
 import { REIDENTIFY_STATUSES } from './ActionBar'
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200] as const
@@ -293,7 +293,7 @@ function QueueTable({
             <th className="px-3 py-1" colSpan={2}>
               Labelled episode
             </th>
-            <th className="px-3 py-1" colSpan={6} />
+            <th className="px-3 py-1" colSpan={5} />
           </tr>
           <tr className="text-xs uppercase tracking-wide text-slate-500">
             <th className="px-3 py-2">
@@ -312,7 +312,6 @@ function QueueTable({
             <SortableTh field="file" label="File" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <SortableTh field="instance" label="Instance" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <SortableTh field="confidence" label="Confidence" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
-            <SortableTh field="outcome" label="Outcome" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <SortableTh field="updated_at" label="Updated" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <th className="px-3 py-2">Actions</th>
           </tr>
@@ -365,7 +364,6 @@ function QueueTable({
                     {formatPercent(score)}
                   </span>
                 </td>
-                <td className="px-3 py-2 text-slate-400">{capitalize(job.status)}</td>
                 <td className="px-3 py-2 text-slate-500">{relativeTime(job.updated_at)}</td>
                 <td className="rounded-r-lg px-3 py-2">
                   <RowActions job={job} onChanged={onChanged} />

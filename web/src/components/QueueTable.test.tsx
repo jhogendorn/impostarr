@@ -305,18 +305,17 @@ describe('QueueTable', () => {
     expect(screen.getByRole('button', { name: /^File/ })).toHaveTextContent('⇅')
     expect(screen.getByRole('button', { name: /Instance/ })).toHaveTextContent('⇅')
     expect(screen.getByRole('button', { name: /Confidence/ })).toHaveTextContent('⇅')
-    expect(screen.getByRole('button', { name: /Outcome/ })).toHaveTextContent('⇅')
   })
 
-  it('item 18: EVERY meaningful column is sortable (Series, Episode(s), File, Instance, Confidence, Outcome, Updated)', () => {
+  it('item 18: EVERY meaningful column is sortable (Series, Episode(s), File, Instance, Confidence, Updated)', () => {
     render(<QueueTable page={queuePageFixture} {...defaultProps} />)
 
-    for (const name of [/^Series/, /^Episode/, /^File/, /^Instance/, /^Confidence/, /^Outcome/, /^Updated/]) {
+    for (const name of [/^Series/, /^Episode/, /^File/, /^Instance/, /^Confidence/, /^Updated/]) {
       expect(screen.getByRole('button', { name })).toBeInTheDocument()
     }
   })
 
-  it('item 18: the whole header cell is the click target (cursor-pointer, aria-sort) — clicking Episode(s)/File/Outcome (previously non-sortable) fires the right sort request', async () => {
+  it('item 18: the whole header cell is the click target (cursor-pointer, aria-sort) — clicking Episode(s)/File (previously non-sortable) fires the right sort request', async () => {
     const user = userEvent.setup()
     const onSortChange = vi.fn()
     render(<QueueTable page={queuePageFixture} {...defaultProps} sortField="updated_at" sortDir="desc" onSortChange={onSortChange} />)
@@ -330,9 +329,13 @@ describe('QueueTable', () => {
 
     await user.click(screen.getByRole('button', { name: /^File/ }))
     expect(onSortChange).toHaveBeenCalledWith('file', 'desc')
+  })
 
-    await user.click(screen.getByRole('button', { name: /Outcome/ }))
-    expect(onSortChange).toHaveBeenCalledWith('outcome', 'desc')
+  it('item 8 (v5): no Outcome column — redundant with the tab already being viewed', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    expect(screen.queryByRole('button', { name: /Outcome/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: /Outcome/ })).not.toBeInTheDocument()
   })
 
   it('item 18: the active column\'s header carries aria-sort and an accent-coloured arrow', () => {
