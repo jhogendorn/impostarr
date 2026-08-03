@@ -51,3 +51,15 @@ Per-file language profiles, preferred-track policies (e.g. `ja+en` over
 correct-episode-wrong-language flagging, alt-track fallback on low
 confidence, dupe taxonomy with language sets (true dupe / language variant /
 misplacement).
+
+## Distribution: prebuilt everything
+
+Decision (2026-08-03): users are never expected to build infrastructure —
+"ready out of the box, no assembly." Plugins distribute as prebuilt wheels
+(pip specs resolve to binaries), not source builds and not per-plugin
+containers. Implies CI publishes wheels for anything that would otherwise
+need compilation — notably a Vulkan-enabled pywhispercpp wheel so Intel/AMD
+iGPU transcription acceleration is an install-time choice, not a
+compile-your-own exercise. An OpenVINO transcriber backend is the other
+candidate for Intel acceleration; both slot in via the existing
+`impostarr.transcribers` entry-point group.
