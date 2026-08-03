@@ -22,11 +22,17 @@ from typing import Any
 
 import httpx
 
+from . import __version__
 from .config import RefSubsConfig
 
 logger = logging.getLogger(__name__)
 
 OPENSUBTITLES_BASE_URL = "https://api.opensubtitles.com/api/v1"
+
+# OpenSubtitles' gateway (kong) 403s requests with no identifying
+# User-Agent (`kong-user-agent-block`) -- sent on every request, including
+# the off-API CDN link fetch.
+USER_AGENT = f"Impostarr/{__version__} (github.com/jhogendorn/impostarr)"
 
 
 class RefSubService:
@@ -47,6 +53,11 @@ class RefSubService:
         # either increments (the check-then-network-then-increment window
         # otherwise spans several awaits).
         self._quota_lock = asyncio.Lock()
+        # Single-flights login acquisition: whisper-subs gathers up to ~7
+        # get() calls concurrently, each of which would otherwise see
+        # `_token is None` and independently POST /login, tripping
+        # OpenSubtitles' 1 req/sec per IP login rate limit.
+        self._login_lock = asyncio.Lock()
 
     async def get(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> Path | None:
         tvdb_id = series_ext_ids.get("tvdb")
@@ -138,36 +149,59 @@ class RefSubService:
     # -- OpenSubtitles API ----------------------------------------------
 
     def _headers(self) -> dict[str, str]:
-        headers = {"Api-Key": self.cfg.api_key or ""}
+        headers = {"Api-Key": self.cfg.api_key or "", "User-Agent": USER_AGENT}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
     async def _login(self) -> str | None:
-        try:
-            response = await self.http.post(
-                f"{OPENSUBTITLES_BASE_URL}/login",
-                json={"username": self.cfg.username, "password": self.cfg.password},
-                headers={"Api-Key": self.cfg.api_key or ""},
-            )
-        except httpx.HTTPError:
-            logger.exception("opensubtitles login request failed")
-            return None
-        if response.status_code >= 400:
-            logger.warning(
-                "opensubtitles login failed: %s %s", response.status_code, response.text
-            )
-            return None
-        token = response.json().get("token")
-        self._token = token
-        return token
+        """POST /login, retrying once (after a >=1.1s backoff) on a 429
+        (`Login rate limit exceeded: 1 req/sec per IP`). Gives up cleanly
+        (returns None) if the retry also 429s."""
+        for attempt in range(2):
+            try:
+                response = await self.http.post(
+                    f"{OPENSUBTITLES_BASE_URL}/login",
+                    json={"username": self.cfg.username, "password": self.cfg.password},
+                    headers={"Api-Key": self.cfg.api_key or "", "User-Agent": USER_AGENT},
+                )
+            except httpx.HTTPError:
+                logger.exception("opensubtitles login request failed")
+                return None
+            if response.status_code == 429:
+                if attempt == 0:
+                    logger.warning("opensubtitles login rate-limited, backing off and retrying once")
+                    await asyncio.sleep(1.1)
+                    continue
+                logger.warning("opensubtitles login rate-limited on retry, giving up")
+                return None
+            if response.status_code >= 400:
+                logger.warning(
+                    "opensubtitles login failed: %s %s", response.status_code, response.text
+                )
+                return None
+            token = response.json().get("token")
+            self._token = token
+            return token
+        return None
+
+    async def _ensure_login(self) -> bool:
+        """Single-flights login acquisition: concurrent callers wait on the
+        same lock and re-check `_token` after acquiring it, so only one of
+        them actually performs the login."""
+        if self._token is not None:
+            return True
+        async with self._login_lock:
+            if self._token is not None:
+                return True
+            return await self._login() is not None
 
     async def _authed_request(
         self, method: str, url: str, **kwargs: Any
     ) -> httpx.Response | None:
         """Issue an authenticated request, logging in first if needed and
         retrying once (with a fresh login) on a 401."""
-        if self._token is None and await self._login() is None:
+        if not await self._ensure_login():
             return None
 
         try:
@@ -238,7 +272,7 @@ class RefSubService:
 
     async def _save(self, link: str, cache_path: Path) -> Path | None:
         try:
-            response = await self.http.get(link)
+            response = await self.http.get(link, headers={"User-Agent": USER_AGENT})
         except httpx.HTTPError:
             logger.exception("failed to fetch reference subtitle link: %s", link)
             return None

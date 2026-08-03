@@ -6,10 +6,12 @@ from pathlib import Path
 import httpx
 import respx
 
+from impostarr import __version__
 from impostarr.config import RefSubsConfig
 from impostarr.refsubs import RefSubService
 
 BASE_URL = "https://api.opensubtitles.com/api/v1"
+EXPECTED_USER_AGENT = f"Impostarr/{__version__} (github.com/jhogendorn/impostarr)"
 
 
 def make_cfg(tmp_path: Path, **overrides) -> RefSubsConfig:
@@ -297,3 +299,147 @@ async def test_concurrent_get_calls_respect_quota_reservation(tmp_path):
 
     quota_data = json.loads(quota_path.read_text())
     assert quota_data["count"] == cfg.daily_quota
+
+
+@respx.mock
+async def test_user_agent_header_sent_on_every_opensubtitles_request(tmp_path):
+    # OpenSubtitles' gateway (kong) 403s requests with no identifying
+    # User-Agent (`kong-user-agent-block`) -- every request, including the
+    # off-API CDN link fetch, must carry it.
+    cfg = make_cfg(tmp_path)
+    login_route = respx.post(f"{BASE_URL}/login").mock(
+        return_value=httpx.Response(200, json={"token": "jwt"})
+    )
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"attributes": {"download_count": 5, "language": "en", "files": [{"file_id": 1}]}}
+                ]
+            },
+        )
+    )
+    download_route = respx.post(f"{BASE_URL}/download").mock(
+        return_value=httpx.Response(200, json={"link": "https://dl.opensubtitles.com/sub/1.srt"})
+    )
+    file_route = respx.get("https://dl.opensubtitles.com/sub/1.srt").mock(
+        return_value=httpx.Response(200, text="content")
+    )
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is not None
+    assert login_route.calls.last.request.headers["User-Agent"] == EXPECTED_USER_AGENT
+    assert search_route.calls.last.request.headers["User-Agent"] == EXPECTED_USER_AGENT
+    assert download_route.calls.last.request.headers["User-Agent"] == EXPECTED_USER_AGENT
+    assert file_route.calls.last.request.headers["User-Agent"] == EXPECTED_USER_AGENT
+
+
+# -- login single-flight / 429 backoff ----------------------------------
+
+
+@respx.mock
+async def test_concurrent_get_calls_share_a_single_login(tmp_path):
+    # whisper-subs gathers up to ~7 refsubs.get() concurrently. Before the
+    # fix, each independently saw `_token is None` and POSTed /login,
+    # triggering OpenSubtitles' "1 req/sec per IP" login rate limit.
+    cfg = make_cfg(tmp_path, daily_quota=20)
+
+    async def _slow_login(request: httpx.Request) -> httpx.Response:
+        # A real suspend point, so all 7 concurrent get() calls reach the
+        # "_token is None" check before any single login completes --
+        # otherwise the mock resolves too fast to ever exercise the race.
+        await asyncio.sleep(0.01)
+        return httpx.Response(200, json={"token": "jwt"})
+
+    login_route = respx.post(f"{BASE_URL}/login").mock(side_effect=_slow_login)
+    respx.get(f"{BASE_URL}/subtitles").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"attributes": {"download_count": 5, "language": "en", "files": [{"file_id": 1}]}}
+                ]
+            },
+        )
+    )
+    respx.post(f"{BASE_URL}/download").mock(
+        return_value=httpx.Response(200, json={"link": "https://dl.opensubtitles.com/sub/1.srt"})
+    )
+    respx.get("https://dl.opensubtitles.com/sub/1.srt").mock(
+        return_value=httpx.Response(200, text="content")
+    )
+
+    service = await make_service(cfg)
+    results = await asyncio.gather(
+        *(service.get({"tvdb": 123456}, season=1, episode=ep) for ep in range(1, 8))
+    )
+
+    assert all(r is not None for r in results)
+    assert login_route.call_count == 1
+
+
+async def _no_sleep(*args, **kwargs) -> None:
+    return None
+
+
+@respx.mock
+async def test_login_429_backs_off_and_retries_once_then_succeeds(tmp_path, monkeypatch):
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    cfg = make_cfg(tmp_path)
+    login_route = respx.post(f"{BASE_URL}/login").mock(
+        side_effect=[
+            httpx.Response(429, json={"message": "Login rate limit exceeded: 1 req/sec per IP"}),
+            httpx.Response(200, json={"token": "jwt"}),
+        ]
+    )
+    respx.get(f"{BASE_URL}/subtitles").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"attributes": {"download_count": 5, "language": "en", "files": [{"file_id": 1}]}}
+                ]
+            },
+        )
+    )
+    respx.post(f"{BASE_URL}/download").mock(
+        return_value=httpx.Response(200, json={"link": "https://dl.opensubtitles.com/sub/1.srt"})
+    )
+    respx.get("https://dl.opensubtitles.com/sub/1.srt").mock(
+        return_value=httpx.Response(200, text="content")
+    )
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is not None
+    assert login_route.call_count == 2
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] >= 1.1
+
+
+@respx.mock
+async def test_login_429_twice_gives_up_cleanly(tmp_path, monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    cfg = make_cfg(tmp_path)
+    login_route = respx.post(f"{BASE_URL}/login").mock(
+        return_value=httpx.Response(429, json={"message": "Login rate limit exceeded"})
+    )
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is None
+    assert login_route.call_count == 2
+    assert search_route.call_count == 0

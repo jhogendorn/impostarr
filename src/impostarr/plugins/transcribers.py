@@ -45,7 +45,10 @@ TranscriberFactory = Callable[[WorkersConfig, Path], Transcriber]
 
 def faster_whisper_factory(workers: WorkersConfig, models_dir: Path) -> Transcriber:
     return FasterWhisperTranscriber(
-        model_name=workers.whisper_model, device=workers.whisper_device, models_dir=models_dir
+        model_name=workers.whisper_model,
+        device=workers.whisper_device,
+        models_dir=models_dir,
+        options=workers.transcriber_options,
     )
 
 
