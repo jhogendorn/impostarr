@@ -17,7 +17,14 @@ Plugin caching: `plugin_results` rows are looked up by `(job_id,
 plugin_name, input_fingerprint)`; the fingerprint folds in plugin
 name+version, plugin config, the asset fingerprints the plugin could see,
 the claimed ident, and a digest of the series context, so any of those
-changing invalidates the cache and re-runs `identify()`.
+changing invalidates the cache and re-runs `identify()`. Only a cached
+`status="ok"` row is reused, though: "abstain"/"error" are environmental
+or transient (missing reference subtitle, provider outage, a transient
+exception, ...), not a verdict about the input itself, so replaying them
+would permanently freeze a job as inconclusive/errored even once the
+underlying environment is fixed. Rows are inserted one per execution
+(append-style, no upsert) rather than updated in place, so a job's
+`plugin_results` history shows every attempt.
 
 Dupe detection (spec: "Dupe check"): frame-hash similarity against other
 files' stored `frame_hashes` is computed and logged (`log.warning`) for
@@ -450,12 +457,28 @@ async def _run_plugin_stage(
     outcomes: list[PluginOutcome] = []
     for loaded in deps.plugins:
         fp = _plugin_fingerprint(loaded, asset_fingerprints, claimed, ctx)
+        # Only an "ok" result is legitimately cacheable: it means the
+        # plugin actually evaluated the evidence and reached a verdict for
+        # this exact input. "abstain"/"error" are environmental/transient
+        # (missing reference subtitle, a provider outage, a transient
+        # exception, ...) -- reusing them would permanently freeze a job
+        # as inconclusive/errored even after the underlying environment is
+        # fixed, since the input fingerprint itself never changes. Rows are
+        # inserted one per execution (no upsert, see PluginResult's lack of
+        # a unique constraint on this triple), so filtering the lookup to
+        # status="ok" both skips stale non-ok rows AND keeps the query safe
+        # as abstain/error rows accumulate across re-runs (LIMIT 1 orders
+        # by most recent so scalar_one_or_none() never sees >1 row).
         cached_row = session.execute(
-            select(PluginResultRow).where(
+            select(PluginResultRow)
+            .where(
                 PluginResultRow.job_id == job.id,
                 PluginResultRow.plugin_name == loaded.plugin.name,
                 PluginResultRow.input_fingerprint == fp,
+                PluginResultRow.status == "ok",
             )
+            .order_by(PluginResultRow.created_at.desc())
+            .limit(1)
         ).scalar_one_or_none()
 
         if cached_row is not None:

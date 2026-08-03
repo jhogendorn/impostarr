@@ -347,6 +347,58 @@ def abstain() -> Callable[..., PluginResult]:
     return _fn
 
 
+def abstain_then_ok(confidence: float) -> Callable[..., PluginResult]:
+    """Abstains on the first call, matches on every call after -- simulates
+    an environmental fix (e.g. refsubs reachability) landing between runs."""
+    state = {"calls": 0}
+
+    def _fn(claimed: ClaimedIdent, assets: AssetBundle, ctx: SeriesContext) -> PluginResult:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return PluginResult(status="abstain", reason="no evidence")
+        return PluginResult(
+            status="ok",
+            candidates=[
+                Candidate(
+                    confidence=confidence,
+                    ident=CandidateIdent(
+                        series="claimed", season=claimed.season, episodes=claimed.episodes
+                    ),
+                    numbering="tvdb",
+                    evidence={},
+                )
+            ],
+        )
+
+    return _fn
+
+
+def raise_then_ok(confidence: float) -> Callable[..., PluginResult]:
+    """Raises on the first call (the pipeline turns that into a status="error"
+    row), matches on every call after."""
+    state = {"calls": 0}
+
+    def _fn(claimed: ClaimedIdent, assets: AssetBundle, ctx: SeriesContext) -> PluginResult:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise RuntimeError("transient plugin failure")
+        return PluginResult(
+            status="ok",
+            candidates=[
+                Candidate(
+                    confidence=confidence,
+                    ident=CandidateIdent(
+                        series="claimed", season=claimed.season, episodes=claimed.episodes
+                    ),
+                    numbering="tvdb",
+                    evidence={},
+                )
+            ],
+        )
+
+    return _fn
+
+
 def loaded(plugin: ConfigurablePlugin, weight: float = 1.0) -> LoadedPlugin:
     return LoadedPlugin(plugin=plugin, weight=weight, config=None)
 
@@ -576,6 +628,59 @@ async def test_plugin_results_cached_across_runs(tmp_path, session_factory):
             select(PluginResultRow).where(PluginResultRow.job_id == job_id)
         ).scalars().all()
         assert len(rows) == 1
+
+
+@respx.mock
+async def test_cached_abstain_is_not_reused_plugin_reexecutes(tmp_path, session_factory):
+    # Abstain/error are environmental/transient verdicts, not legitimately
+    # cacheable -- re-running an inconclusive job after e.g. a refsubs
+    # outage is fixed must actually re-consult the plugin, not replay the
+    # stale abstain.
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    plugin = ConfigurablePlugin("fake", abstain_then_ok(0.9))
+    deps = make_deps(session_factory, tmp_path, [loaded(plugin)])
+
+    await process_job(job_id, deps)
+    assert plugin.call_count == 1
+    assert get_job(session_factory, job_id).status == "inconclusive"
+
+    reclaim_active(session_factory, job_id)
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    assert plugin.call_count == 2
+    assert get_job(session_factory, job_id).status == "matched"
+
+    with session_factory() as session:
+        rows = session.execute(
+            select(PluginResultRow).where(PluginResultRow.job_id == job_id).order_by(PluginResultRow.id)
+        ).scalars().all()
+        assert [r.status for r in rows] == ["abstain", "ok"]
+
+
+@respx.mock
+async def test_cached_error_is_not_reused_plugin_reexecutes(tmp_path, session_factory):
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    plugin = ConfigurablePlugin("fake", raise_then_ok(0.9))
+    deps = make_deps(session_factory, tmp_path, [loaded(plugin)])
+
+    await process_job(job_id, deps)
+    assert plugin.call_count == 1
+
+    reclaim_active(session_factory, job_id)
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    assert plugin.call_count == 2
+    assert get_job(session_factory, job_id).status == "matched"
+
+    with session_factory() as session:
+        rows = session.execute(
+            select(PluginResultRow).where(PluginResultRow.job_id == job_id).order_by(PluginResultRow.id)
+        ).scalars().all()
+        assert [r.status for r in rows] == ["error", "ok"]
 
 
 @respx.mock

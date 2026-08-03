@@ -1,6 +1,6 @@
 [project]
 name = "impostarr"
-version = "0.2.2"
+version = "0.2.3"
 description = "Post-import content verification for Sonarr"
 requires-python = ">=3.12"
 dependencies = [
