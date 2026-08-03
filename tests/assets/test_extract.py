@@ -30,12 +30,23 @@ async def test_extract_audio_is_16khz_mono_starting_at_zero(test_video: Path, tm
 
     # 30s source, default offset_s=60 > duration -> starts at 0.
     assert asset.tool_meta["start_s"] == 0.0
+    assert asset.tool_meta["offset_s"] == 0.0
 
     probed = await extract.probe(out_path)
     streams = probed.payload["streams"]
     assert len(streams) == 1
     assert streams[0]["sample_rate"] == "16000"
     assert streams[0]["channels"] == 1
+
+
+async def test_extract_audio_records_nonzero_offset_s(test_video: Path, tmp_path: Path) -> None:
+    # 30s source, offset_s=5 < duration -> slice actually starts at 5s, and
+    # tool_meta must record that real offset (not the zero-fallback) so the
+    # transcript stage can shift relative whisper timestamps back to
+    # absolute file time.
+    asset = await extract.extract_audio(test_video, tmp_path, offset_s=5.0, duration_s=10.0)
+    assert asset.tool_meta["offset_s"] == 5.0
+    assert asset.tool_meta["start_s"] == 5.0
 
 
 async def test_extract_embedded_subs_contains_expected_text(test_video: Path, tmp_path: Path) -> None:

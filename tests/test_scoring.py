@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from impostarr.config import Thresholds
+from impostarr.config import ScoringConfig, Thresholds
 from impostarr.normalize import (
     CrossSeriesCandidate,
     InSeriesCandidate,
@@ -440,3 +440,183 @@ def test_route_boundary_alt_margin_exact_is_credible():
     # Credible (boundary satisfied) + in_series alt -> Remap, regardless of auto.
     assert isinstance(decision.action, Remap)
     assert decision.action.target_episode_ids == ALT
+
+
+# ---------------------------------------------------------------------------
+# fusion strategies (ScoringConfig.fusion) + outlier rejection
+# ---------------------------------------------------------------------------
+
+
+def test_scoring_config_default_is_logodds_with_outlier_rejection_on():
+    cfg = ScoringConfig()
+    assert cfg.fusion == "logodds"
+    assert cfg.eps == 0.02
+    assert cfg.outlier_rejection is True
+    assert cfg.outlier_high == 0.8
+    assert cfg.outlier_low == 0.2
+    assert cfg.outlier_min_agreeing == 2
+
+
+def test_aggregate_default_call_has_no_config_matches_explicit_legacy_linear():
+    # aggregate()'s own no-config default must stay "linear, no outlier
+    # rejection" -- i.e. exactly today's pre-fusion-strategy behavior -- so
+    # every existing caller above that never passes a config (this whole
+    # file) keeps its exact numbers. Production always passes
+    # `Settings().scoring` explicitly (default "logodds") instead.
+    outcomes = [
+        outcome("heavy", 3.0, pairs=[(0.9, IN(CLAIMED))]),
+        outcome("light", 1.0, pairs=[(0.1, IN(CLAIMED))]),
+    ]
+    default_sheet = aggregate(outcomes, CLAIMED)
+    explicit_sheet = aggregate(
+        outcomes, CLAIMED, ScoringConfig(fusion="linear", outlier_rejection=False)
+    )
+    assert default_sheet.s_claimed == pytest.approx(0.7)
+    assert default_sheet.s_claimed == explicit_sheet.s_claimed
+    assert default_sheet.outliers_excluded == explicit_sheet.outliers_excluded == []
+
+
+@pytest.mark.parametrize(
+    ("fusion", "expected"),
+    [
+        ("linear", 0.5),  # (0.9 + 0.1) / 2
+        ("logodds", 0.5),  # logit(0.9) and logit(0.1) are symmetric around 0 -> mean logit 0 -> 0.5
+    ],
+)
+def test_fusion_strategies_table_driven_symmetric_case(fusion, expected):
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.9, IN(CLAIMED))]),
+        outcome("p2", 1.0, pairs=[(0.1, IN(CLAIMED))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED, ScoringConfig(fusion=fusion, outlier_rejection=False))
+    assert sheet.s_claimed == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("fusion", ["linear", "logodds"])
+def test_fusion_strategies_no_applicable_evidence_unaffected(fusion):
+    outcomes = [outcome("p1", 1.0, status="abstain", reason="no subs")]
+    sheet = aggregate(outcomes, CLAIMED, ScoringConfig(fusion=fusion))
+    assert sheet.s_claimed is None
+    assert sheet.s_alt is None
+    assert sheet.applicable_count == 0
+    assert sheet.outliers_excluded == []
+
+
+def _job14_outcomes() -> list[PluginOutcome]:
+    """Job 14 (American Dad S05E07): subs-llm and transcript-llm both call
+    the claimed episode a 90% match; whisper-subs reports 0% on it (mis-
+    sourced against a reference subtitle for a different episode, per the
+    numbering-disagreement confirmed in production). All three plugins run
+    at the default weight (1.0)."""
+    return [
+        outcome("subs-llm", 1.0, pairs=[(0.90, IN(CLAIMED))]),
+        outcome("transcript-llm", 1.0, pairs=[(0.90, IN(CLAIMED))]),
+        outcome("whisper-subs", 1.0, pairs=[(0.00, IN(CLAIMED))]),
+    ]
+
+
+def test_job14_linear_reproduces_todays_mid_band_quarantine():
+    sheet = aggregate(
+        _job14_outcomes(), CLAIMED, ScoringConfig(fusion="linear", outlier_rejection=False)
+    )
+    assert sheet.s_claimed == pytest.approx(0.6)
+    decision = route(sheet, DEFAULT_THRESHOLDS, FLAGS_ON)
+    assert decision.outcome == "quarantine"
+
+
+def test_job14_logodds_alone_is_still_mid_band():
+    # Fixes the "one 0.0 vetoes two 0.9s" symptom somewhat (0.542 > 0.6's
+    # naive average would suggest without outlier context) but a lone
+    # dissenter clamped to eps=0.02 still pulls hard enough in log-odds
+    # space to land short of the 0.8 quarantine threshold on its own.
+    sheet = aggregate(
+        _job14_outcomes(), CLAIMED, ScoringConfig(fusion="logodds", outlier_rejection=False)
+    )
+    assert sheet.s_claimed == pytest.approx(0.5417880323447795)
+    decision = route(sheet, DEFAULT_THRESHOLDS, FLAGS_ON)
+    assert decision.outcome == "quarantine"
+    assert sheet.outliers_excluded == []
+
+
+def test_job14_logodds_plus_outlier_rejection_matches():
+    # The full default config (ScoringConfig()): whisper-subs's 0.00 is
+    # recognized as an outlier against the two independent 0.90 agreements
+    # and excluded from the claimed key's pool entirely, clearing the 0.8
+    # quarantine threshold.
+    cfg = ScoringConfig()
+    assert cfg.fusion == "logodds"
+    assert cfg.outlier_rejection is True
+    sheet = aggregate(_job14_outcomes(), CLAIMED, cfg)
+    assert sheet.s_claimed == pytest.approx(0.9)
+    assert sheet.s_claimed >= DEFAULT_THRESHOLDS.quarantine
+    assert sheet.outliers_excluded == [
+        {"plugin": "whisper-subs", "confidence": 0.0, "candidate": "in_series:10"}
+    ]
+    decision = route(sheet, DEFAULT_THRESHOLDS, FLAGS_ON)
+    assert decision.outcome == "matched"
+
+
+def test_outlier_rejection_triggers_at_exact_boundaries():
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.8, IN(CLAIMED))]),  # exactly outlier_high
+        outcome("p2", 1.0, pairs=[(0.8, IN(CLAIMED))]),  # exactly outlier_min_agreeing met
+        outcome("p3", 1.0, pairs=[(0.2, IN(CLAIMED))]),  # exactly outlier_low
+    ]
+    sheet = aggregate(outcomes, CLAIMED, ScoringConfig(fusion="linear", outlier_rejection=True))
+    assert sheet.outliers_excluded == [
+        {"plugin": "p3", "confidence": 0.2, "candidate": "in_series:10"}
+    ]
+    assert sheet.s_claimed == pytest.approx(0.8)  # mean of the two 0.8s only
+
+
+def test_outlier_rejection_does_not_trigger_below_min_agreeing():
+    # Only one plugin clears outlier_high -> min_agreeing=2 not met, no
+    # rejection even though the other two are both well under outlier_low.
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.9, IN(CLAIMED))]),
+        outcome("p2", 1.0, pairs=[(0.1, IN(CLAIMED))]),
+        outcome("p3", 1.0, pairs=[(0.1, IN(CLAIMED))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED, ScoringConfig(fusion="linear", outlier_rejection=True))
+    assert sheet.outliers_excluded == []
+    assert sheet.s_claimed == pytest.approx((0.9 + 0.1 + 0.1) / 3)
+
+
+def test_outlier_rejection_does_not_trigger_when_a_remaining_report_exceeds_outlier_low():
+    # p3's 0.21 is just above outlier_low (0.2) -> not every non-high
+    # reporter is "low enough", so nothing is excluded.
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.9, IN(CLAIMED))]),
+        outcome("p2", 1.0, pairs=[(0.9, IN(CLAIMED))]),
+        outcome("p3", 1.0, pairs=[(0.21, IN(CLAIMED))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED, ScoringConfig(fusion="linear", outlier_rejection=True))
+    assert sheet.outliers_excluded == []
+    assert sheet.s_claimed == pytest.approx((0.9 + 0.9 + 0.21) / 3)
+
+
+def test_outlier_rejection_disabled_by_config():
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.9, IN(CLAIMED))]),
+        outcome("p2", 1.0, pairs=[(0.9, IN(CLAIMED))]),
+        outcome("p3", 1.0, pairs=[(0.0, IN(CLAIMED))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED, ScoringConfig(fusion="linear", outlier_rejection=False))
+    assert sheet.outliers_excluded == []
+    assert sheet.s_claimed == pytest.approx(0.6)
+
+
+def test_outlier_rejection_reports_only_on_candidates_where_it_applies():
+    # ALT has only one reporter (p1 at 0.9) -- no outlier logic possible
+    # there (no "remaining low reporters" to exclude), even though the
+    # claimed key on the same outcomes set does trigger rejection.
+    outcomes = [
+        outcome("p1", 1.0, pairs=[(0.8, IN(CLAIMED)), (0.9, IN(ALT))]),
+        outcome("p2", 1.0, pairs=[(0.8, IN(CLAIMED))]),
+        outcome("p3", 1.0, pairs=[(0.2, IN(CLAIMED))]),
+    ]
+    sheet = aggregate(outcomes, CLAIMED, ScoringConfig(fusion="linear", outlier_rejection=True))
+    assert sheet.outliers_excluded == [
+        {"plugin": "p3", "confidence": 0.2, "candidate": "in_series:10"}
+    ]
+    assert sheet.s_alt == pytest.approx(0.9)

@@ -28,11 +28,12 @@ itself.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .config import Thresholds
+from .config import ScoringConfig, Thresholds
 from .normalize import (
     CrossSeriesCandidate,
     InSeriesCandidate,
@@ -63,6 +64,12 @@ class ScoreSheet(BaseModel):
     alt_kind: Literal["in_series", "cross_series", "junk"] | None = None
     applicable_count: int
     per_candidate: dict[str, float] = Field(default_factory=dict)
+    # Plugins whose report on a given candidate was excluded as an outlier
+    # (see ScoringConfig.outlier_rejection) -- one dict per exclusion, in
+    # {"plugin": str, "confidence": float, "candidate": str (key-repr)}
+    # shape, so the evidence/UI can surface why a low report didn't drag
+    # that candidate's score down.
+    outliers_excluded: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Remap(BaseModel):
@@ -120,7 +127,73 @@ def _key_repr(key: CandidateKey) -> str:
     return "junk"
 
 
-def aggregate(results: list[PluginOutcome], claimed_episode_ids: frozenset[int]) -> ScoreSheet:
+# A single plugin's report on one candidate key: (plugin_name, weight, confidence).
+_Report = tuple[str, float, float]
+
+# `aggregate()`'s own default when no `ScoringConfig` is passed (all existing
+# callers, incl. every test in test_scoring.py) -- linear fusion, no outlier
+# rejection, i.e. byte-for-byte the pre-fusion-strategy behavior. Production
+# (pipeline.py) always passes `deps.settings.scoring` explicitly, whose own
+# default (`ScoringConfig()`) is "logodds" -- see config.py.
+_LEGACY_DEFAULT_CONFIG = ScoringConfig(fusion="linear", outlier_rejection=False)
+
+
+def _fuse(reports: list[_Report], cfg: ScoringConfig) -> float:
+    sum_w = sum(weight for _, weight, _ in reports)
+    if sum_w <= 0:
+        return 0.0
+    if cfg.fusion == "linear":
+        return sum(weight * confidence for _, weight, confidence in reports) / sum_w
+    # logodds: clamp to [eps, 1-eps] (logit(0)/logit(1) are +-inf), weighted
+    # mean in log-odds space, mapped back through the logistic function.
+    # Decisive (near 0/1) reports dominate hedging (near 0.5) ones instead of
+    # every plugin pulling the mean toward itself with equal leverage.
+    #
+    # A single report has no pooling to do at all -- return it (clamped)
+    # directly rather than round-tripping through log/exp, which is not
+    # exactly invertible in floating point (logistic(logit(0.9)) evaluates
+    # to 0.8999999999999999, not 0.9) and would otherwise make an
+    # unpooled score spuriously fail an exact-equality/boundary threshold
+    # check it should pass.
+    if len(reports) == 1:
+        return min(max(reports[0][2], cfg.eps), 1.0 - cfg.eps)
+    total_logit = 0.0
+    for _name, weight, confidence in reports:
+        c = min(max(confidence, cfg.eps), 1.0 - cfg.eps)
+        total_logit += weight * math.log(c / (1.0 - c))
+    mean_logit = total_logit / sum_w
+    return 1.0 / (1.0 + math.exp(-mean_logit))
+
+
+def _reject_outliers(
+    key: CandidateKey, reports: list[_Report], cfg: ScoringConfig, outliers_excluded: list[dict[str, Any]]
+) -> list[_Report]:
+    """Per `ScoringConfig.outlier_rejection`: if >= `outlier_min_agreeing`
+    reports on this candidate are >= `outlier_high` and every *other* report
+    is <= `outlier_low`, exclude those low reports from the pool entirely and
+    append them to `outliers_excluded`. Returns `reports` unchanged
+    otherwise (including when rejection is disabled)."""
+    if not cfg.outlier_rejection:
+        return reports
+    high = [r for r in reports if r[2] >= cfg.outlier_high]
+    low = [r for r in reports if r[2] < cfg.outlier_high]
+    if len(high) < cfg.outlier_min_agreeing or not low:
+        return reports
+    if not all(r[2] <= cfg.outlier_low for r in low):
+        return reports
+    for name, _weight, confidence in low:
+        outliers_excluded.append(
+            {"plugin": name, "confidence": confidence, "candidate": _key_repr(key)}
+        )
+    return high
+
+
+def aggregate(
+    results: list[PluginOutcome],
+    claimed_episode_ids: frozenset[int],
+    scoring: ScoringConfig | None = None,
+) -> ScoreSheet:
+    cfg = scoring if scoring is not None else _LEGACY_DEFAULT_CONFIG
     claimed_key: CandidateKey = frozenset(claimed_episode_ids)
 
     applicable = [outcome for outcome in results if outcome.result.status == "ok"]
@@ -133,12 +206,13 @@ def aggregate(results: list[PluginOutcome], claimed_episode_ids: frozenset[int])
             alt_kind=None,
             applicable_count=0,
             per_candidate={},
+            outliers_excluded=[],
         )
 
-    # key -> [sum(weight * confidence), sum(weight)]
-    accum: dict[CandidateKey, list[float]] = {}
+    # key -> [(plugin_name, weight, confidence), ...]
+    reports_by_key: dict[CandidateKey, list[_Report]] = {}
 
-    for _name, weight, result, normalized in applicable:
+    for name, weight, result, normalized in applicable:
         per_plugin: dict[CandidateKey, float] = {}
         for cand, norm in zip(result.candidates, normalized, strict=True):
             if isinstance(norm, Unnormalizable):
@@ -152,13 +226,13 @@ def aggregate(results: list[PluginOutcome], claimed_episode_ids: frozenset[int])
         per_plugin.setdefault(claimed_key, 0.0)
 
         for key, confidence in per_plugin.items():
-            acc = accum.setdefault(key, [0.0, 0.0])
-            acc[0] += weight * confidence
-            acc[1] += weight
+            reports_by_key.setdefault(key, []).append((name, weight, confidence))
 
-    scores: dict[CandidateKey, float] = {
-        key: (sum_wc / sum_w if sum_w > 0 else 0.0) for key, (sum_wc, sum_w) in accum.items()
-    }
+    outliers_excluded: list[dict[str, Any]] = []
+    scores: dict[CandidateKey, float] = {}
+    for key, reports in reports_by_key.items():
+        pool = _reject_outliers(key, reports, cfg, outliers_excluded)
+        scores[key] = _fuse(pool, cfg)
 
     # claimed_key is always present: every applicable plugin's per_plugin dict
     # gets a claimed_key entry (natural or 0.0-injected) above, and
@@ -188,6 +262,7 @@ def aggregate(results: list[PluginOutcome], claimed_episode_ids: frozenset[int])
         alt_kind=alt_kind,
         applicable_count=applicable_count,
         per_candidate=per_candidate,
+        outliers_excluded=outliers_excluded,
     )
 
 

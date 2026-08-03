@@ -32,6 +32,12 @@ def test_defaults_applied_when_sections_omitted(tmp_path):
     assert settings.thresholds.alt_margin == 0.2
     assert settings.thresholds.auto_min_evidence == 2
     assert settings.thresholds.phash_store == 0.9
+    assert settings.scoring.fusion == "logodds"
+    assert settings.scoring.eps == 0.02
+    assert settings.scoring.outlier_rejection is True
+    assert settings.scoring.outlier_high == 0.8
+    assert settings.scoring.outlier_low == 0.2
+    assert settings.scoring.outlier_min_agreeing == 2
     assert settings.workers.pool_size == 2
     assert settings.workers.whisper_model == "small"
     assert settings.workers.whisper_device == "auto"
@@ -156,3 +162,30 @@ def test_trash_config_round_trip_from_yaml(tmp_path):
     assert settings.trash.enabled is False
     assert settings.trash.dir == Path("/mnt/trash")
     assert settings.trash.retention_days == 3
+
+
+def test_scoring_config_round_trip_from_yaml(tmp_path):
+    config_path = tmp_path / "impostarr.yml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "scoring": {
+                    "fusion": "linear",
+                    "eps": 0.05,
+                    "outlier_rejection": False,
+                    "outlier_high": 0.85,
+                    "outlier_low": 0.15,
+                    "outlier_min_agreeing": 3,
+                }
+            }
+        )
+    )
+
+    settings = load_settings(config_path)
+
+    assert settings.scoring.fusion == "linear"
+    assert settings.scoring.eps == 0.05
+    assert settings.scoring.outlier_rejection is False
+    assert settings.scoring.outlier_high == 0.85
+    assert settings.scoring.outlier_low == 0.15
+    assert settings.scoring.outlier_min_agreeing == 3

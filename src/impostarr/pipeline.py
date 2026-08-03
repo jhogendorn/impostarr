@@ -367,6 +367,15 @@ async def _stage_transcript(
     audio_asset: extract.ExtractedAsset | None,
     transcriber: Transcriber,
 ) -> dict[str, Any] | None:
+    """Transcribes the audio slice and persists ABSOLUTE (whole-file)
+    timestamps. Whisper's segment timestamps are relative to the slice
+    `extract_audio` handed it, so `audio_asset.tool_meta["offset_s"]` (the
+    slice's actual start within the file -- see `extract.extract_audio`) is
+    added into every segment's start/end before the payload is stored, and
+    is itself recorded on the transcript asset's own `tool_meta` for
+    traceability. Falls back to `start_s` (pre-`offset_s` asset rows) or
+    0.0 (missing either key) so stale/legacy `audio` asset rows don't
+    crash this stage -- they just don't get shifted."""
     if audio_asset is None or audio_asset.path is None:
         return None
     existing = _latest_asset(session, file.id, "transcript")
@@ -377,6 +386,13 @@ async def _stage_transcript(
     except TranscribeError as exc:
         logger.warning("transcription failed for file %s: %s", file.id, exc)
         return None
+    offset_s = float(
+        audio_asset.tool_meta.get("offset_s", audio_asset.tool_meta.get("start_s", 0.0))
+    )
+    if offset_s:
+        for seg in result.segments:
+            seg.start += offset_s
+            seg.end += offset_s
     payload = result.model_dump(mode="json")
     row = Asset(
         file_id=file.id,
@@ -384,7 +400,7 @@ async def _stage_transcript(
         path=None,
         payload=payload,
         input_fingerprint=audio_asset.input_fingerprint,
-        tool_meta={},
+        tool_meta={"offset_s": offset_s},
     )
     session.add(row)
     session.commit()
@@ -664,7 +680,7 @@ async def process_job(job_id: int, deps: PipelineDeps) -> None:
                 session, job, deps, bundle, claimed, ctx, asset_fingerprints
             )
 
-            sheet = aggregate(outcomes, frozenset(claimed.episode_ids))
+            sheet = aggregate(outcomes, frozenset(claimed.episode_ids), deps.settings.scoring)
             flags = InstanceFlags(
                 auto_remap=deps.instance_cfg.auto_remap,
                 auto_replace=deps.instance_cfg.auto_replace,

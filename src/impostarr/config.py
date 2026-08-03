@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import (
@@ -46,6 +47,43 @@ class Thresholds(BaseModel):
     alt_margin: float = 0.2
     auto_min_evidence: int = 2
     phash_store: float = 0.9
+
+
+class ScoringConfig(BaseModel):
+    """How per-candidate confidences from multiple plugins are pooled into
+    a single score (`scoring.aggregate`), before `Thresholds`-based routing
+    ever sees it.
+
+    `fusion`: "linear" is the original weighted arithmetic mean (kept
+    exactly, byte-for-byte, for back-compat/comparison). "logodds" pools in
+    log-odds space instead -- weighted mean of logit(confidence), mapped
+    back through the logistic function -- so decisive plugins (near 0 or 1)
+    dominate hedging ones (near 0.5) instead of every plugin pulling the
+    mean toward itself with equal leverage. Default "logodds": a lone
+    near-0 report should not out-vote two independent near-1 reports the
+    way a plain average lets it.
+
+    `eps`: confidences are clamped to `[eps, 1 - eps]` before the logit
+    transform (logit(0)/logit(1) are +-infinity); only used by "logodds".
+
+    `outlier_rejection`: independently of `fusion`, if a candidate has
+    >= `outlier_min_agreeing` plugins reporting it at >= `outlier_high` and
+    every *other* reporting plugin is at <= `outlier_low`, those low
+    reporters are excluded from that candidate's pool entirely (not just
+    down-weighted) and recorded on the `ScoreSheet` as `outliers_excluded`.
+    Rationale: a plugin scoring ~0 on a candidate that >=2 independent
+    plugins call a ~90%+ match is far more likely to be mis-sourced (e.g.
+    matched against a reference subtitle for a different episode -- cf.
+    numbering-disagreement shows) than to be correctly detecting a
+    mismatch two other plugins both missed.
+    """
+
+    fusion: Literal["linear", "logodds"] = "logodds"
+    eps: float = 0.02
+    outlier_rejection: bool = True
+    outlier_high: float = 0.8
+    outlier_low: float = 0.2
+    outlier_min_agreeing: int = 2
 
 
 class PluginConfig(BaseModel):
@@ -146,6 +184,7 @@ class Settings(BaseSettings):
 
     sonarr: list[SonarrInstance] = Field(default_factory=list)
     thresholds: Thresholds = Field(default_factory=Thresholds)
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     refsubs: RefSubsConfig = Field(default_factory=RefSubsConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
