@@ -22,11 +22,14 @@ run without transcription configured (`workers.transcriber: none`).
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 class TranscribeError(RuntimeError):
@@ -65,7 +68,14 @@ class FasterWhisperTranscriber:
     construction never downloads or loads a model.
     """
 
-    def __init__(self, model_name: str, device: str = "cpu", models_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cpu",
+        models_dir: Path | None = None,
+        options: dict | None = None,
+        max_concurrent: int = 1,
+    ) -> None:
         try:
             import faster_whisper  # noqa: F401
         except ImportError as exc:
@@ -76,16 +86,39 @@ class FasterWhisperTranscriber:
         self.model_name = model_name
         self.device = device
         self.models_dir = models_dir
+        self.options = dict(options) if options else {}
         self._model: Any = None
+        # Guards lazy model construction so concurrent workers share one
+        # loaded model instead of each loading their own (OOMKill risk).
+        self._model_lock = asyncio.Lock()
+        # Serializes heavy inference even when the pool runs more workers
+        # than this — one CPU/GPU decode at a time by default.
+        self._semaphore = asyncio.Semaphore(int(self.options.get("max_concurrent", max_concurrent)))
+
+    def _resolve_device(self) -> str:
+        if self.device != "auto":
+            return self.device
+        try:
+            import ctranslate2
+
+            return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+        except Exception:
+            logger.exception("CUDA device detection failed; defaulting to cpu")
+            return "cpu"
 
     def _load_model(self) -> Any:
         from faster_whisper import WhisperModel
 
-        return WhisperModel(
-            self.model_name,
-            device=self.device,
-            download_root=str(self.models_dir) if self.models_dir else None,
-        )
+        device = self._resolve_device()
+        kwargs: dict[str, Any] = {
+            "device": device,
+            "download_root": str(self.models_dir) if self.models_dir else None,
+        }
+        if device == "cpu":
+            kwargs["compute_type"] = "int8"
+        if "compute_type" in self.options:
+            kwargs["compute_type"] = self.options["compute_type"]
+        return WhisperModel(self.model_name, **kwargs)
 
     def _transcribe_sync(self, wav_path: str) -> tuple[list[Any], str]:
         """Blocking: run the model AND fully materialize its segment
@@ -96,10 +129,16 @@ class FasterWhisperTranscriber:
         segments, info = self._model.transcribe(wav_path)
         return list(segments), info.language
 
-    async def transcribe(self, wav_path: Path) -> TranscriptResult:
+    async def _ensure_model(self) -> None:
         if self._model is None:
-            self._model = await asyncio.to_thread(self._load_model)
-        segments, language = await asyncio.to_thread(self._transcribe_sync, str(wav_path))
+            async with self._model_lock:
+                if self._model is None:
+                    self._model = await asyncio.to_thread(self._load_model)
+
+    async def transcribe(self, wav_path: Path) -> TranscriptResult:
+        await self._ensure_model()
+        async with self._semaphore:
+            segments, language = await asyncio.to_thread(self._transcribe_sync, str(wav_path))
         segs = [TranscriptSegment(start=s.start, end=s.end, text=s.text) for s in segments]
         return TranscriptResult(segments=segs, language=language)
 
@@ -119,7 +158,13 @@ class WhisperCppTranscriber:
     keep both the decode and the segment list off the event loop.
     """
 
-    def __init__(self, model_name: str, models_dir: Path | None = None, options: dict | None = None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        models_dir: Path | None = None,
+        options: dict | None = None,
+        max_concurrent: int = 1,
+    ) -> None:
         try:
             import pywhispercpp  # noqa: F401
         except ImportError as exc:
@@ -131,23 +176,36 @@ class WhisperCppTranscriber:
         self.models_dir = models_dir
         self.options = dict(options) if options else {}
         self._model: Any = None
+        # Guards lazy model construction so concurrent workers share one
+        # loaded model instead of each loading their own (OOMKill risk).
+        self._model_lock = asyncio.Lock()
+        # Serializes heavy inference even when the pool runs more workers
+        # than this — one CPU/GPU decode at a time by default.
+        self._semaphore = asyncio.Semaphore(int(self.options.get("max_concurrent", max_concurrent)))
 
     def _load_model(self) -> Any:
         from pywhispercpp.model import Model
 
+        options = {k: v for k, v in self.options.items() if k != "max_concurrent"}
         return Model(
             self.model_name,
             models_dir=str(self.models_dir) if self.models_dir else None,
-            **self.options,
+            **options,
         )
 
     def _transcribe_sync(self, wav_path: str) -> list[Any]:
         return self._model.transcribe(wav_path)
 
-    async def transcribe(self, wav_path: Path) -> TranscriptResult:
+    async def _ensure_model(self) -> None:
         if self._model is None:
-            self._model = await asyncio.to_thread(self._load_model)
-        segments = await asyncio.to_thread(self._transcribe_sync, str(wav_path))
+            async with self._model_lock:
+                if self._model is None:
+                    self._model = await asyncio.to_thread(self._load_model)
+
+    async def transcribe(self, wav_path: Path) -> TranscriptResult:
+        await self._ensure_model()
+        async with self._semaphore:
+            segments = await asyncio.to_thread(self._transcribe_sync, str(wav_path))
         # whisper.cpp segment timestamps (t0/t1) are in centiseconds.
         segs = [
             TranscriptSegment(start=s.t0 / 100.0, end=s.t1 / 100.0, text=s.text)
