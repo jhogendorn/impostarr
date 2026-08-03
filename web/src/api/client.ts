@@ -114,6 +114,10 @@ export function rerunJob(id: number): Promise<TransitionResponse> {
   return api<TransitionResponse>(`/jobs/${id}/rerun`, { method: 'POST' })
 }
 
+export function replaceJob(id: number): Promise<TransitionResponse> {
+  return api<TransitionResponse>(`/jobs/${id}/replace`, { method: 'POST' })
+}
+
 export function triggerBackfill(name: string, batchSize?: number): Promise<BackfillResponse> {
   return api<BackfillResponse>(`/instances/${encodeURIComponent(name)}/backfill`, {
     method: 'POST',

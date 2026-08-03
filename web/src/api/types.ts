@@ -167,6 +167,7 @@ export interface JobDetailVerdict {
   source: 'auto' | 'human'
   human_ident: HumanIdent | null
   dupe_info: DupeInfo | null
+  apply_at: string | null
 }
 
 export interface Asset {
@@ -214,14 +215,24 @@ export interface EpisodeLabel {
   title: string | null
 }
 
-/** A subtitle track's cue text (timestamps discarded — see
- * `impostarr.plugins.subtitles.parse_srt`), for the three-way text
- * comparison's reference-subs column. `label` is season/episode-ish
- * (e.g. "S01E01") when derivable, else a generic fallback. */
+/** One subtitle cue with its start timestamp (seconds) — `start_s` is
+ * `null` when the source SRT's timestamp line didn't parse, see
+ * `impostarr.plugins.subtitles.parse_srt_timed`. Backs the per-line
+ * timestamp tooltips and timeline-scrubber sync on the three-way text
+ * comparison's text panels. */
+export interface TimedCue {
+  start_s: number | null
+  text: string
+}
+
+/** A subtitle track's timed cues, for the three-way text comparison's
+ * reference-subs column. `label` is season/episode-ish (e.g. "S01E01")
+ * when derivable, else a generic fallback. */
 export interface ReferenceSubtitleTrack {
   label: string
   language: string | null
-  cues: string[]
+  cues: TimedCue[]
+  episode_ids: number[]
 }
 
 export interface JobDetail {
@@ -233,6 +244,7 @@ export interface JobDetail {
   verdict: JobDetailVerdict | null
   assets: Asset[]
   episode_labels: Record<string, EpisodeLabel>
+  series_episodes: EpisodeLabel[]
   reference_subtitles: ReferenceSubtitleTrack[]
   frame_hash_present: boolean
   frame_hash: FrameHashSummary | null

@@ -2,26 +2,30 @@ import { useEffect, useState } from 'react'
 import { parkJob, rerunJob, unparkJob } from '../api/client'
 import type { InstanceSummary, JobStatus, JobSummary, QueuePage, QueueSortField, SortDir } from '../api/types'
 import { capitalize, formatPercent, pathBasename, relativeTime, scoreBandClass } from '../lib/format'
-import { RERUN_STATUSES } from './VerdictActions'
+import { REIDENTIFY_STATUSES } from './ActionBar'
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200] as const
 
-type BulkAction = 'rerun' | 'park' | 'unpark'
+// 'reidentify' (not 'rerun') per the panel-wide Rerun->Reidentify rename —
+// the underlying client fn (`rerunJob`, hitting the unrenamed
+// `/jobs/{id}/rerun` endpoint) keeps its name; only user-facing copy/keys
+// tied to display change.
+type BulkAction = 'reidentify' | 'park' | 'unpark'
 
 const BULK_ACTION_FNS: Record<BulkAction, (id: number) => Promise<unknown>> = {
-  rerun: rerunJob,
+  reidentify: rerunJob,
   park: parkJob,
   unpark: unparkJob,
 }
 
 const BULK_ACTION_LABELS: Record<BulkAction, string> = {
-  rerun: 'Rerun',
+  reidentify: 'Reidentify',
   park: 'Park',
   unpark: 'Unpark',
 }
 
 function isEligible(action: BulkAction, status: JobStatus): boolean {
-  if (action === 'rerun') return RERUN_STATUSES.has(status)
+  if (action === 'reidentify') return REIDENTIFY_STATUSES.has(status)
   if (action === 'park') return status === 'pending'
   return status === 'hold' // unpark
 }
@@ -32,8 +36,8 @@ interface RowActionsProps {
 }
 
 /** Contextual per-row action buttons, same eligibility rules as
- * VerdictActions' park/unpark/rerun buttons in the inspect modal. No Inspect
- * button here — the row itself is already a click target for that. */
+ * ActionBar's park/unpark/reidentify controls in the inspect modal. No
+ * Inspect button here — the row itself is already a click target for that. */
 function RowActions({ job, onChanged }: RowActionsProps) {
   const [pending, setPending] = useState(false)
 
@@ -54,9 +58,9 @@ function RowActions({ job, onChanged }: RowActionsProps) {
 
   return (
     <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-      {RERUN_STATUSES.has(job.status) && (
+      {REIDENTIFY_STATUSES.has(job.status) && (
         <button type="button" disabled={pending} className={buttonClass} onClick={() => void run(() => rerunJob(job.job_id))}>
-          Rerun
+          Reidentify
         </button>
       )}
       {job.status === 'pending' && (
@@ -237,7 +241,7 @@ function QueueTable({
         {selected.size > 0 && (
           <>
             <span>{selected.size} selected</span>
-            {(['rerun', 'park', 'unpark'] as const).map((action) => {
+            {(['reidentify', 'park', 'unpark'] as const).map((action) => {
               const eligibleCount = selectedJobs.filter((job) => isEligible(action, job.status)).length
               return (
                 <button

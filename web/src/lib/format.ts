@@ -65,6 +65,16 @@ export function capitalize(word: string): string {
   return word[0].toUpperCase() + word.slice(1)
 }
 
+/** Title-Cases every word in a name, e.g. "main" -> "Main", "backup-2" ->
+ * "Backup-2" — for the comparison section's LHS header ("Sonarr {Name}
+ * Label"), which Title-Cases the instance name with no surrounding quotes. */
+export function titleCase(name: string): string {
+  return name
+    .split(/(\s|-|_)/)
+    .map((part) => (/[a-z0-9]/i.test(part) ? capitalize(part) : part))
+    .join('')
+}
+
 /** "125s" -> "2m 05s"; used for the active strip's ticking elapsed time. */
 export function formatElapsed(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds))

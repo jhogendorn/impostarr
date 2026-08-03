@@ -36,7 +36,7 @@ from impostarr.models import (
     Verdict,
 )
 from impostarr.models import PluginResult as PluginResultRow
-from impostarr.plugins.subtitles import parse_srt
+from impostarr.plugins.subtitles import parse_srt_timed
 from impostarr.remediate import Remediator
 from impostarr.trash import RestoreConflict
 
@@ -422,26 +422,35 @@ def _referenced_episode_ids(
     return ids
 
 
-async def _episode_labels(request: Request, file: File, target_ids: set[int]) -> dict[int, dict[str, Any]]:
-    """Best-effort `{episode_id: {id, season, episode, title}}` for every id
-    in `target_ids`, via the same per-instance Sonarr episode lookup
-    `_resolve_human_ident_ids` uses. Degrades to `{}` on any failure (same
-    broad-except rationale as `_series_external_ids`) — a raw id is still
-    better than a broken job-detail request, though the frontend prefers
-    the resolved label whenever one is present."""
-    if not target_ids:
-        return {}
+async def _series_episodes(request: Request, file: File) -> list[Any]:
+    """Best-effort full episode list for `file.series_id`, via the same
+    per-instance Sonarr episode lookup `_resolve_human_ident_ids` uses.
+    Degrades to `[]` on any failure (same broad-except rationale as
+    `_series_external_ids`) — shared by `_episode_labels` (filtered to
+    referenced ids) and the job-detail `series_episodes` field (every
+    episode, for the frontend's episode picker), so both derive from a
+    single Sonarr round-trip."""
     try:
         runtime = _instance_runtime_for_file(request, file)
-        episodes = await runtime.client.episodes(file.series_id)
+        return await runtime.client.episodes(file.series_id)
     except Exception:
-        logger.warning("episode lookup failed for episode_labels (series_id=%s)", file.series_id, exc_info=True)
+        logger.warning("episode lookup failed for series_episodes (series_id=%s)", file.series_id, exc_info=True)
+        return []
+
+
+def _episode_label_dict(ep: Any) -> dict[str, Any]:
+    return {"id": ep.id, "season": ep.season_number, "episode": ep.episode_number, "title": ep.title}
+
+
+def _episode_labels(episodes: list[Any], target_ids: set[int]) -> dict[int, dict[str, Any]]:
+    """`{episode_id: {id, season, episode, title}}` for every id in
+    `target_ids`, filtered from an already-fetched `episodes` list (see
+    `_series_episodes`) — a raw id is still better than a broken job-detail
+    request, though the frontend prefers the resolved label whenever one is
+    present."""
+    if not target_ids:
         return {}
-    return {
-        ep.id: {"id": ep.id, "season": ep.season_number, "episode": ep.episode_number, "title": ep.title}
-        for ep in episodes
-        if ep.id in target_ids
-    }
+    return {ep.id: _episode_label_dict(ep) for ep in episodes if ep.id in target_ids}
 
 
 def _embedded_subs_payload(asset: Asset) -> dict[str, Any] | None:
@@ -461,10 +470,12 @@ def _embedded_subs_payload(asset: Asset) -> dict[str, Any] | None:
     except OSError:
         return None
     language = (asset.tool_meta or {}).get("language") if isinstance(asset.tool_meta, dict) else None
-    return {"cues": parse_srt(text), "language": language}
+    return {"cues": parse_srt_timed(text), "language": language}
 
 
-def _reference_subtitles(plugin_results: list[PluginResultRow]) -> list[dict[str, Any]]:
+async def _reference_subtitles(
+    request: Request, file: File, plugin_results: list[PluginResultRow]
+) -> list[dict[str, Any]]:
     """Reference-subtitle text for the three-way comparison's right column,
     sourced from whisper-subs candidates' `evidence.refsub_path` (the only
     plugin that fetches reference subs — see
@@ -472,7 +483,15 @@ def _reference_subtitles(plugin_results: list[PluginResultRow]) -> list[dict[str
     reference file backs one candidate per nearby episode) and read
     best-effort — a cache eviction or path this instance doesn't have
     mounted degrades that one entry to being omitted, not a failed
-    request."""
+    request.
+
+    `episode_ids` resolves each candidate's `ident.season`/`ident.episodes`
+    to actual Sonarr episode ids via `_resolve_human_ident_ids` (the same
+    season+episode-numbers -> episode-id-set resolver human-ident verdicts
+    use), so the frontend can match a track to a selected episode without
+    parsing `label`. Resolution failing (or the ident being malformed)
+    degrades that one candidate's `episode_ids` to `[]` — the track is
+    still included, not dropped."""
     seen_paths: set[str] = set()
     tracks: list[dict[str, Any]] = []
     for pr in plugin_results:
@@ -490,15 +509,31 @@ def _reference_subtitles(plugin_results: list[PluginResultRow]) -> list[dict[str
             seen_paths.add(path)
             ident = candidate.get("ident")
             label = "reference subtitle"
+            episode_ids: list[int] = []
             if isinstance(ident, dict) and isinstance(ident.get("season"), int) and isinstance(ident.get("episodes"), list):
                 season = ident["season"]
-                episodes = "".join(f"E{ep:02d}" for ep in ident["episodes"] if isinstance(ep, int))
-                label = f"S{season:02d}{episodes}"
+                episode_numbers = [ep for ep in ident["episodes"] if isinstance(ep, int)]
+                label = f"S{season:02d}{''.join(f'E{ep:02d}' for ep in episode_numbers)}"
+                try:
+                    human_ident = HumanIdent(season=season, episodes=episode_numbers)
+                    resolved = await _resolve_human_ident_ids(request, file, human_ident)
+                except Exception:
+                    logger.warning("episode_ids resolution failed for reference subtitle candidate", exc_info=True)
+                    resolved = None
+                if resolved is not None:
+                    episode_ids = sorted(resolved)
             try:
                 text = Path(path).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            tracks.append({"label": label, "language": evidence.get("refsub_language"), "cues": parse_srt(text)})
+            tracks.append(
+                {
+                    "label": label,
+                    "language": evidence.get("refsub_language"),
+                    "cues": parse_srt_timed(text),
+                    "episode_ids": episode_ids,
+                }
+            )
     return tracks
 
 
@@ -528,10 +563,15 @@ async def get_job_detail(job_id: int, request: Request) -> dict:
             else None
         )
         external_ids = await _series_external_ids(request, file)
-        episode_labels = await _episode_labels(
-            request, file, _referenced_episode_ids(file, verdict, plugin_results)
+        series_episodes_raw = await _series_episodes(request, file)
+        episode_labels = _episode_labels(
+            series_episodes_raw, _referenced_episode_ids(file, verdict, plugin_results)
         )
-        reference_subtitles = _reference_subtitles(plugin_results)
+        series_episodes = sorted(
+            (_episode_label_dict(ep) for ep in series_episodes_raw),
+            key=lambda ep: (ep["season"], ep["episode"]),
+        )
+        reference_subtitles = await _reference_subtitles(request, file, plugin_results)
         return {
             "job": {
                 "id": job.id,
@@ -579,6 +619,7 @@ async def get_job_detail(job_id: int, request: Request) -> dict:
                     "source": verdict.source,
                     "human_ident": verdict.human_ident,
                     "dupe_info": verdict.dupe_info,
+                    "apply_at": verdict.apply_at,
                 }
                 if verdict is not None
                 else None
@@ -599,6 +640,7 @@ async def get_job_detail(job_id: int, request: Request) -> dict:
                 for a in assets
             ],
             "episode_labels": episode_labels,
+            "series_episodes": series_episodes,
             "reference_subtitles": reference_subtitles,
             "frame_hash_present": frame_hash is not None,
             "frame_hash": (
@@ -912,6 +954,51 @@ def reject_job(job_id: int, request: Request) -> dict:
             session.commit()
     _publish(request, job_id, "quarantine")
     return {"result": "quarantine"}
+
+
+@router.post("/jobs/{job_id}/replace")
+async def replace_job(job_id: int, request: Request) -> dict:
+    """Unconditionally run the replace remediation (trash the current copy
+    + Sonarr re-search/regrab) for a job awaiting human review — the
+    action-bar "Trash and Regrab" button, always offered for
+    quarantine/inconclusive jobs regardless of the latest verdict's
+    `proposed_action` (None, a remap, or already a replace). Modeled on
+    `approve_job`: same claim-then-remediate structure, but claims from
+    either status in `VERDICT_ALLOWED_STATUSES` (see `jobs.claim_for_api`)
+    and does not require a verdict row, let alone a computed proposal — a
+    human explicitly choosing to trash+regrab doesn't need one."""
+    identity = getattr(request.state, "identity", "anon")
+    session_factory = _session_factory(request)
+
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        if job.status not in VERDICT_ALLOWED_STATUSES:
+            raise HTTPException(
+                409, f"job is {job.status!r}; replace only applies to quarantine/inconclusive jobs"
+            )
+        file = session.get(File, job.file_id)
+
+        worker_id = f"api-{identity}"
+        try:
+            job = jobs.claim_for_api(session, job, worker_id, from_statuses=VERDICT_ALLOWED_STATUSES)
+        except InvalidTransition as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    runtime = _instance_runtime_for_file(request, file)
+    dry_run = request.app.state.settings.dry_run
+    remediator = Remediator(
+        runtime.client, runtime.cfg, session_factory,
+        dry_run=dry_run, trash_cfg=request.app.state.settings.trash,
+    )
+    await remediator.replace(job, worker_id)
+
+    with session_factory() as session:
+        result_status = session.get(Job, job_id).status
+
+    _publish(request, job_id, result_status)
+    return {"result": result_status}
 
 
 # -- park / unpark / rerun --------------------------------------------------

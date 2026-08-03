@@ -65,7 +65,11 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "active": frozenset({"pending"} | TERMINAL_STATUSES),
     "matched": frozenset({"pending"}),
     "quarantine": frozenset({"pending", "active", "matched", "quarantine", "inconclusive"}),
-    "inconclusive": frozenset({"pending", "matched", "quarantine", "inconclusive"}),
+    # "active" here (alongside quarantine's) backs `claim_for_api`'s
+    # `replace` path (api/routes.py `replace_job`): trash+regrab is offered
+    # for both quarantine and inconclusive jobs, so both must be able to
+    # transition to active for that claim.
+    "inconclusive": frozenset({"pending", "active", "matched", "quarantine", "inconclusive"}),
     "error": frozenset({"pending"}),
 }
 
@@ -269,22 +273,33 @@ def requeue(session: Session, job: Job) -> Job:
     return job
 
 
-def claim_for_api(session: Session, job: Job, worker_id: str) -> Job:
-    """Claim a `quarantine` job for direct API-driven remediation (the
-    `approve` endpoint). Fenced UPDATE `quarantine` -> `active`, distinct
-    from `claim_next`'s `pending` -> `active` claim: this claims one
-    specific, already-identified job rather than the oldest pending one.
-    Raises `InvalidTransition` if the job is no longer `quarantine`."""
+def claim_for_api(
+    session: Session,
+    job: Job,
+    worker_id: str,
+    *,
+    from_statuses: frozenset[str] = frozenset({"quarantine"}),
+) -> Job:
+    """Claim a job currently in one of `from_statuses` for direct
+    API-driven remediation. Fenced UPDATE `<from_statuses>` -> `active`,
+    distinct from `claim_next`'s `pending` -> `active` claim: this claims
+    one specific, already-identified job rather than the oldest pending
+    one. Defaults to `{"quarantine"}` (the `approve` endpoint); the
+    `replace` endpoint passes `{"quarantine", "inconclusive"}` since
+    trash+regrab is offered from either status. Raises `InvalidTransition`
+    if the job is no longer in `from_statuses`."""
     _check_transition(job.status, "active", job.id)
     now = _utcnow()
     result = session.execute(
         update(Job)
-        .where(Job.id == job.id, Job.status == "quarantine")
+        .where(Job.id == job.id, Job.status.in_(from_statuses))
         .values(status="active", claimed_by=worker_id, claimed_at=now, heartbeat_at=now)
     )
     if result.rowcount == 0:
         session.rollback()
-        raise InvalidTransition(f"job {job.id} was no longer quarantine when claiming for api")
+        raise InvalidTransition(
+            f"job {job.id} was no longer in {sorted(from_statuses)} when claiming for api"
+        )
     job.status = "active"
     job.claimed_by = worker_id
     job.claimed_at = now

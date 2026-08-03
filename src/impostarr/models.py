@@ -207,6 +207,7 @@ class Verdict(Base):
     source: Mapped[str] = mapped_column()
     human_ident: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON), default=None)
     dupe_info: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON), default=None)
+    apply_at: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
 
     __table_args__ = (CheckConstraint(_enum_check("source", VERDICT_SOURCES), name="source_valid"),)
