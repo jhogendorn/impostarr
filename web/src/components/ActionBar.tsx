@@ -10,7 +10,7 @@ import {
   unparkJob,
 } from '../api/client'
 import type { EpisodeLabel, JobDetail } from '../api/types'
-import { type AlternateCandidate, defaultPreviewEpisodeId, hasProposal, proposalTone } from '../lib/inspectData'
+import { type AlternateCandidate, defaultPreviewEpisodeId, hasProposal } from '../lib/inspectData'
 import { formatSeasonEpisode } from '../lib/format'
 import { TWO_COLUMN_GRID_CLASS } from '../lib/layout'
 import EpisodeCombobox from './EpisodeCombobox'
@@ -22,6 +22,12 @@ interface ActionBarProps {
   onSelectEpisode: (id: number) => void
   candidates: AlternateCandidate[]
   allEpisodes: EpisodeLabel[]
+  /** Which action's explainer the Proposed Action banner's second line
+   * should show right now (item 2) — lifted to InspectModal since the
+   * banner and this bar are siblings; `null` means "show the default
+   * proposal explanation". */
+  hoverKey: string | null
+  setHoverKey: Dispatch<SetStateAction<string | null>>
 }
 
 // No remediated→pending edge exists in the backend transition table (a
@@ -55,29 +61,6 @@ function formatError(err: unknown): string {
     return `${err.status}: ${detail}`
   }
   return err instanceof Error ? err.message : String(err)
-}
-
-const EXPLAINERS: Record<string, string> = {
-  markCorrect: 'Confirms this file is the labelled episode. Moves it to Matched.',
-  applyRemap: 'Re-links this file to the selected episode in Sonarr. Moves it to Remediated.',
-  trashRegrab:
-    'Removes this file (a copy is kept in Trash) and asks Sonarr for a replacement. Moves it to Remediated.',
-  dismiss: 'Clears the suggested fix. The file stays in Quarantine.',
-  ignoreMismatch: 'Stops flagging this file without confirming it. Moves it to Inconclusive.',
-  reidentify: 'Runs identification again. The file returns to Pending.',
-  park: 'Holds this file so no worker picks it up.',
-  unpark: 'Releases this file back to Pending.',
-}
-
-const NO_PROPOSAL_EXPLANATION = 'Nothing is proposed for this file. Hover an action to see what it does.'
-
-/** Section B's default explanation — the CURRENT proposed action's
- * explainer, always populated (item 6's "default content"). */
-function defaultExplanation(job: JobDetail): string {
-  const tone = proposalTone(job)
-  if (tone === 'remap') return EXPLAINERS.applyRemap
-  if (tone === 'replace') return EXPLAINERS.trashRegrab
-  return NO_PROPOSAL_EXPLANATION
 }
 
 interface ButtonProps {
@@ -119,10 +102,17 @@ function findEpisodeLabel(allEpisodes: EpisodeLabel[], job: JobDetail, episodeId
  * once the preview differs from the default (the current proposal/top
  * candidate) does its label change to name the target, making the two
  * steps visually distinct. */
-function ActionBar({ job, onChanged, selectedEpisodeId, onSelectEpisode, candidates, allEpisodes }: ActionBarProps) {
+function ActionBar({
+  job,
+  onChanged,
+  selectedEpisodeId,
+  onSelectEpisode,
+  candidates,
+  allEpisodes,
+  setHoverKey: setActiveKey,
+}: ActionBarProps) {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [activeKey, setActiveKey] = useState<string | null>(null)
 
   const status = job.job.status
 
@@ -235,9 +225,6 @@ function ActionBar({ job, onChanged, selectedEpisodeId, onSelectEpisode, candida
           )}
         </div>
       </div>
-      <p className="mt-3 text-sm leading-snug text-slate-300">
-        {activeKey ? (EXPLAINERS[activeKey] ?? defaultExplanation(job)) : defaultExplanation(job)}
-      </p>
     </div>
   )
 }

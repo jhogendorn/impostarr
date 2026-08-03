@@ -15,7 +15,13 @@ interface RhsPanelProps {
  * episode the Action Bar's Apply Remap combobox currently has selected
  * (item 1) — there is no selector here anymore; `selectedEpisodeId` is
  * owned by InspectModal and shared with ActionBar, so this panel and the
- * combobox never disagree about what's being previewed. */
+ * combobox never disagree about what's being previewed.
+ *
+ * DB chips sit top-right of the header row (item 5), same as LhsPanel.
+ * Row 3 (LhsPanel's Framegrabs/scrubber row) is left empty here —
+ * subgrid still gives it that row's real height, which is what lines
+ * Reference Subtitles (row 4) up with Embedded Subtitles/Transcript
+ * rather than with Framegrabs (item 4). */
 function RhsPanel({ detail, selectedEpisodeId, referenceSources, scrubTimeS }: RhsPanelProps) {
   const selectedLabel =
     detail.episode_labels[String(selectedEpisodeId)] ?? detail.series_episodes.find((ep) => ep.id === selectedEpisodeId)
@@ -27,8 +33,11 @@ function RhsPanel({ detail, selectedEpisodeId, referenceSources, scrubTimeS }: R
 
   return (
     <>
-      <h3 className="row-start-1 font-medium text-slate-200">Content Identity</h3>
-      <div className="row-start-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+      <div className="row-start-1 flex items-center justify-between gap-2">
+        <h3 className="font-medium text-slate-200">Content Identity</h3>
+        <ExternalLinks ids={detail.external_ids} />
+      </div>
+      <div className="row-start-2">
         <p className="text-xl font-semibold text-slate-100">
           {selectedLabel ? (
             <EpisodeRef season={selectedLabel.season} episodes={[{ episode: selectedLabel.episode, tvdbId: selectedLabel.tvdb_id }]} />
@@ -37,10 +46,9 @@ function RhsPanel({ detail, selectedEpisodeId, referenceSources, scrubTimeS }: R
           )}
           {selectedLabel?.title ? ` - ${selectedLabel.title}` : ''}
         </p>
-        <ExternalLinks ids={detail.external_ids} />
         {matchesClaimedLabel && <span className="text-xs text-emerald-400">Matches Sonarr label</span>}
       </div>
-      <div className="row-start-3 mt-2">
+      <div className="row-start-4 mt-3">
         <TextPanel
           title="Reference Subtitles"
           sources={referenceSources}

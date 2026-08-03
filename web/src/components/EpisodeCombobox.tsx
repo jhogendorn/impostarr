@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { EpisodeLabel } from '../api/types'
 import { type AlternateCandidate, episodeOptionLabel } from '../lib/inspectData'
+import { formatPercent, formatSeasonEpisode } from '../lib/format'
 
 interface EpisodeComboboxProps {
   ariaLabel: string
@@ -29,6 +30,27 @@ function resolveLabel(
 function matchesQuery(label: EpisodeLabel, query: string): boolean {
   return episodeOptionLabel(label).toLowerCase().includes(query.toLowerCase())
 }
+
+/** "S05E09" (distinct, monospace/medium) + " - Title" (normal weight) — the
+ * old native `<select>`'s "S05E09 - Stan Time" presentation (item 1),
+ * split across two spans so the SxxEyy portion reads visually distinct.
+ * The option button carries its own `aria-label` (exact
+ * `episodeOptionLabel` string) rather than relying on name-from-content,
+ * since the accessible-name computation trims each child span's own
+ * leading/trailing whitespace before concatenating — splitting the text
+ * visually would otherwise swallow the " - " separator's leading space. */
+function OptionLabel({ label }: { label: EpisodeLabel }) {
+  return (
+    <>
+      <span className="shrink-0 font-mono text-[11px] font-medium text-slate-300">
+        {formatSeasonEpisode(label.season, [label.episode])}
+      </span>
+      <span className="truncate font-normal text-slate-200">{label.title ? ` - ${label.title}` : ''}</span>
+    </>
+  )
+}
+
+const OPTION_ROW_CLASS = 'flex w-full items-center gap-1.5 px-2 py-1.5 text-left'
 
 /** Custom searchable combobox replacing the native `<select>` (item 3) —
  * 405 raw options is unusable as a flat list. Text input filters as you
@@ -201,21 +223,23 @@ function EpisodeCombobox({
         >
           {filteredCandidates.length > 0 && (
             <div role="group" aria-label="Candidates">
-              <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">Candidates</div>
-              {filteredCandidates.map(({ label }) => (
+              <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">Candidates</div>
+              {filteredCandidates.map(({ candidate, label }) => (
                 <button
                   key={label.id}
                   type="button"
                   id={`${listboxId}-opt-${label.id}`}
                   role="option"
                   aria-selected={label.id === value}
+                  aria-label={episodeOptionLabel(label)}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => selectRow({ kind: 'candidate', label })}
-                  className={`block w-full truncate px-2 py-1 text-left ${
-                    label.id === value ? 'bg-indigo-500/20 text-indigo-200' : 'text-slate-200 hover:bg-slate-800'
+                  className={`${OPTION_ROW_CLASS} ${
+                    label.id === value ? 'bg-indigo-500/20 text-indigo-200' : 'hover:bg-slate-800'
                   } ${activeRow?.kind !== 'season-header' && activeRow?.label.id === label.id ? 'bg-slate-800' : ''}`}
                 >
-                  {episodeOptionLabel(label)}
+                  <OptionLabel label={label} />
+                  <span className="ml-auto shrink-0 text-[11px] text-slate-500">{formatPercent(candidate.confidence)}</span>
                 </button>
               ))}
             </div>
@@ -232,12 +256,12 @@ function EpisodeCombobox({
                   aria-expanded={expanded}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => toggleSeason(season)}
-                  className={`flex w-full items-center justify-between px-2 py-1 text-left font-medium text-slate-300 hover:bg-slate-800 ${
+                  className={`flex w-full items-center justify-between border-t border-slate-800 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500 hover:bg-slate-800 hover:text-slate-300 ${
                     activeRow?.kind === 'season-header' && activeRow.season === season ? 'bg-slate-800' : ''
                   }`}
                 >
                   <span>Season {season}</span>
-                  <span className="text-slate-500">{expanded ? '▾' : '▸'}</span>
+                  <span>{expanded ? '▾' : '▸'}</span>
                 </button>
                 {expanded &&
                   visible.map((label) => (
@@ -247,13 +271,14 @@ function EpisodeCombobox({
                       id={`${listboxId}-opt-${label.id}`}
                       role="option"
                       aria-selected={label.id === value}
+                      aria-label={episodeOptionLabel(label)}
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => selectRow({ kind: 'season-option', label })}
-                      className={`block w-full truncate py-1 pl-4 pr-2 text-left ${
-                        label.id === value ? 'bg-indigo-500/20 text-indigo-200' : 'text-slate-200 hover:bg-slate-800'
+                      className={`${OPTION_ROW_CLASS} pl-4 ${
+                        label.id === value ? 'bg-indigo-500/20 text-indigo-200' : 'hover:bg-slate-800'
                       } ${activeRow?.kind === 'season-option' && activeRow.label.id === label.id ? 'bg-slate-800' : ''}`}
                     >
-                      {episodeOptionLabel(label)}
+                      <OptionLabel label={label} />
                     </button>
                   ))}
               </div>

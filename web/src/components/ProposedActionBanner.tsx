@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { JobDetail } from '../api/types'
 import { formatCountdown } from '../lib/format'
-import { describeProposal, proposalTone } from '../lib/inspectData'
+import { defaultExplanation, describeProposal, EXPLAINERS, proposalTone } from '../lib/inspectData'
 
 const TONE_CLASSES: Record<'remap' | 'replace' | 'none', string> = {
   remap: 'border-indigo-600/40 bg-indigo-500/10 text-indigo-200',
@@ -56,19 +56,28 @@ function AutoApplySlot({ applyAt }: { applyAt: string | null }) {
  * disappearing outright. Tinted to match the action bar's Apply Remap
  * (indigo) / Trash and Regrab (red) button colours when a proposal does
  * exist, so the banner visually previews which control would carry it
- * out. */
-function ProposedActionBanner({ job }: { job: JobDetail }) {
+ * out.
+ *
+ * Second line (item 2): the action explanation text, left-aligned directly
+ * under the main line. Defaults to the current proposal's explanation;
+ * swaps to the hovered/focused Action Bar button's explainer via `hoverKey`
+ * (state lifted to InspectModal, shared with ActionBar). */
+function ProposedActionBanner({ job, hoverKey }: { job: JobDetail; hoverKey: string | null }) {
   const tone = proposalTone(job) ?? 'none'
   const description = tone === 'none' ? 'No Proposed Action' : describeProposal(job)
+  const explanation = hoverKey ? (EXPLAINERS[hoverKey] ?? defaultExplanation(job)) : defaultExplanation(job)
 
   return (
-    <div className={`mb-3 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 ${TONE_CLASSES[tone]}`}>
-      <div className="flex min-w-0 items-center gap-2 text-sm">
-        {tone === 'remap' && <RemapIcon />}
-        {tone === 'replace' && <ReplaceIcon />}
-        <span className="truncate">{description ?? 'Proposed action pending review'}</span>
+    <div className={`mb-3 rounded-lg border px-3 py-2 ${TONE_CLASSES[tone]}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2 text-sm">
+          {tone === 'remap' && <RemapIcon />}
+          {tone === 'replace' && <ReplaceIcon />}
+          <span className="truncate">{description ?? 'Proposed action pending review'}</span>
+        </div>
+        <AutoApplySlot applyAt={job.verdict?.apply_at ?? null} />
       </div>
-      <AutoApplySlot applyAt={job.verdict?.apply_at ?? null} />
+      <p className="mt-1 text-left text-sm leading-snug text-slate-300">{explanation}</p>
     </div>
   )
 }

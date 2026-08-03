@@ -26,11 +26,15 @@ interface LhsPanelProps {
 }
 
 /** LHS (2/3-width) column of the comparison section: what Sonarr says this
- * file is. Three rows — header, ident, content — each explicitly
+ * file is. Four rows — header, ident, media, text — each explicitly
  * grid-row-placed so they align with RhsPanel's matching rows via the
- * shared subgrid the parent (ComparisonSection) sets up. The content row
- * holds Framegrabs, then the timeline scrubber directly below it (item
- * 4), then the embedded-subs/transcript text panels. */
+ * shared subgrid the parent (ComparisonSection) sets up. The DB-reference
+ * chips sit top-right of the header row, alongside the heading itself
+ * (item 5) — no longer inline with the (variable-width) title, where they
+ * used to wrap onto a second line. The media row holds Framegrabs, then
+ * the timeline scrubber directly below it (item 4); the text row holds
+ * the embedded-subs/transcript panels, aligned with RhsPanel's Reference
+ * Subtitles panel one row down from Framegrabs. */
 function LhsPanel({
   instanceName,
   labelledEpisodes,
@@ -46,8 +50,11 @@ function LhsPanel({
 }: LhsPanelProps) {
   return (
     <>
-      <h3 className="row-start-1 font-medium text-slate-200">Sonarr {instanceName ? titleCase(instanceName) : 'Unknown'} Label</h3>
-      <div className="row-start-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+      <div className="row-start-1 flex items-center justify-between gap-2">
+        <h3 className="font-medium text-slate-200">Sonarr {instanceName ? titleCase(instanceName) : 'Unknown'} Label</h3>
+        <ExternalLinks ids={externalIds} />
+      </div>
+      <div className="row-start-2">
         <p className="text-xl font-semibold text-slate-100">
           {labelledEpisodes.length > 0 ? (
             <EpisodeRef
@@ -59,21 +66,20 @@ function LhsPanel({
           )}
           {titleText ? ` - ${titleText}` : ''}
         </p>
-        <ExternalLinks ids={externalIds} />
       </div>
       <div className="row-start-3 mt-2">
         <FramegrabStrip jobId={jobId} assets={assets} scrubTimeS={scrubTimeS} />
         <TimelineScrubber durationS={durationS} valueS={scrubTimeS ?? 0} onChange={onScrub} />
-        <div className="mt-3 grid grid-cols-2 gap-4">
-          <TextPanel
-            title="Embedded Subtitles"
-            sources={embeddedSubsSources}
-            emptyText="No embedded subtitles extracted."
-            scrubTimeS={scrubTimeS}
-            showSourceSelector={false}
-          />
-          <TextPanel title="Transcript" sources={transcriptSources} emptyText="No transcript available." scrubTimeS={scrubTimeS} />
-        </div>
+      </div>
+      <div className="row-start-4 mt-3 grid grid-cols-2 gap-4">
+        <TextPanel
+          title="Embedded Subtitles"
+          sources={embeddedSubsSources}
+          emptyText="No embedded subtitles extracted."
+          scrubTimeS={scrubTimeS}
+          showSourceSelector={false}
+        />
+        <TextPanel title="Transcript" sources={transcriptSources} emptyText="No transcript available." scrubTimeS={scrubTimeS} />
       </div>
     </>
   )

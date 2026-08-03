@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AlternateCandidate } from './inspectData'
-import { defaultPreviewEpisodeId, leadingEpisodeId } from './inspectData'
+import { defaultExplanation, defaultPreviewEpisodeId, EXPLAINERS, leadingEpisodeId, NO_PROPOSAL_EXPLANATION } from './inspectData'
 import { jobDetailFixture, jobDetailHumanIdentFixture } from '../components/testFixtures'
 
 const altCandidate: AlternateCandidate = { episodeIds: [200], season: 5, episodes: [2], confidence: 0.468 }
@@ -74,5 +74,21 @@ describe('defaultPreviewEpisodeId (item 13 layered on item 16)', () => {
     // 200 (the leading alt) has no cached refsubs, but 100 (the claimed
     // episode) does — never silently default to an empty view.
     expect(defaultPreviewEpisodeId(job, [altCandidate])).toBe(100)
+  })
+})
+
+describe('defaultExplanation (item 2: Proposed Action banner second line default)', () => {
+  it('reports the Apply Remap explainer when the proposal is a remap', () => {
+    expect(defaultExplanation(jobDetailFixture)).toBe(EXPLAINERS.applyRemap)
+  })
+
+  it('reports the Trash and Regrab explainer when the proposal is a replace', () => {
+    const job = { ...jobDetailFixture, verdict: { ...jobDetailFixture.verdict!, proposed_action: { kind: 'replace' } } }
+    expect(defaultExplanation(job)).toBe(EXPLAINERS.trashRegrab)
+  })
+
+  it('falls back to the "nothing proposed" copy when there is no proposal', () => {
+    const job = { ...jobDetailFixture, verdict: { ...jobDetailFixture.verdict!, proposed_action: null } }
+    expect(defaultExplanation(job)).toBe(NO_PROPOSAL_EXPLANATION)
   })
 })

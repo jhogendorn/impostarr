@@ -54,7 +54,17 @@ function TextPanel({ title, sources, emptyText, scrubTimeS = null, showSourceSel
     const el = cueRefs.current[nearestIdx]
     const container = containerRef.current
     if (!el || !container) return
-    const target = el.offsetTop - container.clientHeight / 2 + el.clientHeight / 2
+    // `el.offsetTop` is relative to `el`'s nearest POSITIONED ancestor
+    // (offsetParent), not necessarily this container — this container has
+    // no `position` set, so offsetTop climbed past it to some ancestor
+    // further up the tree (e.g. the dialog panel), producing a scroll
+    // target in the wrong coordinate space and overshooting the highlighted
+    // line clean off-screen (item 7 — the active line never stayed
+    // visible). Deriving the element's position from the container's own
+    // scroll-content coordinate space (via getBoundingClientRect deltas +
+    // current scrollTop) is immune to that ancestor-chain ambiguity.
+    const elTopInContainer = el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+    const target = elTopInContainer - container.clientHeight / 2 + el.clientHeight / 2
     container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' })
   }, [nearestIdx])
 
