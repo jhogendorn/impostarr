@@ -85,21 +85,34 @@ interface SortableThProps {
   onSortChange: (field: QueueSortField, dir: SortDir) => void
 }
 
-/** A clickable column header: click cycles asc/desc when it's already the
- * active sort field, or switches to this field (defaulting to desc) when
- * it isn't. The active field gets a bright ▲/▼ arrow; other sortable
- * columns get a dim ⇅ so it's visually obvious they're clickable too. */
+/** A clickable column header (item 18): the ENTIRE `<th>` is the click
+ * target (the inner button fills it edge-to-edge, padding moved onto the
+ * button rather than the th) — not just the label glyph, so a click
+ * anywhere in the header cell registers. `cursor-pointer` sits on the
+ * `<th>` itself (not just a descendant) since `cursor` doesn't inherit
+ * from a child up to its parent — a hover/computed-style check against
+ * the th needs it set there directly. Click cycles asc/desc when it's
+ * already the active sort field, or switches to this field (defaulting
+ * to desc) when it isn't. The active field gets a bright accent ▲/▼ and
+ * `aria-sort`; inactive sortable columns get an always-visible (if dim)
+ * neutral ⇅ so it reads as clickable before the first click, not just
+ * after. */
 function SortableTh({ field, label, sortField, sortDir, onSortChange }: SortableThProps) {
   const active = field === sortField
   return (
-    <th className="px-3 py-2">
+    <th
+      className="cursor-pointer p-0 hover:bg-slate-800/60"
+      aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
       <button
         type="button"
         onClick={() => onSortChange(field, active ? (sortDir === 'asc' ? 'desc' : 'asc') : 'desc')}
-        className="flex items-center gap-1 uppercase tracking-wide text-slate-500 hover:text-slate-300"
+        className="flex w-full items-center gap-1 px-3 py-2 text-left uppercase tracking-wide text-slate-500 hover:text-slate-300"
       >
         {label}
-        <span className={active ? 'text-slate-200' : 'text-slate-700'}>{active ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}</span>
+        <span className={active ? 'text-indigo-400 font-bold' : 'text-slate-500'}>
+          {active ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}
+        </span>
       </button>
     </th>
   )
@@ -275,15 +288,12 @@ function QueueTable({
         <thead>
           <tr className="text-xs uppercase tracking-wide text-slate-500">
             <th className="px-3 py-1" />
+            {/* Spans exactly the Series+Episode(s) pair below — the
+             * Sonarr-CLAIMED identity (item 17/18). */}
             <th className="px-3 py-1" colSpan={2}>
               Labelled episode
             </th>
-            <th className="px-3 py-1" />
-            <th className="px-3 py-1" />
-            <th className="px-3 py-1" />
-            <th className="px-3 py-1" />
-            <th className="px-3 py-1" />
-            <th className="px-3 py-1" />
+            <th className="px-3 py-1" colSpan={6} />
           </tr>
           <tr className="text-xs uppercase tracking-wide text-slate-500">
             <th className="px-3 py-2">
@@ -297,12 +307,12 @@ function QueueTable({
                 className="h-4 w-4 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
               />
             </th>
-            <SortableTh field="series" label="Series (id)" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
-            <th className="px-3 py-2">Episode(s)</th>
-            <th className="px-3 py-2">File</th>
+            <SortableTh field="series" label="Series" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
+            <SortableTh field="episode" label="Episode(s)" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
+            <SortableTh field="file" label="File" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <SortableTh field="instance" label="Instance" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <SortableTh field="confidence" label="Confidence" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
-            <th className="px-3 py-2">Outcome</th>
+            <SortableTh field="outcome" label="Outcome" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <SortableTh field="updated_at" label="Updated" sortField={sortField} sortDir={sortDir} onSortChange={onSortChange} />
             <th className="px-3 py-2">Actions</th>
           </tr>
@@ -326,8 +336,26 @@ function QueueTable({
                     className="h-4 w-4 cursor-pointer accent-indigo-500"
                   />
                 </td>
-                <td className="px-3 py-2 text-slate-200">Series {job.file.series_id}</td>
-                <td className="px-3 py-2 text-slate-400">{job.file.episode_ids.join(', ')}</td>
+                <td className="px-3 py-2 text-slate-200">{job.file.series_title ?? `Series ${job.file.series_id}`}</td>
+                <td className="px-3 py-2 text-slate-400">
+                  {job.file.episode_label ? (
+                    job.file.episode_tvdb_ids?.[0] != null ? (
+                      <a
+                        href={`https://thetvdb.com/dereferrer/episode/${job.file.episode_tvdb_ids[0]}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="underline decoration-dotted decoration-slate-600 underline-offset-2 hover:text-indigo-300 hover:decoration-indigo-400"
+                      >
+                        {job.file.episode_label}
+                      </a>
+                    ) : (
+                      job.file.episode_label
+                    )
+                  ) : (
+                    job.file.episode_ids.join(', ')
+                  )}
+                </td>
                 <td className="px-3 py-2 text-slate-400">{pathBasename(job.file.sonarr_path)}</td>
                 <td className="px-3 py-2 text-slate-400">{job.instance ?? '—'}</td>
                 <td className="px-3 py-2">

@@ -120,6 +120,70 @@ def _iso(dt: Any) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
+class _SeriesLabelCache:
+    """Per-request memo of (instance_name, series_id) -> (series title,
+    live episode list) — one Sonarr round trip per DISTINCT series on a
+    queue/trash page, not one per row (item 17). Shared by `get_queue` and
+    `list_trash`, both of which resolve many rows that commonly repeat the
+    same series."""
+
+    def __init__(self, request: Request) -> None:
+        self._request = request
+        self._cache: dict[tuple[str, int], tuple[str | None, list[Any]]] = {}
+
+    async def get(self, instance_name: str | None, series_id: int) -> tuple[str | None, list[Any]]:
+        if instance_name is None:
+            return None, []
+        key = (instance_name, series_id)
+        if key not in self._cache:
+            self._cache[key] = await self._fetch(instance_name, series_id)
+        return self._cache[key]
+
+    async def _fetch(self, instance_name: str, series_id: int) -> tuple[str | None, list[Any]]:
+        runtime = self._request.app.state.instances.get(instance_name)
+        if runtime is None:
+            return None, []
+        try:
+            series = await runtime.client.series(series_id)
+            episodes = await runtime.client.episodes(series_id)
+            return series.title, episodes
+        except Exception:
+            # Non-critical enrichment (same rationale as
+            # `_series_external_ids`) — a Sonarr hiccup degrades this one
+            # row's title/label to the raw-id fallback, never a 500 for
+            # the whole queue/trash page.
+            logger.warning(
+                "queue/trash label resolution failed (instance=%s series_id=%s)", instance_name, series_id, exc_info=True
+            )
+            return None, []
+
+
+def _episode_label_and_tvdb_ids(episodes: list[Any], episode_ids: list[int]) -> tuple[str | None, list[int | None] | None]:
+    """"S05E17" for a single claimed episode, "S05E17-E18" for multiple —
+    resolved from a live episode list (see `_SeriesLabelCache`). `None`
+    when any claimed id didn't resolve (never mixes a resolved label with
+    unresolved ids)."""
+    by_id = {ep.id: ep for ep in episodes}
+    ordered = [by_id[eid] for eid in episode_ids if eid in by_id]
+    if not episode_ids or len(ordered) != len(episode_ids):
+        return None, None
+    season = ordered[0].season_number
+    numbers = [ep.episode_number for ep in ordered]
+    label = f"S{season:02d}E{numbers[0]:02d}" + "".join(f"-E{n:02d}" for n in numbers[1:])
+    return label, [ep.tvdb_id for ep in ordered]
+
+
+async def _resolve_series_label(
+    cache: _SeriesLabelCache, instance_name: str | None, series_id: int, episode_ids: list[int]
+) -> tuple[str | None, str | None, list[int | None] | None]:
+    """(series_title, episode_label, episode_tvdb_ids) for one queue/trash
+    row — any/all `None` when resolution failed, so the frontend falls
+    back to raw-id rendering rather than the request erroring (item 17)."""
+    title, episodes = await cache.get(instance_name, series_id)
+    label, tvdb_ids = _episode_label_and_tvdb_ids(episodes, episode_ids)
+    return title, label, tvdb_ids
+
+
 def _instance_runtime_for_file(request: Request, file: File):
     with _session_factory(request)() as session:
         instance = session.get(Instance, file.instance_id)
@@ -261,23 +325,45 @@ _LATEST_VERDICT_S_CLAIMED = (
     select(Verdict.s_claimed).where(Verdict.job_id == Job.id).order_by(Verdict.id.desc()).limit(1).correlate(Job).scalar_subquery()
 )
 
+# Same correlated-scalar-subquery shape as _LATEST_VERDICT_S_CLAIMED, for
+# the "outcome" sort key (item 18).
+_LATEST_VERDICT_OUTCOME = (
+    select(Verdict.outcome).where(Verdict.job_id == Job.id).order_by(Verdict.id.desc()).limit(1).correlate(Job).scalar_subquery()
+)
+
 QUEUE_SORT_FIELDS = {
     "updated_at": Job.updated_at,
     "created_at": Job.created_at,
     "confidence": _LATEST_VERDICT_S_CLAIMED,
     "series": File.series_id,
     "instance": Instance.name,
+    # "episode" sorts by the file's first claimed Sonarr EPISODE ID (via
+    # SQLAlchemy's portable JSON-index comparator — compiles to
+    # JSON_EXTRACT on SQLite, the dialect this project targets), NOT the
+    # resolved human episode number (item 18 asked for real numbering).
+    # True season/episode-number ordering isn't stored in the DB — only
+    # Sonarr's opaque per-episode ids are — and resolving every matching
+    # row's number via Sonarr before pagination (to sort DB-side) would
+    # mean fetching the whole queue's episode data on every page load
+    # instead of once per distinct series on the page, defeating the
+    # point of paging. Flagged as a deliberate deviation, not silently
+    # equated with real numbering.
+    "episode": File.episode_ids[0].as_integer(),
+    "file": File.sonarr_path,
+    "outcome": _LATEST_VERDICT_OUTCOME,
 }
 
 
 @router.get("/queues/{status}")
-def get_queue(
+async def get_queue(
     status: str,
     request: Request,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     instance: str | None = None,
-    sort: Literal["updated_at", "created_at", "confidence", "series", "instance"] = "updated_at",
+    sort: Literal[
+        "updated_at", "created_at", "confidence", "series", "instance", "episode", "file", "outcome"
+    ] = "updated_at",
     dir: Literal["asc", "desc"] = "desc",
 ) -> dict:
     if status not in JOB_STATUSES:
@@ -314,7 +400,7 @@ def get_queue(
         # File is needed whenever filtering or sorting touches it or Instance
         # (Instance is only reachable via File.instance_id); Instance itself
         # only when actually filtering/sorting by instance name.
-        needs_file = instance is not None or sort in ("series", "instance")
+        needs_file = instance is not None or sort in ("series", "instance", "episode", "file")
         needs_instance = instance is not None or sort == "instance"
         if needs_file:
             joins.append((File, Job.file_id == File.id))
@@ -340,19 +426,29 @@ def get_queue(
         job_rows = session.execute(job_query).scalars().all()
 
         instance_names = _instance_names_by_id(session)
+        label_cache = _SeriesLabelCache(request)
         items = []
         for job in job_rows:
             file = session.get(File, job.file_id)
             verdict = _latest_verdict(session, job.id)
+            row_instance = instance_names.get(file.instance_id) if file else None
+            series_title, episode_label, episode_tvdb_ids = (
+                await _resolve_series_label(label_cache, row_instance, file.series_id, file.episode_ids)
+                if file
+                else (None, None, None)
+            )
             items.append(
                 {
                     "job_id": job.id,
                     "status": job.status,
-                    "instance": instance_names.get(file.instance_id) if file else None,
+                    "instance": row_instance,
                     "file": {
                         "series_id": file.series_id,
+                        "series_title": series_title,
                         "sonarr_path": file.sonarr_path,
                         "episode_ids": file.episode_ids,
+                        "episode_label": episode_label,
+                        "episode_tvdb_ids": episode_tvdb_ids,
                     },
                     "verdict": (
                         {"s_claimed": verdict.s_claimed, "s_alt": verdict.s_alt, "outcome": verdict.outcome}
@@ -376,13 +472,12 @@ async def _series_external_ids(request: Request, file: File) -> dict[str, Any] |
     the whole job-detail request.
 
     `sonarr_url` is this instance's own series page (base URL + title
-    slug) — the only reliable deep link this data supports. A true
-    per-*episode* TVDB/IMDB or Sonarr URL isn't constructible from what we
-    have: Sonarr's Episode model here carries no per-episode TVDB id (only
-    the series-level one above), so a dupe-info "other file" link or a
-    plugin-results-table episode deep link falls back to this series page
-    rather than a fabricated episode URL — see InspectModal's
-    `episodeDeepLink` comment for where that fallback is applied."""
+    slug) — used as the dupe-info "other file" fallback link, which has no
+    single episode to deep-link to. Per-*episode* TVDB deep links (every
+    rendered SxxEyy in the inspect panel) use the episode's own `tvdb_id`
+    instead — see `Episode.tvdb_id` (sonarr/types.py) and
+    `_episode_label_dict` below, which is where that per-episode id enters
+    `episode_labels`/`series_episodes`."""
     try:
         runtime = _instance_runtime_for_file(request, file)
         series = await runtime.client.series(file.series_id)
@@ -439,7 +534,13 @@ async def _series_episodes(request: Request, file: File) -> list[Any]:
 
 
 def _episode_label_dict(ep: Any) -> dict[str, Any]:
-    return {"id": ep.id, "season": ep.season_number, "episode": ep.episode_number, "title": ep.title}
+    return {
+        "id": ep.id,
+        "season": ep.season_number,
+        "episode": ep.episode_number,
+        "title": ep.title,
+        "tvdb_id": ep.tvdb_id,
+    }
 
 
 def _episode_labels(episodes: list[Any], target_ids: set[int]) -> dict[int, dict[str, Any]]:
@@ -1050,14 +1151,20 @@ async def backfill_instance(name: str, body: BackfillRequest, request: Request) 
 # -- trash --------------------------------------------------------------
 
 
-def _trash_item_out(item: TrashItem, now: datetime) -> dict:
+async def _trash_item_out(item: TrashItem, now: datetime, label_cache: _SeriesLabelCache) -> dict:
+    series_title, episode_label, episode_tvdb_ids = await _resolve_series_label(
+        label_cache, item.instance, item.series_id, item.episode_ids
+    )
     return {
         "id": item.id,
         "instance": item.instance,
         "original_path": item.original_path,
         "trash_path": item.trash_path,
         "series_id": item.series_id,
+        "series_title": series_title,
         "episode_ids": item.episode_ids,
+        "episode_label": episode_label,
+        "episode_tvdb_ids": episode_tvdb_ids,
         "size": item.size,
         "trashed_at": _iso(item.trashed_at),
         "expires_at": _iso(item.expires_at),
@@ -1066,7 +1173,7 @@ def _trash_item_out(item: TrashItem, now: datetime) -> dict:
 
 
 @router.get("/trash")
-def list_trash(request: Request, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+async def list_trash(request: Request, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
     page_size = min(page_size, MAX_PAGE_SIZE)
     with _session_factory(request)() as session:
         base_where = [TrashItem.deleted_at.is_(None)]
@@ -1085,10 +1192,11 @@ def list_trash(request: Request, page: int = 1, page_size: int = DEFAULT_PAGE_SI
             .all()
         )
         now = datetime.now(UTC)
+        label_cache = _SeriesLabelCache(request)
         return {
             "total": total,
             "page_size": page_size,
-            "items": [_trash_item_out(item, now) for item in items],
+            "items": [await _trash_item_out(item, now, label_cache) for item in items],
         }
 
 

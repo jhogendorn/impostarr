@@ -8,7 +8,8 @@
     "sceneEpisodeNumber": null,
     "sceneAbsoluteEpisodeNumber": null,
     "episodeFileId": 9001,
-    "hasFile": true
+    "hasFile": true,
+    "tvdbId": 378653
   },
   {
     "id": 556,

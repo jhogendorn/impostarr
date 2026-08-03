@@ -28,7 +28,7 @@ function ConfidenceBadge({ confidence }: { confidence: number | null }) {
   return (
     <div className="absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center whitespace-nowrap rounded-2xl border border-slate-600/70 bg-slate-950/95 px-4 py-2 shadow-2xl">
       <span
-        className={`confidence-number text-3xl font-black leading-none ${BAND_CLASSES[tone]}`}
+        className={`text-3xl font-black leading-none drop-shadow-[0_2px_3px_rgba(0,0,0,0.8)] ${BAND_CLASSES[tone]}`}
         style={{ WebkitTextStroke: '1px rgba(2,6,23,0.85)' }}
       >
         {formatPercent(confidence)}

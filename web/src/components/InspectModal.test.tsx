@@ -11,7 +11,7 @@ vi.mock('../api/client', async (importOriginal) => {
   return { ...actual, getJob: getJobMock }
 })
 
-describe('InspectModal (v3)', () => {
+describe('InspectModal (v4)', () => {
   afterEach(() => {
     vi.clearAllMocks()
   })
@@ -61,20 +61,26 @@ describe('InspectModal (v3)', () => {
     expect(headings.indexOf('Details')).toBeGreaterThan(headings.indexOf('Plugin Results'))
   })
 
-  it('omits the proposed-action banner when there is neither a proposal nor a human_ident', async () => {
+  it('renders the Proposed Action banner even with no proposal at all — "No Proposed Action" + "Manual Review" (item 5)', async () => {
     getJobMock.mockResolvedValue({ ...jobDetailFixture, verdict: { ...jobDetailFixture.verdict!, proposed_action: null } })
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    await screen.findByRole('combobox', { name: 'Apply Remap' })
+    expect(await screen.findByText('No Proposed Action')).toBeInTheDocument()
+    expect(screen.getByText('Manual Review')).toBeInTheDocument()
     expect(screen.queryByText(/Remap to/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Replace —/)).not.toBeInTheDocument()
   })
 
-  it('shows the proposed-action banner with "Manual Review" (no apply_at) tinted for a remap proposal', async () => {
-    getJobMock.mockResolvedValue(jobDetailFixture) // proposed_action: remap -> episode 100
+  it('shows the proposed-action banner with "Manual Review" (no apply_at) tinted for a remap proposal, S01E01 linked to its tvdb id', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture) // proposed_action: remap -> episode 100 (tvdb_id 378653)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    expect(await screen.findByText('Remap to S01E01')).toBeInTheDocument()
+    const description = await screen.findByText((_, el) => el?.tagName === 'SPAN' && el.textContent === 'Remap to S01E01')
+    expect(description).toBeInTheDocument()
+    expect(within(description).getByRole('link', { name: 'E01' })).toHaveAttribute(
+      'href',
+      'https://thetvdb.com/dereferrer/episode/378653',
+    )
     expect(screen.getByText('Manual Review')).toBeInTheDocument()
   })
 
@@ -127,12 +133,28 @@ describe('InspectModal (v3)', () => {
     expect(screen.getAllByAltText(/frame \d/)).toHaveLength(2)
   })
 
-  it('RHS header reads "Content Identity" with an inline episode selector (Candidates + All Episodes groups)', async () => {
+  it('RHS header reads "Content Identity"; there is no selector in the RHS panel itself — it only previews Apply Remap\'s selection (item 1)', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const heading = await screen.findByText('Content Identity')
+    expect(heading.closest('div')?.parentElement).not.toBeNull()
+    // No native select, and no ARIA-labelled "Content identity episode"
+    // combobox anymore — Apply Remap (in the Action Bar) is the only one.
+    expect(document.querySelector('select')).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Content identity episode' })).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Apply Remap' })).toBeInTheDocument()
+  })
+
+  it('RHS defaults to the CLAIMED episode (with a "Matches Sonarr label" note) when s_claimed >= s_alt — item 16 fix', async () => {
+    // jobDetailFixture: s_claimed 0.92 >= s_alt 0.1 — the claimed episode
+    // (S01E01 Pilot) leads, even though a plugin also suggested S01E05 as
+    // an alternate candidate below.
     getJobMock.mockResolvedValue({
       ...jobDetailFixture,
       series_episodes: [
-        { id: 100, season: 1, episode: 1, title: 'Pilot' },
-        { id: 999, season: 1, episode: 5, title: 'Fifth' },
+        { id: 100, season: 1, episode: 1, title: 'Pilot', tvdb_id: 378653 },
+        { id: 999, season: 1, episode: 5, title: 'Fifth', tvdb_id: null },
       ],
       plugin_results: [
         {
@@ -140,42 +162,111 @@ describe('InspectModal (v3)', () => {
           version: '1.0.0',
           status: 'ok',
           reason: null,
-          candidates: [{ confidence: 0.7, ident: { series: 'claimed', season: 1, episodes: [5] }, numbering: 'tvdb', evidence: {} }],
+          candidates: [{ confidence: 0.1, ident: { series: 'claimed', season: 1, episodes: [5] }, numbering: 'tvdb', evidence: {} }],
           normalized: [{ kind: 'in_series', episode_ids: [999] }],
         },
       ],
-      episode_labels: { ...jobDetailFixture.episode_labels, 999: { id: 999, season: 1, episode: 5, title: 'Fifth' } },
+      episode_labels: { ...jobDetailFixture.episode_labels, '999': { id: 999, season: 1, episode: 5, title: 'Fifth', tvdb_id: null } },
     })
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    expect(await screen.findByText('Content Identity')).toBeInTheDocument()
-    const select = screen.getByRole('combobox', { name: 'Content identity episode' })
-    expect(within(select).getByRole('group', { name: 'Candidates' })).toBeInTheDocument()
-    expect(within(select).getByRole('group', { name: 'All Episodes' })).toBeInTheDocument()
-    // Defaults to the top candidate (S01E05, the only plugin-suggested alternate).
-    expect(select).toHaveValue('999')
-    expect(screen.getAllByText('Fifth', { exact: false }).length).toBeGreaterThan(0)
+    await screen.findByText('Content Identity')
+    expect(screen.getAllByText('Pilot', { exact: false }).length).toBeGreaterThan(0)
+    expect(screen.queryByText('Fifth', { exact: false })).not.toBeInTheDocument()
+    expect(screen.getByText('Matches Sonarr label')).toBeInTheDocument()
   })
 
-  it('selecting a different RHS episode drives the ident text AND which reference-subtitle track renders (single selector, no separate refsub picker)', async () => {
-    const user = userEvent.setup()
+  it('RHS defaults to the leading ALTERNATE candidate when s_alt > s_claimed', async () => {
     getJobMock.mockResolvedValue({
       ...jobDetailFixture,
+      verdict: { ...jobDetailFixture.verdict!, s_claimed: 0.1, s_alt: 0.9 },
       series_episodes: [
-        { id: 100, season: 1, episode: 1, title: 'Pilot' },
-        { id: 200, season: 1, episode: 2, title: 'Second' },
+        { id: 100, season: 1, episode: 1, title: 'Pilot', tvdb_id: 378653 },
+        { id: 999, season: 1, episode: 5, title: 'Fifth', tvdb_id: null },
+      ],
+      plugin_results: [
+        {
+          name: 'whisper-transcript',
+          version: '1.0.0',
+          status: 'ok',
+          reason: null,
+          candidates: [{ confidence: 0.9, ident: { series: 'claimed', season: 1, episodes: [5] }, numbering: 'tvdb', evidence: {} }],
+          normalized: [{ kind: 'in_series', episode_ids: [999] }],
+        },
+      ],
+      episode_labels: { ...jobDetailFixture.episode_labels, '999': { id: 999, season: 1, episode: 5, title: 'Fifth', tvdb_id: null } },
+    })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    await screen.findByText('Content Identity')
+    expect(screen.getAllByText('Fifth', { exact: false }).length).toBeGreaterThan(0)
+    expect(screen.queryByText('Matches Sonarr label')).not.toBeInTheDocument()
+  })
+
+  it('item 13: when the ALTERNATE leads, never defaults to an empty refsub view when a populated one exists — auto-previews S01E02 even though the top alternate itself has none cached', async () => {
+    getJobMock.mockResolvedValue({
+      ...jobDetailFixture,
+      // alt leads (0.9 > 0.1) — item 13's refsub-preference still applies
+      // to this path (item 16 only exempts the CLAIMED-leads case).
+      verdict: { ...jobDetailFixture.verdict!, s_claimed: 0.1, s_alt: 0.9 },
+      series_episodes: [
+        { id: 100, season: 1, episode: 1, title: 'Pilot', tvdb_id: 378653 },
+        { id: 200, season: 1, episode: 2, title: 'Second', tvdb_id: null },
       ],
       reference_subtitles: [{ label: 'S01E02', language: 'en', cues: [{ start_s: 1, text: 'second episode ref line' }], episode_ids: [200] }],
     })
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    const select = await screen.findByRole('combobox', { name: 'Content identity episode' })
-    expect(screen.getByText('No reference subtitles cached for this episode.')).toBeInTheDocument()
-
-    await user.selectOptions(select, 'S01E02 - Second')
-
-    expect(select).toHaveValue('200')
+    await screen.findByRole('combobox', { name: 'Apply Remap' })
     expect(await screen.findByText(/second episode ref line/)).toBeInTheDocument()
+    expect(screen.queryByText('No reference subtitles cached for this episode.')).not.toBeInTheDocument()
+  })
+
+  it('item 16 + 13 interaction (regression, live job 14): when the CLAIMED episode leads but has no cached refsubs while an alternate does, the RHS still shows the claimed episode plainly with "no reference subtitles cached" — never silently swapped to the alternate', async () => {
+    getJobMock.mockResolvedValue({
+      ...jobDetailFixture,
+      verdict: { ...jobDetailFixture.verdict!, s_claimed: 0.6, s_alt: 0.468 },
+      series_episodes: [
+        { id: 100, season: 1, episode: 1, title: 'Pilot', tvdb_id: 378653 },
+        { id: 200, season: 1, episode: 2, title: 'Second', tvdb_id: null },
+      ],
+      reference_subtitles: [{ label: 'S01E02', language: 'en', cues: [{ start_s: 1, text: 'second episode ref line' }], episode_ids: [200] }],
+    })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    await screen.findByRole('combobox', { name: 'Apply Remap' })
+    expect(screen.getByText('Matches Sonarr label')).toBeInTheDocument()
+    expect(screen.getByText('No reference subtitles cached for this episode.')).toBeInTheDocument()
+    expect(screen.queryByText(/second episode ref line/)).not.toBeInTheDocument()
+  })
+
+  it('shows the empty-refsubs message when truly nothing is cached anywhere', async () => {
+    getJobMock.mockResolvedValue({ ...jobDetailFixture, reference_subtitles: [] })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    await screen.findByRole('combobox', { name: 'Apply Remap' })
+    expect(screen.getByText('No reference subtitles cached for this episode.')).toBeInTheDocument()
+  })
+
+  it('previewing a different episode via Apply Remap drives the RHS ident text — WITHOUT calling the API (two-step, item 1)', async () => {
+    const user = userEvent.setup()
+    getJobMock.mockResolvedValue({
+      ...jobDetailFixture,
+      series_episodes: [
+        { id: 100, season: 1, episode: 1, title: 'Pilot', tvdb_id: 378653 },
+        { id: 200, season: 1, episode: 2, title: 'Second', tvdb_id: null },
+        { id: 300, season: 1, episode: 3, title: 'Third', tvdb_id: null },
+      ],
+    })
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const combobox = await screen.findByRole('combobox', { name: 'Apply Remap' })
+    await user.click(combobox)
+    await user.type(combobox, 'Third')
+    await user.click(screen.getByRole('option', { name: 'S01E03 - Third' }))
+
+    expect(screen.getAllByText('Third', { exact: false }).length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: 'Apply Remap to S01E03' })).toBeInTheDocument()
   })
 
   it('per-line hover tooltips show the timestamp on all three text panels; the transcript has no inline [0.0] numbers', async () => {
@@ -286,7 +377,7 @@ describe('InspectModal (v3)', () => {
     getJobMock.mockResolvedValue(jobDetailHumanIdentFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
-    expect(await screen.findByText('Remap to S02E03E04')).toBeInTheDocument()
+    expect(await screen.findByText((_, el) => el?.tagName === 'SPAN' && el.textContent === 'Remap to S02E03E04')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Apply Remap' })).toBeInTheDocument()
   })
 })

@@ -46,13 +46,34 @@ describe('QueueTable', () => {
     render(<QueueTable page={queuePageFixture} {...defaultProps} />)
 
     expect(screen.getByText('Labelled episode')).toBeInTheDocument()
-    expect(screen.getByText('Series 10')).toBeInTheDocument()
     expect(screen.getByText('Show.S01E01.mkv')).toBeInTheDocument()
-    expect(screen.getByText('200, 201')).toBeInTheDocument()
     expect(screen.getAllByText('main', { selector: 'td' }).length).toBeGreaterThan(0)
     expect(screen.getByText('backup', { selector: 'td' })).toBeInTheDocument()
     expect(screen.getByText('1–')).toBeInTheDocument()
     expect(screen.getByText('of 4')).toBeInTheDocument()
+  })
+
+  it('item 17: Series/Episode(s) columns render the RESOLVED series title and episode label, not raw Sonarr ids — falling back to ids only when resolution failed', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    // job 1: fully resolved.
+    expect(screen.getByText('Show', { selector: 'td' })).toBeInTheDocument()
+    expect(screen.getByText('S01E01')).toBeInTheDocument()
+    expect(screen.queryByText('Series 10')).not.toBeInTheDocument()
+
+    // job 1's episode label is a real per-episode TVDB deep link (tvdb_id 378653).
+    expect(screen.getByRole('link', { name: 'S01E01' })).toHaveAttribute(
+      'href',
+      'https://thetvdb.com/dereferrer/episode/378653',
+    )
+
+    // job 2: multi-episode label format.
+    expect(screen.getByText('S02E02-E03')).toBeInTheDocument()
+
+    // job 3: resolution failed (series_title/episode_label/tvdb_ids all
+    // null) -> falls back to raw ids, exactly like pre-item-17 rendering.
+    expect(screen.getByText('Series 12', { selector: 'td' })).toBeInTheDocument()
+    expect(screen.getByText('300')).toBeInTheDocument()
   })
 
   it('renders Confidence as a rounded percentage, color-coded by band', () => {
@@ -279,9 +300,55 @@ describe('QueueTable', () => {
   it('inactive sortable headers show a dim neutral indicator, not the active arrow', () => {
     render(<QueueTable page={queuePageFixture} {...defaultProps} sortField="updated_at" sortDir="desc" />)
 
-    expect(screen.getByRole('button', { name: /Series \(id\)/ })).toHaveTextContent('⇅')
+    expect(screen.getByRole('button', { name: /Series/ })).toHaveTextContent('⇅')
+    expect(screen.getByRole('button', { name: /^Episode/ })).toHaveTextContent('⇅')
+    expect(screen.getByRole('button', { name: /^File/ })).toHaveTextContent('⇅')
     expect(screen.getByRole('button', { name: /Instance/ })).toHaveTextContent('⇅')
     expect(screen.getByRole('button', { name: /Confidence/ })).toHaveTextContent('⇅')
+    expect(screen.getByRole('button', { name: /Outcome/ })).toHaveTextContent('⇅')
+  })
+
+  it('item 18: EVERY meaningful column is sortable (Series, Episode(s), File, Instance, Confidence, Outcome, Updated)', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    for (const name of [/^Series/, /^Episode/, /^File/, /^Instance/, /^Confidence/, /^Outcome/, /^Updated/]) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument()
+    }
+  })
+
+  it('item 18: the whole header cell is the click target (cursor-pointer, aria-sort) — clicking Episode(s)/File/Outcome (previously non-sortable) fires the right sort request', async () => {
+    const user = userEvent.setup()
+    const onSortChange = vi.fn()
+    render(<QueueTable page={queuePageFixture} {...defaultProps} sortField="updated_at" sortDir="desc" onSortChange={onSortChange} />)
+
+    const episodeTh = screen.getByRole('button', { name: /^Episode/ }).closest('th')!
+    expect(episodeTh).toHaveClass('cursor-pointer')
+    expect(episodeTh).toHaveAttribute('aria-sort', 'none')
+
+    await user.click(screen.getByRole('button', { name: /^Episode/ }))
+    expect(onSortChange).toHaveBeenCalledWith('episode', 'desc')
+
+    await user.click(screen.getByRole('button', { name: /^File/ }))
+    expect(onSortChange).toHaveBeenCalledWith('file', 'desc')
+
+    await user.click(screen.getByRole('button', { name: /Outcome/ }))
+    expect(onSortChange).toHaveBeenCalledWith('outcome', 'desc')
+  })
+
+  it('item 18: the active column\'s header carries aria-sort and an accent-coloured arrow', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} sortField="confidence" sortDir="asc" />)
+
+    const confidenceTh = screen.getByRole('button', { name: /Confidence/ }).closest('th')!
+    expect(confidenceTh).toHaveAttribute('aria-sort', 'ascending')
+    expect(screen.getByRole('button', { name: /Confidence/ })).toHaveTextContent('▲')
+    expect(screen.getByRole('button', { name: /Confidence/ }).querySelector('span')).toHaveClass('text-indigo-400')
+  })
+
+  it('item 18: non-sortable columns (checkbox, Actions) carry no cursor-pointer/hover affordance', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} />)
+
+    const actionsTh = screen.getByText('Actions').closest('th')!
+    expect(actionsTh).not.toHaveClass('cursor-pointer')
   })
 
   it('the free-text filter narrows rows by path or series id, client-side over the current page', async () => {

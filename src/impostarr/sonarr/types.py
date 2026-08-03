@@ -88,6 +88,7 @@ class Episode(BaseModel):
     title: str | None = Field(default=None)
     season_number: int = Field(alias="seasonNumber")
     episode_number: int = Field(alias="episodeNumber")
+    tvdb_id: int | None = Field(default=None, alias="tvdbId")
     absolute_episode_number: int | None = Field(default=None, alias="absoluteEpisodeNumber")
     scene_season_number: int | None = Field(default=None, alias="sceneSeasonNumber")
     scene_episode_number: int | None = Field(default=None, alias="sceneEpisodeNumber")

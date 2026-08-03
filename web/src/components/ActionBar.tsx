@@ -5,16 +5,23 @@ import {
   parkJob,
   postVerdict,
   rejectJob,
-  replaceJob,
   rerunJob,
+  replaceJob,
   unparkJob,
 } from '../api/client'
 import type { EpisodeLabel, JobDetail } from '../api/types'
-import { collectAlternates, episodeOptionLabel, hasProposal } from '../lib/inspectData'
+import { type AlternateCandidate, defaultPreviewEpisodeId, hasProposal, proposalTone } from '../lib/inspectData'
+import { formatSeasonEpisode } from '../lib/format'
+import { TWO_COLUMN_GRID_CLASS } from '../lib/layout'
+import EpisodeCombobox from './EpisodeCombobox'
 
 interface ActionBarProps {
   job: JobDetail
   onChanged: () => void
+  selectedEpisodeId: number
+  onSelectEpisode: (id: number) => void
+  candidates: AlternateCandidate[]
+  allEpisodes: EpisodeLabel[]
 }
 
 // No remediated→pending edge exists in the backend transition table (a
@@ -54,21 +61,29 @@ interface HoverKeyProps {
   hoverKey: string
   setActiveKey: Dispatch<SetStateAction<string | null>>
   children: ReactNode
+  /** Defaults to `inline-block` (right for a single button sitting inline
+   * in the flex-wrap left group). The Apply Remap group passes `w-full`
+   * instead — `inline-block` shrink-to-fits its content, which silently
+   * defeats the combobox's `flex-1`/`w-full` sizing (there's no width to
+   * fill: the wrapper's own width comes FROM its content in that mode),
+   * which is exactly what broke the width-match-to-RHS-panel requirement
+   * (item 2) — the combobox+button group rendered ~125px narrower than
+   * the RHS panel because of this one wrapper. */
+  className?: string
 }
 
-/** Wraps one control so hovering/focusing it sets the section-wide
- * "which explainer is showing" key — the actual explainer panel is
- * rendered ONCE, at the action bar's bottom edge (see ExplainerOverlay),
- * not per-button, so it can overlay the section below without any one
- * button owning its own floating tooltip. */
-function HoverTarget({ hoverKey, setActiveKey, children }: HoverKeyProps) {
+/** Wraps one control so hovering/focusing it sets the section-wide "which
+ * explainer is showing" key — the explainer text itself renders once, in
+ * the permanently-allocated `ActionExplanation` block below the button
+ * row (item 6), not per-button. */
+function HoverTarget({ hoverKey, setActiveKey, children, className = 'inline-block' }: HoverKeyProps) {
   return (
     <div
       onMouseEnter={() => setActiveKey(hoverKey)}
       onMouseLeave={() => setActiveKey((current) => (current === hoverKey ? null : current))}
       onFocus={() => setActiveKey(hoverKey)}
       onBlur={() => setActiveKey((current) => (current === hoverKey ? null : current))}
-      className="inline-block"
+      className={className}
     >
       {children}
     </div>
@@ -79,7 +94,7 @@ const EXPLAINERS: Record<string, string> = {
   markCorrect:
     'Marks this file as verified — positively asserts the label is correct, records gold truth, and feeds the fingerprint corpus. Moves this job to Matched.',
   applyRemap:
-    "Choose the correct episode from the list. Selecting one immediately remaps the file to it via Sonarr's manual import and moves this job to Remediated.",
+    'Preview an episode below, then confirm — remaps the file to it via Sonarr\'s manual import and moves this job to Remediated. Previewing alone never mutates anything.',
   trashRegrab:
     'Moves the current file to Trash (kept for its configured retention window, if any), blocklists the release when possible, and triggers a fresh Sonarr search to regrab a replacement. Moves this job to Remediated.',
   dismiss:
@@ -91,23 +106,24 @@ const EXPLAINERS: Record<string, string> = {
   unpark: 'Releases this held job back to Pending so a worker can claim it.',
 }
 
-/** The single explainer surface for the whole action bar — absolutely
- * positioned so it overlays whatever renders below the (sticky) action
- * bar rather than pushing it down. Height-animated via max-height/opacity,
- * not `display`, so the transition itself never reflows either. */
-function ExplainerOverlay({ activeKey }: { activeKey: string | null }) {
-  const text = activeKey ? EXPLAINERS[activeKey] : null
-  return (
-    <div
-      role="tooltip"
-      aria-hidden={!text}
-      className={`pointer-events-none absolute inset-x-0 top-full z-30 overflow-hidden border-t border-slate-700 bg-slate-950 px-4 text-sm leading-snug text-slate-300 shadow-xl transition-[max-height,opacity] duration-150 ${
-        text ? 'max-h-24 opacity-100 py-3' : 'max-h-0 opacity-0 py-0'
-      }`}
-    >
-      {text}
-    </div>
-  )
+const NO_PROPOSAL_EXPLANATION = 'No proposed action for this job — choose one of the actions above based on your own review.'
+
+/** Section B's default explanation — the CURRENT proposed action's
+ * explainer, always populated (item 6's "default content"). */
+function defaultExplanation(job: JobDetail): string {
+  const tone = proposalTone(job)
+  if (tone === 'remap') return EXPLAINERS.applyRemap
+  if (tone === 'replace') return EXPLAINERS.trashRegrab
+  return NO_PROPOSAL_EXPLANATION
+}
+
+/** Permanent explanation slot (item 6) — occupies real flow space with a
+ * fixed min-height so hovering a button swaps its text in place, with no
+ * reflow (unlike the earlier absolutely-positioned overlay approach this
+ * supersedes). Defaults to the current proposed action's explanation. */
+function ActionExplanation({ activeKey, job }: { activeKey: string | null; job: JobDetail }) {
+  const text = activeKey ? (EXPLAINERS[activeKey] ?? defaultExplanation(job)) : defaultExplanation(job)
+  return <p className="mt-3 min-h-[2.5rem] text-sm leading-snug text-slate-300">{text}</p>
 }
 
 interface ButtonProps {
@@ -125,26 +141,19 @@ function ActionButton({ label, tone, disabled, onClick }: ButtonProps) {
   )
 }
 
-/** Builds the two option groups shared by the Apply Remap dropdown:
- * Candidates (plugin-suggested in-series alternates, descending
- * confidence) then All Episodes (every episode of the series, from
- * `job.series_episodes` — see routes.py `get_job_detail`). */
-function buildEpisodeGroups(job: JobDetail) {
-  const labelledIds = new Set(job.file.episode_ids)
-  const candidates = collectAlternates(job, labelledIds)
-  const allEpisodes = [...(job.series_episodes ?? [])].sort((a, b) => a.season - b.season || a.episode - b.episode)
-  return { candidates, allEpisodes }
-}
-
-function findEpisodeLabel(job: JobDetail, episodeId: number): EpisodeLabel | undefined {
-  return (job.series_episodes ?? []).find((ep) => ep.id === episodeId) ?? job.episode_labels[String(episodeId)]
+function findEpisodeLabel(allEpisodes: EpisodeLabel[], job: JobDetail, episodeId: number): EpisodeLabel | undefined {
+  return allEpisodes.find((ep) => ep.id === episodeId) ?? job.episode_labels[String(episodeId)]
 }
 
 /** State-dependent controls for a job's current status — the inspect
- * panel's Action Bar (section B). Renders inline with (and overlaid by)
- * a single shared explainer surface at the bar's bottom edge — see
- * ExplainerOverlay. */
-function ActionBar({ job, onChanged }: ActionBarProps) {
+ * panel's Action Bar (section B). Apply Remap is a two-step control
+ * (item 1): the combobox only previews a selection (shared with the RHS
+ * "Content Identity" preview via `selectedEpisodeId`/`onSelectEpisode`,
+ * lifted to InspectModal); a separate button performs the remap, and only
+ * once the preview differs from the default (the current proposal/top
+ * candidate) does its label change to name the target, making the two
+ * steps visually distinct. */
+function ActionBar({ job, onChanged, selectedEpisodeId, onSelectEpisode, candidates, allEpisodes }: ActionBarProps) {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeKey, setActiveKey] = useState<string | null>(null)
@@ -164,8 +173,8 @@ function ActionBar({ job, onChanged }: ActionBarProps) {
     }
   }
 
-  function applyRemapTo(episodeId: number) {
-    const label = findEpisodeLabel(job, episodeId)
+  function applyRemap() {
+    const label = findEpisodeLabel(allEpisodes, job, selectedEpisodeId)
     if (!label) return
     void run(async () => {
       await postVerdict(job.job.id, { verdict: 'is_other', ident: { season: label.season, episodes: [label.episode] } })
@@ -179,107 +188,104 @@ function ActionBar({ job, onChanged }: ActionBarProps) {
   const showUnpark = status === 'hold'
   const showReidentify = REIDENTIFY_STATUSES.has(status)
 
-  const { candidates, allEpisodes } = buildEpisodeGroups(job)
+  const defaultSelection = defaultPreviewEpisodeId(job, candidates)
+  const selectionDiffers = selectedEpisodeId !== defaultSelection
+  const selectedLabel = findEpisodeLabel(allEpisodes, job, selectedEpisodeId)
+  const remapButtonLabel = selectionDiffers && selectedLabel ? `Apply Remap to ${formatSeasonEpisode(selectedLabel.season, [selectedLabel.episode])}` : 'Apply Remap'
 
   return (
     <div className="relative">
       {error && (
         <p className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</p>
       )}
-      <div className="flex flex-wrap items-center gap-2">
-        {showVerdictButtons && (
-          <>
-            <HoverTarget hoverKey="markCorrect" setActiveKey={setActiveKey}>
-              <ActionButton
-                label="Mark Correct"
-                tone="confirm"
-                disabled={pending}
-                onClick={() => void run(() => postVerdict(job.job.id, { verdict: 'is_claimed' }))}
-              />
-            </HoverTarget>
-
-            <HoverTarget hoverKey="applyRemap" setActiveKey={setActiveKey}>
-              <select
-                aria-label="Apply Remap"
-                disabled={pending}
-                value=""
-                onChange={(event) => {
-                  const id = Number(event.target.value)
-                  if (!Number.isNaN(id) && id > 0) applyRemapTo(id)
-                }}
-                className={`${BASE_CONTROL_CLASS} ${TONE_CLASSES.remap}`}
-              >
-                <option value="" disabled>
-                  Apply Remap
-                </option>
-                {candidates.length > 0 && (
-                  <optgroup label="Candidates">
-                    {candidates.map((c) => {
-                      const epId = c.episodeIds[0]
-                      const label = findEpisodeLabel(job, epId)
-                      return (
-                        <option key={epId} value={epId}>
-                          {label ? episodeOptionLabel(label) : `episode ${epId}`}
-                        </option>
-                      )
-                    })}
-                  </optgroup>
-                )}
-                <optgroup label="All Episodes">
-                  {allEpisodes.map((ep) => (
-                    <option key={ep.id} value={ep.id}>
-                      {episodeOptionLabel(ep)}
-                    </option>
-                  ))}
-                </optgroup>
-              </select>
-            </HoverTarget>
-
-            <HoverTarget hoverKey="trashRegrab" setActiveKey={setActiveKey}>
-              <ActionButton
-                label="Trash and Regrab"
-                tone="destructive"
-                disabled={pending}
-                onClick={() => void run(() => replaceJob(job.job.id))}
-              />
-            </HoverTarget>
-
-            {showDismiss && (
-              <HoverTarget hoverKey="dismiss" setActiveKey={setActiveKey}>
-                <ActionButton label="Dismiss" tone="neutral" disabled={pending} onClick={() => void run(() => rejectJob(job.job.id))} />
+      <div className={TWO_COLUMN_GRID_CLASS}>
+        <div className="flex flex-wrap items-center gap-2">
+          {showVerdictButtons && (
+            <>
+              <HoverTarget hoverKey="markCorrect" setActiveKey={setActiveKey}>
+                <ActionButton
+                  label="Mark Correct"
+                  tone="confirm"
+                  disabled={pending}
+                  onClick={() => void run(() => postVerdict(job.job.id, { verdict: 'is_claimed' }))}
+                />
               </HoverTarget>
-            )}
 
-            <HoverTarget hoverKey="ignoreMismatch" setActiveKey={setActiveKey}>
-              <ActionButton
-                label="Ignore Mismatch"
-                tone="neutral"
-                disabled={pending}
-                onClick={() => void run(() => postVerdict(job.job.id, { verdict: 'ignore' }))}
-              />
+              <HoverTarget hoverKey="trashRegrab" setActiveKey={setActiveKey}>
+                <ActionButton
+                  label="Trash and Regrab"
+                  tone="destructive"
+                  disabled={pending}
+                  onClick={() => void run(() => replaceJob(job.job.id))}
+                />
+              </HoverTarget>
+
+              {showDismiss && (
+                <HoverTarget hoverKey="dismiss" setActiveKey={setActiveKey}>
+                  <ActionButton label="Dismiss" tone="neutral" disabled={pending} onClick={() => void run(() => rejectJob(job.job.id))} />
+                </HoverTarget>
+              )}
+
+              <HoverTarget hoverKey="ignoreMismatch" setActiveKey={setActiveKey}>
+                <ActionButton
+                  label="Ignore Mismatch"
+                  tone="neutral"
+                  disabled={pending}
+                  onClick={() => void run(() => postVerdict(job.job.id, { verdict: 'ignore' }))}
+                />
+              </HoverTarget>
+            </>
+          )}
+
+          {showReidentify && (
+            <HoverTarget hoverKey="reidentify" setActiveKey={setActiveKey}>
+              <ActionButton label="Reidentify" tone="neutral" disabled={pending} onClick={() => void run(() => rerunJob(job.job.id))} />
             </HoverTarget>
-          </>
-        )}
+          )}
 
-        {showReidentify && (
-          <HoverTarget hoverKey="reidentify" setActiveKey={setActiveKey}>
-            <ActionButton label="Reidentify" tone="neutral" disabled={pending} onClick={() => void run(() => rerunJob(job.job.id))} />
-          </HoverTarget>
-        )}
+          {showPark && (
+            <HoverTarget hoverKey="park" setActiveKey={setActiveKey}>
+              <ActionButton label="Park" tone="neutral" disabled={pending} onClick={() => void run(() => parkJob(job.job.id))} />
+            </HoverTarget>
+          )}
 
-        {showPark && (
-          <HoverTarget hoverKey="park" setActiveKey={setActiveKey}>
-            <ActionButton label="Park" tone="neutral" disabled={pending} onClick={() => void run(() => parkJob(job.job.id))} />
-          </HoverTarget>
-        )}
+          {showUnpark && (
+            <HoverTarget hoverKey="unpark" setActiveKey={setActiveKey}>
+              <ActionButton label="Unpark" tone="neutral" disabled={pending} onClick={() => void run(() => unparkJob(job.job.id))} />
+            </HoverTarget>
+          )}
+        </div>
 
-        {showUnpark && (
-          <HoverTarget hoverKey="unpark" setActiveKey={setActiveKey}>
-            <ActionButton label="Unpark" tone="neutral" disabled={pending} onClick={() => void run(() => unparkJob(job.job.id))} />
-          </HoverTarget>
-        )}
+        <div />
+
+        <div className="justify-self-stretch">
+          {showVerdictButtons && (
+            <HoverTarget hoverKey="applyRemap" setActiveKey={setActiveKey} className="w-full">
+              <div className="flex w-full items-stretch gap-2">
+                <EpisodeCombobox
+                  ariaLabel="Apply Remap"
+                  value={selectedEpisodeId}
+                  onChange={onSelectEpisode}
+                  candidates={candidates}
+                  allEpisodes={allEpisodes}
+                  episodeLabels={job.episode_labels}
+                  disabled={pending}
+                  className="min-w-0 flex-1"
+                />
+                <button
+                  type="button"
+                  disabled={pending}
+                  onClick={applyRemap}
+                  className={`${BASE_CONTROL_CLASS} shrink-0 ${TONE_CLASSES.remap}`}
+                >
+                  {remapButtonLabel}
+                </button>
+              </div>
+            </HoverTarget>
+          )}
+        </div>
       </div>
-      <ExplainerOverlay activeKey={activeKey} />
+      <ActionExplanation activeKey={activeKey} job={job} />
     </div>
   )
 }

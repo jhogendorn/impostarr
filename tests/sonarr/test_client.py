@@ -242,6 +242,10 @@ async def test_episodes_happy_path():
     no_file = episodes[2]
     assert no_file.has_file is False
     assert route.calls.last.request.url.params["seriesId"] == "42"
+    # tvdb_id: parsed when Sonarr's episode resource carries one, None
+    # when it doesn't (episodes.json's later entries omit the field).
+    assert episodes[0].tvdb_id == 378653
+    assert episodes[1].tvdb_id is None
 
 
 @respx.mock
