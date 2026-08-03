@@ -91,7 +91,7 @@ class RefSubService:
         # transient error doesn't burn a real quota unit.
         committed = False
         try:
-            file_id = await self._search(tvdb_id, season, episode)
+            file_id = await self._search(series_ext_ids, season, episode)
             if file_id is None:
                 return None
             link = await self._download(file_id)
@@ -226,16 +226,75 @@ class RefSubService:
             return None
         return response
 
-    async def _search(self, tvdb_id: Any, season: int, episode: int) -> int | None:
+    @staticmethod
+    def _numeric_imdb_id(raw: Any) -> int | None:
+        """Normalizes an imdb id (`"tt1086788"`, `"1086788"`, or an int) to
+        the bare numeric id OpenSubtitles' `parent_imdb_id` expects."""
+        if raw is None:
+            return None
+        text = str(raw).removeprefix("tt")
+        return int(text) if text.isdigit() else None
+
+    async def _search(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> int | None:
+        """Tries `parent_imdb_id` -> `parent_tvdb_id` -> `query` (series
+        title), moving to the next strategy whenever one comes back empty
+        (id unavailable, 4xx/5xx, or zero results) -- OpenSubtitles' tvdb
+        search path has been flaky/unsupported in production regardless of
+        param order, so imdb is preferred when available."""
+        imdb_id = self._numeric_imdb_id(series_ext_ids.get("imdb"))
+        if imdb_id is not None:
+            file_id = await self._search_query(
+                {
+                    "episode_number": episode,
+                    "languages": "en",
+                    "parent_imdb_id": imdb_id,
+                    "season_number": season,
+                }
+            )
+            if file_id is not None:
+                logger.info("reference subtitle search served by imdb strategy: S%02dE%02d", season, episode)
+                return file_id
+
+        tvdb_id = series_ext_ids.get("tvdb")
+        if tvdb_id is not None:
+            file_id = await self._search_query(
+                {
+                    "episode_number": episode,
+                    "languages": "en",
+                    "parent_tvdb_id": tvdb_id,
+                    "season_number": season,
+                }
+            )
+            if file_id is not None:
+                logger.info("reference subtitle search served by tvdb strategy: S%02dE%02d", season, episode)
+                return file_id
+
+        title = series_ext_ids.get("title")
+        if title:
+            file_id = await self._search_query(
+                {
+                    "episode_number": episode,
+                    "languages": "en",
+                    "query": title,
+                    "season_number": season,
+                }
+            )
+            if file_id is not None:
+                logger.info("reference subtitle search served by query strategy: S%02dE%02d", season, episode)
+                return file_id
+
+        logger.info("no reference subtitle results from any search strategy: S%02dE%02d", season, episode)
+        return None
+
+    async def _search_query(self, params: dict[str, Any]) -> int | None:
+        """Issues one `/subtitles` search. Params are sent in alphabetical
+        key order -- OpenSubtitles treats that as canonical and 301s
+        anything else (handled by the client's `follow_redirects=True`,
+        but sending canonical order avoids the redirect round-trip)."""
         response = await self._authed_request(
             "GET",
             f"{OPENSUBTITLES_BASE_URL}/subtitles",
-            params={
-                "parent_tvdb_id": tvdb_id,
-                "season_number": season,
-                "episode_number": episode,
-                "languages": "en",
-            },
+            params=dict(sorted(params.items())),
         )
         if response is None:
             return None
@@ -251,11 +310,6 @@ class RefSubService:
             if download_count > best_download_count:
                 best_download_count = download_count
                 best_file_id = files[0].get("file_id")
-
-        if best_file_id is None:
-            logger.info(
-                "no reference subtitle results for tvdb=%s S%02dE%02d", tvdb_id, season, episode
-            )
         return best_file_id
 
     async def _download(self, file_id: int) -> str | None:

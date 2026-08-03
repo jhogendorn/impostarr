@@ -28,7 +28,9 @@ def make_cfg(tmp_path: Path, **overrides) -> RefSubsConfig:
 
 
 async def make_service(cfg: RefSubsConfig) -> RefSubService:
-    http = httpx.AsyncClient()
+    # follow_redirects mirrors production (see main.py): OpenSubtitles 301s
+    # a search whose params aren't in canonical (alphabetical) order.
+    http = httpx.AsyncClient(follow_redirects=True)
     return RefSubService(cfg, http)
 
 
@@ -443,3 +445,173 @@ async def test_login_429_twice_gives_up_cleanly(tmp_path, monkeypatch):
     assert result is None
     assert login_route.call_count == 2
     assert search_route.call_count == 0
+
+
+# -- canonical params / redirects / imdb-first fallback chain -----------
+
+
+def _mock_search_hit(file_id: int = 1, download_count: int = 5) -> dict:
+    return {
+        "data": [
+            {"attributes": {"download_count": download_count, "language": "en", "files": [{"file_id": file_id}]}}
+        ]
+    }
+
+
+def _mock_download_and_file(file_id_link: str = "https://dl.opensubtitles.com/sub/1.srt") -> None:
+    respx.post(f"{BASE_URL}/download").mock(return_value=httpx.Response(200, json={"link": file_id_link}))
+    respx.get(file_id_link).mock(return_value=httpx.Response(200, text="content"))
+
+
+@respx.mock
+async def test_search_params_sent_in_alphabetical_key_order(tmp_path):
+    # OpenSubtitles treats alphabetical key order as canonical; any other
+    # order gets 301-redirected (see test_search_follows_redirects below).
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json={"data": []}))
+
+    service = await make_service(cfg)
+    await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    sent_keys = list(search_route.calls.last.request.url.params.keys())
+    assert sent_keys == sorted(sent_keys)
+
+
+@respx.mock
+async def test_search_follows_redirects_instead_of_raising(tmp_path):
+    # Non-alphabetical param order previously got a 301 text/html redirect
+    # our client didn't follow -> `response.json()` on the empty redirect
+    # body raised JSONDecodeError, caught by get()'s broad except and
+    # logged as "reference subtitle fetch failed unexpectedly" (exactly
+    # the production symptom). A client with follow_redirects=True
+    # resolves this without any special-casing in refsubs.py.
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    respx.get(f"{BASE_URL}/subtitles").mock(
+        return_value=httpx.Response(301, headers={"Location": f"{BASE_URL}/subtitles-canonical"})
+    )
+    respx.get(f"{BASE_URL}/subtitles-canonical").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is not None
+
+
+async def test_search_without_redirect_following_swallows_json_decode_error(tmp_path):
+    # Proves the bug this fixes: a client that does NOT follow redirects
+    # sees the bare 301 body, response.json() raises, and get() swallows
+    # it via its broad except -- returning None rather than propagating.
+    with respx.mock:
+        cfg = make_cfg(tmp_path)
+        respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+        respx.get(f"{BASE_URL}/subtitles").mock(
+            return_value=httpx.Response(301, headers={"Location": f"{BASE_URL}/subtitles-canonical"})
+        )
+        respx.get(f"{BASE_URL}/subtitles-canonical").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+        _mock_download_and_file()
+
+        http = httpx.AsyncClient(follow_redirects=False)
+        service = RefSubService(cfg, http)
+        result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+        assert result is None
+
+
+@respx.mock
+async def test_search_imdb_success_short_circuits_tvdb_and_query(tmp_path):
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get(
+        {"tvdb": 123456, "imdb": "tt1086788", "title": "No Heroics"}, season=1, episode=2
+    )
+
+    assert result is not None
+    assert search_route.call_count == 1
+    sent_params = search_route.calls.last.request.url.params
+    assert sent_params["parent_imdb_id"] == "1086788"
+    assert "parent_tvdb_id" not in sent_params
+    assert "query" not in sent_params
+
+
+@respx.mock
+async def test_search_imdb_400_falls_back_to_tvdb(tmp_path):
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(
+        side_effect=[
+            httpx.Response(400, json={"errors": ["Not enough parameters"]}),
+            httpx.Response(200, json=_mock_search_hit()),
+        ]
+    )
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get(
+        {"tvdb": 123456, "imdb": "tt1086788", "title": "No Heroics"}, season=1, episode=2
+    )
+
+    assert result is not None
+    assert search_route.call_count == 2
+    assert search_route.calls[0].request.url.params["parent_imdb_id"] == "1086788"
+    assert search_route.calls[1].request.url.params["parent_tvdb_id"] == "123456"
+
+
+@respx.mock
+async def test_search_imdb_and_tvdb_dead_falls_back_to_query(tmp_path):
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(
+        side_effect=[
+            httpx.Response(400, json={"errors": ["Not enough parameters"]}),
+            httpx.Response(400, json={"errors": ["Not enough parameters"]}),
+            httpx.Response(200, json=_mock_search_hit()),
+        ]
+    )
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get(
+        {"tvdb": 123456, "imdb": "tt1086788", "title": "No Heroics"}, season=1, episode=2
+    )
+
+    assert result is not None
+    assert search_route.call_count == 3
+    assert search_route.calls[2].request.url.params["query"] == "No Heroics"
+
+
+@respx.mock
+async def test_search_no_imdb_no_title_uses_tvdb_only(tmp_path):
+    # Existing tvdb-only contract (no imdb/title in series_ext_ids) must
+    # keep working unchanged.
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is not None
+    assert search_route.call_count == 1
+    assert search_route.calls.last.request.url.params["parent_tvdb_id"] == "123456"
+
+
+@respx.mock
+async def test_search_all_strategies_exhausted_returns_none(tmp_path):
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json={"data": []}))
+
+    service = await make_service(cfg)
+    result = await service.get(
+        {"tvdb": 123456, "imdb": "tt1086788", "title": "No Heroics"}, season=1, episode=2
+    )
+
+    assert result is None

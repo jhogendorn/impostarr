@@ -15,9 +15,11 @@ class StubRefSubs:
     def __init__(self, mapping: dict[tuple[int, int], Path]) -> None:
         self.mapping = mapping
         self.calls: list[tuple[int, int]] = []
+        self.ext_ids_calls: list[dict[str, Any]] = []
 
     async def get(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> Path | None:
         self.calls.append((season, episode))
+        self.ext_ids_calls.append(series_ext_ids)
         return self.mapping.get((season, episode))
 
 
@@ -73,6 +75,33 @@ def write_srt(path: Path, lines: list[str]) -> None:
 
 def make_ctx(series: dict[str, Any], episodes: list[dict[str, Any]], refsubs: Any) -> SeriesContext:
     return SeriesContext(series=series, episodes=episodes, refsubs=refsubs)
+
+
+def test_series_ext_ids_includes_title() -> None:
+    ext_ids = whisper_subs._series_ext_ids(make_series())
+
+    assert ext_ids == {"tvdb": 123456, "title": "Show"}
+
+
+def test_series_ext_ids_omits_title_when_blank() -> None:
+    ext_ids = whisper_subs._series_ext_ids(make_series(title=""))
+
+    assert "title" not in ext_ids
+
+
+async def test_refsubs_get_called_with_title_in_series_ext_ids(tmp_path):
+    e1_path = tmp_path / "S01E01.srt"
+    write_srt(e1_path, ["a", "b", "c"])
+    refsubs = StubRefSubs({(1, 1): e1_path})
+    ctx = make_ctx(make_series(), [make_episode(1, 1)], refsubs)
+    claimed = make_claimed(season=1, episodes=[1])
+    assets = AssetBundle(transcript=make_transcript(["a", "b", "c"]))
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3))
+    await plugin.identify(claimed, assets, ctx)
+
+    assert refsubs.ext_ids_calls
+    assert all(ext_ids == {"tvdb": 123456, "title": "Show"} for ext_ids in refsubs.ext_ids_calls)
 
 
 async def test_correct_ranked_candidates_with_mislabel(tmp_path):
