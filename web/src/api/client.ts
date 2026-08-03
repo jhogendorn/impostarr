@@ -80,6 +80,13 @@ export function assetUrl(jobId: number, assetId: number): string {
   return `${API_BASE}/jobs/${jobId}/assets/${assetId}`
 }
 
+/** URL for a job's debug datapack — for use as an `<a href download>`,
+ * triggering a browser download of the attachment response directly
+ * rather than fetched through the `api()` JSON helper. */
+export function datapackUrl(jobId: number): string {
+  return `${API_BASE}/jobs/${jobId}/datapack`
+}
+
 export function postVerdict(id: number, req: VerdictRequest): Promise<VerdictResponse> {
   return api<VerdictResponse>(`/jobs/${id}/verdict`, {
     method: 'POST',

@@ -180,12 +180,16 @@ export interface Asset {
 
 /** Live-fetched claimed-series cross-database ids, `null` when the lookup
  * failed or no instance runtime is configured (see routes.py
- * `_series_external_ids`). */
+ * `_series_external_ids`). `sonarr_url` is this instance's series page —
+ * the only reliable deep link available (no per-episode TVDB/IMDB id is
+ * modeled from Sonarr's Episode API here), used as the episode-deep-link
+ * fallback in the plugin-results table and dupe-info "other file" link. */
 export interface SeriesExternalIds {
   title: string | null
   tvdb_id: number | null
   imdb_id: string | null
   tmdb_id: number | null
+  sonarr_url: string
 }
 
 export interface FrameHashSummary {
@@ -199,6 +203,27 @@ export interface PhashCorpusSummary {
   source: 'auto' | 'human'
 }
 
+/** One Sonarr episode id resolved to human-readable form — see routes.py
+ * `_episode_labels`. Keyed by episode id (as a string, JSON object key)
+ * on `JobDetail.episode_labels` for every id referenced anywhere in the
+ * payload (P0.5: never render a bare episode id). */
+export interface EpisodeLabel {
+  id: number
+  season: number
+  episode: number
+  title: string | null
+}
+
+/** A subtitle track's cue text (timestamps discarded — see
+ * `impostarr.plugins.subtitles.parse_srt`), for the three-way text
+ * comparison's reference-subs column. `label` is season/episode-ish
+ * (e.g. "S01E01") when derivable, else a generic fallback. */
+export interface ReferenceSubtitleTrack {
+  label: string
+  language: string | null
+  cues: string[]
+}
+
 export interface JobDetail {
   job: JobDetailJob
   instance: string | null
@@ -207,6 +232,8 @@ export interface JobDetail {
   plugin_results: PluginResult[]
   verdict: JobDetailVerdict | null
   assets: Asset[]
+  episode_labels: Record<string, EpisodeLabel>
+  reference_subtitles: ReferenceSubtitleTrack[]
   frame_hash_present: boolean
   frame_hash: FrameHashSummary | null
   phash_corpus: PhashCorpusSummary | null
