@@ -41,6 +41,12 @@ never required.
   phash corpus).
 - burned-in-subtitle OCR: frame sampling + caption-region crop + OCR + the
   text-identification path; budget/schedule-gated.
+- character-recognition: identify which characters appear in sampled frames
+  against the episode's expected cast (present/absent cast is an
+  identification signal — guest characters especially). A purpose-trained
+  face/character embedding model with per-series reference galleries is
+  likely far cheaper than pushing frames at a general VLM; viability
+  unproven — pinned for later exploration.
 - Extraction-stage pluggability ("inspection plugins") once multiple
   identifiers consume shared derived artifacts like OCR text.
 
