@@ -83,7 +83,7 @@ describe('InspectModal', () => {
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
 
     await screen.findByText(/whisper-transcript/)
-    const panel = document.body.querySelector('.max-w-3xl')
+    const panel = document.body.querySelector('.max-w-7xl')
     expect(panel).toHaveClass('glow-elevated')
   })
 
@@ -112,6 +112,56 @@ describe('InspectModal', () => {
     const frames = within(column).getAllByAltText(/frame \d/)
     expect(frames).toHaveLength(2)
     expect(frames[0]).toHaveAttribute('src', '/api/v1/jobs/42/assets/2')
+  })
+
+  // -- layout regression (jsdom can't render real CSS, but these pin the
+  // structural choices the production layout bug depended on, so a future
+  // refactor that reintroduces the broken pattern trips a red test) ------
+
+  it('the modal panel is wide (~90vw, max-w-7xl) — not the old max-w-3xl that left no room for three columns', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    await screen.findByText(/whisper-transcript/)
+    const panel = document.body.querySelector('[class*="max-w-"]')!
+    expect(panel).toHaveClass('w-[90vw]', 'max-w-7xl')
+  })
+
+  it('the identity row and the three-way text row are SEPARATE grids, not one grid spanning both', async () => {
+    // Root cause of the production layout collapse: a single grid spanning
+    // both rows lets a <pre>'s long-line max-content (used to size a
+    // content-based "auto" track) hijack the identity row's column widths
+    // too, since CSS Grid sizes a column from every item placed in it
+    // across all rows. Two separate grids make that impossible structurally.
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const asLabelled = await screen.findByText('As labelled')
+    const identityGrid = asLabelled.closest('.grid')!
+    const transcriptHeading = screen.getByText('Transcript')
+    const textGrid = transcriptHeading.closest('.grid')!
+    expect(identityGrid).not.toBe(textGrid)
+    expect(identityGrid).not.toContainElement(transcriptHeading)
+  })
+
+  it('the three text-comparison columns use Tailwind grid-cols-3 (built-in minmax(0,1fr) per column), not a hand-rolled 1fr track', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const textGrid = (await screen.findByText('Transcript')).closest('.grid')!
+    expect(textGrid).toHaveClass('grid-cols-3')
+  })
+
+  it('framegrabs render as a horizontal-scroll strip of fixed-width thumbnails, not flex-wrap (which stacked them into vertical slivers in a narrow column)', async () => {
+    getJobMock.mockResolvedValue(jobDetailFixture)
+    render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
+
+    const frame = (await screen.findAllByAltText(/frame \d/))[0]
+    expect(frame).toHaveClass('w-40')
+    expect(frame).not.toHaveClass('w-auto')
+    const strip = frame.closest('div')!.parentElement!
+    expect(strip).toHaveClass('overflow-x-auto')
+    expect(strip).not.toHaveClass('flex-wrap')
   })
 
   it('shows an aggregate confidence figure centered between the two columns', async () => {
