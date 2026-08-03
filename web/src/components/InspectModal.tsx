@@ -794,20 +794,20 @@ function PhashSection({ detail }: { detail: JobDetail }) {
 // -- debug datapack download (UI-SPEC section 7) ---------------------------
 
 function DatapackDownload({ jobId }: { jobId: number }) {
-  const [includePaths, setIncludePaths] = useState(false)
+  const [armed, setArmed] = useState(false)
   return (
     <section className="border-t border-slate-800 pt-4 text-xs text-slate-500">
       <label className="flex items-center gap-2">
         <input
           type="checkbox"
-          checked={includePaths}
-          onChange={(event) => setIncludePaths(event.target.checked)}
+          checked={armed}
+          onChange={(event) => setArmed(event.target.checked)}
           className="h-3.5 w-3.5 accent-indigo-500"
         />
-        Include file paths — the datapack always includes full file paths; this just confirms you want a copy that does
+        Enable download
       </label>
       <div className="mt-2">
-        {includePaths ? (
+        {armed ? (
           <a
             href={datapackUrl(jobId)}
             download
