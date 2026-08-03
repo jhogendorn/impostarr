@@ -16,10 +16,18 @@ class StubRefSubs:
         self.mapping = mapping
         self.calls: list[tuple[int, int]] = []
         self.ext_ids_calls: list[dict[str, Any]] = []
+        self.language_calls: list[str | None] = []
 
-    async def get(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> Path | None:
+    async def get(
+        self,
+        series_ext_ids: dict[str, Any],
+        season: int,
+        episode: int,
+        language: str | None = None,
+    ) -> Path | None:
         self.calls.append((season, episode))
         self.ext_ids_calls.append(series_ext_ids)
+        self.language_calls.append(language)
         return self.mapping.get((season, episode))
 
 
@@ -102,6 +110,70 @@ async def test_refsubs_get_called_with_title_in_series_ext_ids(tmp_path):
 
     assert refsubs.ext_ids_calls
     assert all(ext_ids == {"tvdb": 123456, "title": "Show"} for ext_ids in refsubs.ext_ids_calls)
+
+
+async def test_refsubs_get_called_with_transcript_language(tmp_path):
+    e1_path = tmp_path / "S01E01.srt"
+    write_srt(e1_path, ["a", "b", "c"])
+    refsubs = StubRefSubs({(1, 1): e1_path})
+    ctx = make_ctx(make_series(), [make_episode(1, 1)], refsubs)
+    claimed = make_claimed(season=1, episodes=[1])
+    transcript = make_transcript(["a", "b", "c"])
+    transcript["language"] = "ja"
+    assets = AssetBundle(transcript=transcript)
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3))
+    await plugin.identify(claimed, assets, ctx)
+
+    assert refsubs.language_calls == ["ja"]
+
+
+async def test_refsubs_get_called_with_none_when_transcript_language_blank(tmp_path):
+    e1_path = tmp_path / "S01E01.srt"
+    write_srt(e1_path, ["a", "b", "c"])
+    refsubs = StubRefSubs({(1, 1): e1_path})
+    ctx = make_ctx(make_series(), [make_episode(1, 1)], refsubs)
+    claimed = make_claimed(season=1, episodes=[1])
+    transcript = make_transcript(["a", "b", "c"])
+    transcript["language"] = ""
+    assets = AssetBundle(transcript=transcript)
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3))
+    await plugin.identify(claimed, assets, ctx)
+
+    assert refsubs.language_calls == [None]
+
+
+async def test_evidence_records_refsub_language_from_path_suffix(tmp_path):
+    e1_path = tmp_path / "S01E01.ja.srt"
+    write_srt(e1_path, ["a", "b", "c"])
+    refsubs = StubRefSubs({(1, 1): e1_path})
+    ctx = make_ctx(make_series(), [make_episode(1, 1)], refsubs)
+    claimed = make_claimed(season=1, episodes=[1])
+    transcript = make_transcript(["a", "b", "c"])
+    transcript["language"] = "ja"
+    assets = AssetBundle(transcript=transcript)
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3))
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "ok"
+    assert result.candidates[0].evidence["refsub_language"] == "ja"
+
+
+async def test_evidence_refsub_language_none_for_legacy_unsuffixed_path(tmp_path):
+    e1_path = tmp_path / "S01E01.srt"
+    write_srt(e1_path, ["a", "b", "c"])
+    refsubs = StubRefSubs({(1, 1): e1_path})
+    ctx = make_ctx(make_series(), [make_episode(1, 1)], refsubs)
+    claimed = make_claimed(season=1, episodes=[1])
+    assets = AssetBundle(transcript=make_transcript(["a", "b", "c"]))
+
+    plugin = WhisperSubsPlugin(WhisperSubsConfig(min_lines=3))
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "ok"
+    assert result.candidates[0].evidence["refsub_language"] is None
 
 
 async def test_correct_ranked_candidates_with_mislabel(tmp_path):

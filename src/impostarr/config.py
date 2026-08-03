@@ -66,6 +66,10 @@ class RefSubsConfig(BaseModel):
     daily_quota: int = 20
     cache_dir: str | None = None
     manual_dir: str | None = None
+    # Fallback language preference order (ISO 639-1), tried after whatever
+    # language a caller passes to RefSubService.get() (e.g. a transcript's
+    # detected language) -- see refsubs.py's module docstring.
+    languages: list[str] = Field(default_factory=lambda: ["en"])
     # OpenSubtitles enforces per-key rate limits in the ballpark of 5
     # req/s (tighter still for login, handled separately). Concurrent
     # get() callers used to stampede /download with no pacing at all,

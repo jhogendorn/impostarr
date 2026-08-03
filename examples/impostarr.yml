@@ -94,8 +94,15 @@ refsubs:
   daily_quota: 20
   cache_dir: /assets/refsubs
   # Manual local-SRT drop-in directory, checked before cache/API. Layout:
-  # <manual_dir>/<tvdb_id>/SxxEyy.srt
+  # <manual_dir>/<tvdb_id>/SxxEyy.<lang>.srt (e.g. S01E02.ja.srt), falling
+  # back to the legacy unsuffixed SxxEyy.srt if no language-suffixed file
+  # is present.
   manual_dir: /config/refsubs-manual
+  # Fallback language preference order (ISO 639-1), tried after whatever
+  # language a caller passes (e.g. whisper-subs passes the transcript's
+  # detected language first) -- so a Japanese-audio file is compared
+  # against Japanese subs instead of always assuming English.
+  languages: ["en"]
 
 # Identity/audit layer. Impostarr does not currently have a requirement for
 # access control: all actions are admin actions. Users who need

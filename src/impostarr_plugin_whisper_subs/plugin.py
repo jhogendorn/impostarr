@@ -92,6 +92,20 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _ASS_OVERRIDE_RE = re.compile(r"\{[^}]*\}")
 _PUNCT_RE = re.compile(r"[^\w\s]")
 _WS_RE = re.compile(r"\s+")
+# Reference subtitle filenames are language-scoped (RefSubService,
+# `SxxEyy.<lang>.srt`); the legacy unsuffixed manual-dir name has no
+# language tag and yields no match here.
+_REFSUB_LANGUAGE_RE = re.compile(r"S\d+E\d+\.([A-Za-z]{2,3})\.srt$")
+
+
+def _refsub_language(path: str) -> str | None:
+    """Best-effort language extraction from a reference-subtitle path's
+    filename, for recording which language was actually compared
+    (evidence["refsub_language"]) -- the language actually served may
+    differ from the one requested (fallback chain, or a legacy unsuffixed
+    manual-dir file)."""
+    match = _REFSUB_LANGUAGE_RE.search(Path(path).name)
+    return match.group(1) if match else None
 
 
 class WhisperSubsConfig(BaseModel):
@@ -171,6 +185,11 @@ class WhisperSubsPlugin(IdentifierPlugin):
         )[:_MAX_CANDIDATES]
 
         ext_ids = _series_ext_ids(ctx.series)
+        # ISO 639-1 code the transcriber detected, or None (blank/missing)
+        # to fall through to RefSubService's configured language order —
+        # comparing e.g. a Japanese-audio transcript against Japanese subs
+        # first rather than always assuming English.
+        transcript_language = transcript.get("language") or None
 
         candidates: list[Candidate] = []
         claimed_covered = False
@@ -181,7 +200,9 @@ class WhisperSubsPlugin(IdentifierPlugin):
             # distance-sorted) keeps candidate ordering deterministic.
             srt_paths = await asyncio.gather(
                 *(
-                    ctx.refsubs.get(ext_ids, claimed.season, ep["episode_number"])
+                    ctx.refsubs.get(
+                        ext_ids, claimed.season, ep["episode_number"], language=transcript_language
+                    )
                     for ep in season_episodes
                 )
             )
@@ -207,6 +228,7 @@ class WhisperSubsPlugin(IdentifierPlugin):
                             "match_ratio": ratio,
                             "compared_lines": compared,
                             "refsub_path": str(srt_path),
+                            "refsub_language": _refsub_language(str(srt_path)),
                             "thin_refsub_discount": discount,
                         },
                     )
