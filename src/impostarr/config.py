@@ -66,6 +66,12 @@ class RefSubsConfig(BaseModel):
     daily_quota: int = 20
     cache_dir: str | None = None
     manual_dir: str | None = None
+    # OpenSubtitles enforces per-key rate limits in the ballpark of 5
+    # req/s (tighter still for login, handled separately). Concurrent
+    # get() callers used to stampede /download with no pacing at all,
+    # producing 429s in production once whisper-subs started gathering
+    # several episodes' worth of lookups at once.
+    min_request_interval_s: float = 1.1
 
 
 class ApiKeyEntry(BaseModel):

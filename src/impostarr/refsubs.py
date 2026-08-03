@@ -58,6 +58,14 @@ class RefSubService:
         # `_token is None` and independently POST /login, tripping
         # OpenSubtitles' 1 req/sec per IP login rate limit.
         self._login_lock = asyncio.Lock()
+        # Paces every OpenSubtitles API call (login, search, download) so
+        # concurrent get() callers queue instead of stampeding -- serializes
+        # (only one call in flight at a time) AND enforces a minimum gap
+        # between successive call starts. The CDN link fetch in _save() is
+        # NOT paced through this: it's a different host, not subject to
+        # OpenSubtitles' API rate limit.
+        self._pacing_lock = asyncio.Lock()
+        self._last_request_at: float | None = None
 
     async def get(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> Path | None:
         tvdb_id = series_ext_ids.get("tvdb")
@@ -154,13 +162,30 @@ class RefSubService:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
+    async def _paced_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Issues one OpenSubtitles API request, serialized against every
+        other call through `_pacing_lock` and spaced at least
+        `min_request_interval_s` after the previous call's start. Held for
+        the full request duration, so calls queued behind it never overlap
+        in flight either. May raise `httpx.HTTPError`; callers already
+        catch that around each call site."""
+        async with self._pacing_lock:
+            loop = asyncio.get_running_loop()
+            if self._last_request_at is not None:
+                wait = self.cfg.min_request_interval_s - (loop.time() - self._last_request_at)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            self._last_request_at = loop.time()
+            return await self.http.request(method, url, **kwargs)
+
     async def _login(self) -> str | None:
         """POST /login, retrying once (after a >=1.1s backoff) on a 429
         (`Login rate limit exceeded: 1 req/sec per IP`). Gives up cleanly
         (returns None) if the retry also 429s."""
         for attempt in range(2):
             try:
-                response = await self.http.post(
+                response = await self._paced_request(
+                    "POST",
                     f"{OPENSUBTITLES_BASE_URL}/login",
                     json={"username": self.cfg.username, "password": self.cfg.password},
                     headers={"Api-Key": self.cfg.api_key or "", "User-Agent": USER_AGENT},
@@ -200,31 +225,48 @@ class RefSubService:
         self, method: str, url: str, **kwargs: Any
     ) -> httpx.Response | None:
         """Issue an authenticated request, logging in first if needed and
-        retrying once (with a fresh login) on a 401."""
+        retrying once (with a fresh login) on a 401. Also retries once
+        (after a 2s backoff) on a 429 from search/download -- concurrent
+        get() callers used to stampede these endpoints with no pacing at
+        all, producing exactly this in production."""
         if not await self._ensure_login():
             return None
 
-        try:
-            response = await self.http.request(method, url, headers=self._headers(), **kwargs)
-        except httpx.HTTPError:
-            logger.exception("opensubtitles request failed: %s %s", method, url)
-            return None
-
-        if response.status_code == 401:
-            if await self._login() is None:
-                return None
+        for attempt in range(2):
             try:
-                response = await self.http.request(method, url, headers=self._headers(), **kwargs)
+                response = await self._paced_request(method, url, headers=self._headers(), **kwargs)
             except httpx.HTTPError:
-                logger.exception("opensubtitles request failed after re-login: %s %s", method, url)
+                logger.exception("opensubtitles request failed: %s %s", method, url)
                 return None
 
-        if response.status_code >= 400:
-            logger.warning(
-                "opensubtitles request failed: %s %s -> %s", method, url, response.status_code
-            )
-            return None
-        return response
+            if response.status_code == 401:
+                if await self._login() is None:
+                    return None
+                try:
+                    response = await self._paced_request(method, url, headers=self._headers(), **kwargs)
+                except httpx.HTTPError:
+                    logger.exception("opensubtitles request failed after re-login: %s %s", method, url)
+                    return None
+
+            if response.status_code == 429:
+                if attempt == 0:
+                    logger.warning(
+                        "opensubtitles request rate-limited, backing off and retrying once: %s %s",
+                        method,
+                        url,
+                    )
+                    await asyncio.sleep(2.0)
+                    continue
+                logger.warning("opensubtitles request rate-limited on retry, giving up: %s %s", method, url)
+                return None
+
+            if response.status_code >= 400:
+                logger.warning(
+                    "opensubtitles request failed: %s %s -> %s", method, url, response.status_code
+                )
+                return None
+            return response
+        return None
 
     @staticmethod
     def _numeric_imdb_id(raw: Any) -> int | None:

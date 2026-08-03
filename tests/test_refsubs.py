@@ -1,7 +1,10 @@
 import asyncio
 import datetime
 import json
+import time
+from itertools import pairwise
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import respx
@@ -22,6 +25,9 @@ def make_cfg(tmp_path: Path, **overrides) -> RefSubsConfig:
         "daily_quota": 20,
         "cache_dir": str(tmp_path / "cache"),
         "manual_dir": str(tmp_path / "manual"),
+        # Zeroed by default so unrelated tests aren't slowed by pacing;
+        # pacing-specific tests below override with a small positive value.
+        "min_request_interval_s": 0.0,
     }
     defaults.update(overrides)
     return RefSubsConfig(**defaults)
@@ -615,3 +621,140 @@ async def test_search_all_strategies_exhausted_returns_none(tmp_path):
     )
 
     assert result is None
+
+
+# -- global request pacing -----------------------------------------------
+
+
+@respx.mock
+async def test_concurrent_get_calls_serialize_api_requests(tmp_path):
+    # ~6-7 whisper-subs get() calls used to stampede search/download with
+    # no coordination at all -- only one OpenSubtitles API call (login,
+    # search, or download) may be in flight at a time.
+    cfg = make_cfg(tmp_path, daily_quota=20)
+    concurrent = 0
+    high_water = 0
+
+    async def _tracked(request: httpx.Request) -> httpx.Response:
+        nonlocal concurrent, high_water
+        concurrent += 1
+        high_water = max(high_water, concurrent)
+        await asyncio.sleep(0.01)  # real suspend point so overlap is possible if unserialized
+        concurrent -= 1
+        if request.url.path.endswith("/login"):
+            return httpx.Response(200, json={"token": "jwt"})
+        if request.url.path.endswith("/subtitles"):
+            return httpx.Response(200, json=_mock_search_hit())
+        return httpx.Response(200, json={"link": "https://dl.opensubtitles.com/sub/1.srt"})
+
+    respx.post(f"{BASE_URL}/login").mock(side_effect=_tracked)
+    respx.get(f"{BASE_URL}/subtitles").mock(side_effect=_tracked)
+    respx.post(f"{BASE_URL}/download").mock(side_effect=_tracked)
+    respx.get("https://dl.opensubtitles.com/sub/1.srt").mock(return_value=httpx.Response(200, text="content"))
+
+    service = await make_service(cfg)
+    results = await asyncio.gather(
+        *(service.get({"tvdb": 123456}, season=1, episode=ep) for ep in range(1, 6))
+    )
+
+    assert all(r is not None for r in results)
+    assert high_water == 1
+
+
+@respx.mock
+async def test_min_request_interval_enforced_between_successive_requests(tmp_path):
+    interval = 0.05
+    cfg = make_cfg(tmp_path, daily_quota=20, min_request_interval_s=interval)
+    timestamps: list[float] = []
+
+    async def _timestamped(request: httpx.Request) -> httpx.Response:
+        timestamps.append(time.monotonic())
+        if request.url.path.endswith("/login"):
+            return httpx.Response(200, json={"token": "jwt"})
+        if request.url.path.endswith("/subtitles"):
+            return httpx.Response(200, json=_mock_search_hit())
+        return httpx.Response(200, json={"link": "https://dl.opensubtitles.com/sub/1.srt"})
+
+    respx.post(f"{BASE_URL}/login").mock(side_effect=_timestamped)
+    respx.get(f"{BASE_URL}/subtitles").mock(side_effect=_timestamped)
+    respx.post(f"{BASE_URL}/download").mock(side_effect=_timestamped)
+    respx.get("https://dl.opensubtitles.com/sub/1.srt").mock(return_value=httpx.Response(200, text="content"))
+
+    service = await make_service(cfg)
+    results = await asyncio.gather(
+        *(service.get({"tvdb": 123456}, season=1, episode=ep) for ep in range(1, 3))
+    )
+
+    assert all(r is not None for r in results)
+    # 1 login (single-flighted) + 2 search + 2 download = 5 paced calls.
+    assert len(timestamps) == 5
+    gaps = [b - a for a, b in pairwise(timestamps)]
+    assert all(gap >= interval * 0.9 for gap in gaps)
+
+
+@respx.mock
+async def test_download_429_then_success_retries_once(tmp_path):
+    cfg = make_cfg(tmp_path)
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    download_route = respx.post(f"{BASE_URL}/download").mock(
+        side_effect=[
+            httpx.Response(429, json={"message": "Too Many Requests"}),
+            httpx.Response(200, json={"link": "https://dl.opensubtitles.com/sub/1.srt"}),
+        ]
+    )
+    respx.get("https://dl.opensubtitles.com/sub/1.srt").mock(return_value=httpx.Response(200, text="content"))
+
+    with patch("asyncio.sleep", side_effect=fake_sleep):
+        service = await make_service(cfg)
+        result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is not None
+    assert download_route.call_count == 2
+    assert 2.0 in sleep_calls
+
+
+@respx.mock
+async def test_download_429_twice_gives_up_cleanly_and_releases_quota(tmp_path):
+    cfg = make_cfg(tmp_path)
+    quota_path = Path(cfg.cache_dir) / "quota.json"
+
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    download_route = respx.post(f"{BASE_URL}/download").mock(
+        return_value=httpx.Response(429, json={"message": "Too Many Requests"})
+    )
+
+    with patch("asyncio.sleep", new=_no_sleep):
+        service = await make_service(cfg)
+        result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is None
+    assert download_route.call_count == 2
+    quota_data = json.loads(quota_path.read_text())
+    assert quota_data["count"] == 0
+
+
+@respx.mock
+async def test_search_429_then_success_retries_once(tmp_path):
+    cfg = make_cfg(tmp_path)
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(
+        side_effect=[
+            httpx.Response(429, json={"message": "Too Many Requests"}),
+            httpx.Response(200, json=_mock_search_hit()),
+        ]
+    )
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    _mock_download_and_file()
+
+    with patch("asyncio.sleep", new=_no_sleep):
+        service = await make_service(cfg)
+        result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is not None
+    assert search_route.call_count == 2
