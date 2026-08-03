@@ -224,6 +224,10 @@ export const jobDetailFixture: JobDetail = {
       },
     },
   ],
+  episode_labels: {
+    '100': { id: 100, season: 1, episode: 1, title: 'Pilot' },
+  },
+  reference_subtitles: [],
   frame_hash_present: true,
   frame_hash: { algo: 'phash', version: 1, n_frames: 16 },
   phash_corpus: { confidence: 0.97, source: 'auto' },

@@ -199,6 +199,27 @@ export interface PhashCorpusSummary {
   source: 'auto' | 'human'
 }
 
+/** One Sonarr episode id resolved to human-readable form — see routes.py
+ * `_episode_labels`. Keyed by episode id (as a string, JSON object key)
+ * on `JobDetail.episode_labels` for every id referenced anywhere in the
+ * payload (P0.5: never render a bare episode id). */
+export interface EpisodeLabel {
+  id: number
+  season: number
+  episode: number
+  title: string | null
+}
+
+/** A subtitle track's cue text (timestamps discarded — see
+ * `impostarr.plugins.subtitles.parse_srt`), for the three-way text
+ * comparison's reference-subs column. `label` is season/episode-ish
+ * (e.g. "S01E01") when derivable, else a generic fallback. */
+export interface ReferenceSubtitleTrack {
+  label: string
+  language: string | null
+  cues: string[]
+}
+
 export interface JobDetail {
   job: JobDetailJob
   instance: string | null
@@ -207,6 +228,8 @@ export interface JobDetail {
   plugin_results: PluginResult[]
   verdict: JobDetailVerdict | null
   assets: Asset[]
+  episode_labels: Record<string, EpisodeLabel>
+  reference_subtitles: ReferenceSubtitleTrack[]
   frame_hash_present: boolean
   frame_hash: FrameHashSummary | null
   phash_corpus: PhashCorpusSummary | null

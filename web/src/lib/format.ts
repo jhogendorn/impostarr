@@ -98,3 +98,12 @@ export function formatTimestampS(seconds: number): string {
   const s = total % 60
   return `${m}:${String(s).padStart(2, '0')}`
 }
+
+/** Zero-padded "SxxEyy" (season/episode both 2-digit, e.g. "S05E03" not
+ * "S5E3"), multiple episodes concatenated as "SxxEyyEzz". The one shared
+ * formatter for every season/episode render in the inspect panel — no
+ * spot should hand-roll `S${season}E${episode}` and skip the padding. */
+export function formatSeasonEpisode(season: number, episodes: number[]): string {
+  const s = String(season).padStart(2, '0')
+  return `S${s}${episodes.map((ep) => `E${String(ep).padStart(2, '0')}`).join('')}`
+}
