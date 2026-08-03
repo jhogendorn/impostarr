@@ -373,7 +373,16 @@ async def _series_external_ids(request: Request, file: File) -> dict[str, Any] |
     Broad except is deliberate: this is a non-critical enrichment of the
     job-detail response — an unreachable/misconfigured instance, or the
     file's instance having no runtime, should degrade to `None`, not fail
-    the whole job-detail request."""
+    the whole job-detail request.
+
+    `sonarr_url` is this instance's own series page (base URL + title
+    slug) — the only reliable deep link this data supports. A true
+    per-*episode* TVDB/IMDB or Sonarr URL isn't constructible from what we
+    have: Sonarr's Episode model here carries no per-episode TVDB id (only
+    the series-level one above), so a dupe-info "other file" link or a
+    plugin-results-table episode deep link falls back to this series page
+    rather than a fabricated episode URL — see InspectModal's
+    `episodeDeepLink` comment for where that fallback is applied."""
     try:
         runtime = _instance_runtime_for_file(request, file)
         series = await runtime.client.series(file.series_id)
@@ -385,6 +394,7 @@ async def _series_external_ids(request: Request, file: File) -> dict[str, Any] |
         "tvdb_id": series.tvdb_id,
         "imdb_id": series.imdb_id,
         "tmdb_id": series.tmdb_id,
+        "sonarr_url": f"{runtime.cfg.url.rstrip('/')}/series/{series.title_slug}",
     }
 
 

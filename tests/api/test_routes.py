@@ -823,6 +823,7 @@ def test_job_detail_includes_external_ids_on_successful_series_lookup(app):
         "tvdb_id": 81189,
         "imdb_id": "tt0903747",
         "tmdb_id": 1396,
+        "sonarr_url": f"{BASE_URL}/series/test-show",
     }
 
 

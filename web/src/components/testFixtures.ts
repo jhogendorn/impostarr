@@ -127,7 +127,13 @@ export const queuePageFixture: QueuePage = {
 export const jobDetailFixture: JobDetail = {
   job: { id: 42, status: 'quarantine', attempts: 1, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-02T00:00:00Z' },
   instance: 'main',
-  external_ids: { title: 'Test Show', tvdb_id: 81189, imdb_id: 'tt0903747', tmdb_id: 1396 },
+  external_ids: {
+    title: 'Test Show',
+    tvdb_id: 81189,
+    imdb_id: 'tt0903747',
+    tmdb_id: 1396,
+    sonarr_url: 'http://sonarr.local/series/test-show',
+  },
   file: {
     series_id: 10,
     episode_ids: [100],

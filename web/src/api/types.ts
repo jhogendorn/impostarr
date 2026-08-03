@@ -180,12 +180,16 @@ export interface Asset {
 
 /** Live-fetched claimed-series cross-database ids, `null` when the lookup
  * failed or no instance runtime is configured (see routes.py
- * `_series_external_ids`). */
+ * `_series_external_ids`). `sonarr_url` is this instance's series page —
+ * the only reliable deep link available (no per-episode TVDB/IMDB id is
+ * modeled from Sonarr's Episode API here), used as the episode-deep-link
+ * fallback in the plugin-results table and dupe-info "other file" link. */
 export interface SeriesExternalIds {
   title: string | null
   tvdb_id: number | null
   imdb_id: string | null
   tmdb_id: number | null
+  sonarr_url: string
 }
 
 export interface FrameHashSummary {
