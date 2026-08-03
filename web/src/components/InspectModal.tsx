@@ -486,7 +486,7 @@ function TextPanel({ title, sources, emptyText }: { title: string; sources: Text
         )}
       </div>
       {active ? (
-        <pre className="h-40 overflow-y-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-2 font-mono text-xs text-slate-400">
+        <pre className="h-[280px] overflow-y-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-2 font-mono text-xs text-slate-400">
           {active.text}
         </pre>
       ) : (
@@ -503,16 +503,20 @@ function FramegrabStrip({ jobId, assets }: { jobId: number; assets: Asset[] }) {
   const frameAssets = assets.filter((asset) => asset.type === 'frames' && asset.has_path)
   if (frameAssets.length === 0) return null
   return (
-    <div className="mt-3 flex flex-wrap gap-2">
+    // Horizontal strip, not flex-wrap: this lives inside a narrow grid
+    // column (see ComparisonSection), and wrapping fixed-width thumbnails
+    // in a column that narrow stacked them vertically into slivers.
+    // overflow-x-auto + flex-shrink-0 thumbnails scroll sideways instead.
+    <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
       {frameAssets.map((asset) => {
         const timestampS = frameTimestampS(asset.tool_meta)
         return (
-          <div key={asset.id} className="relative">
+          <div key={asset.id} className="relative shrink-0">
             <img
               src={assetUrl(jobId, asset.id)}
               loading="lazy"
               alt={`frame ${asset.id}`}
-              className="h-20 w-auto rounded border border-slate-700"
+              className="h-auto w-40 shrink-0 rounded border border-slate-700"
             />
             {timestampS !== null && (
               <span className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 text-[10px] text-slate-100">
@@ -565,11 +569,24 @@ function ComparisonSection({ detail, identified }: { detail: JobDetail; identifi
   }))
 
   return (
-    <section>
-      {/* A single grid spanning both rows keeps the identity row and the
-       * three-way text row in the same 3 columns (left / center / right)
-       * without a second nested grid. */}
-      <div className="grid grid-cols-[1fr_auto_1fr] gap-x-4 gap-y-4">
+    <section className="space-y-4">
+      {/* Two SEPARATE grids, not one spanning both rows: CSS Grid sizes a
+       * column from the intrinsic content of every item placed in it
+       * across ALL rows. The identity row's flanking columns previously
+       * shared a column with the text-comparison row's <pre> panels —
+       * and a <pre>'s max-content width (used to size a content-sized
+       * "auto"/fr track) is the width of its longest UNWRAPPED line,
+       * easily 1000+px for a subtitle sentence, even though the line
+       * visually wraps at the resolved width. That runaway max-content
+       * won the "maximize non-flexible tracks" step (which runs before
+       * fr tracks are resolved), so the center column ate ~90% of the
+       * modal and the flanking 1fr columns collapsed to a sliver —
+       * visible as one-word-per-line text and framegrabs rendered at
+       * near-zero width. Splitting the grids means the text row's long
+       * lines can never influence the identity row's column widths (or
+       * each other's, since grid-cols-3 below is minmax(0,1fr) per
+       * column, immune to content-based blowout regardless). */}
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-x-6 gap-y-4">
         <div className="min-w-0">
           <h3 className="mb-1 font-medium text-slate-300">As labelled</h3>
           <p className="text-slate-200">{labelledText(detail)}</p>
@@ -636,7 +653,13 @@ function ComparisonSection({ detail, identified }: { detail: JobDetail; identifi
           )}
           {identified.kind === 'unknown' && <p className="text-slate-500">Not yet identified</p>}
         </div>
+      </div>
 
+      {/* grid-cols-3 (Tailwind's built-in `repeat(3, minmax(0, 1fr))`, not
+       * a hand-rolled `1fr 1fr 1fr`) so all three text panels stay
+       * equal-width and immune to the max-content blowout described
+       * above regardless of how long a transcript/subtitle line gets. */}
+      <div className="grid grid-cols-3 gap-4">
         <TextPanel title="Embedded subtitles" sources={embeddedSubsSources} emptyText="No embedded subtitles extracted." />
         <TextPanel title="Transcript" sources={transcriptSources} emptyText="No transcript available." />
         <TextPanel title="Reference subtitles" sources={referenceSources} emptyText="No reference subtitles compared." />
@@ -860,7 +883,7 @@ function InspectModal({ jobId, open, onClose, onChanged, dryRun = false }: Inspe
     <Dialog open={open} onClose={onClose} className="relative z-50">
       <DialogBackdrop className="fixed inset-0 bg-black/70" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="glow-elevated max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-slate-900 p-6 text-slate-100">
+        <DialogPanel className="glow-elevated max-h-[85vh] w-[90vw] max-w-7xl overflow-y-auto rounded-lg bg-slate-900 p-6 text-slate-100">
           {/* Identity (section 1) + action bar (section 6) share this
            * sticky header — negative margins let it bleed to the panel's
            * edges while the panel keeps its own padding for the rest. */}
