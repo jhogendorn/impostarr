@@ -16,6 +16,7 @@ from impostarr.assets.transcribe import (
     TranscribeError,
     Transcriber,
     TranscriptResult,
+    TranscriptSegment,
 )
 from impostarr.config import Settings, SonarrInstance, Thresholds, ThrottleConfig, TrashConfig
 from impostarr.db import init_db, make_session_factory
@@ -31,7 +32,7 @@ from impostarr.models import (
     Verdict,
 )
 from impostarr.models import PluginResult as PluginResultRow
-from impostarr.pipeline import PipelineDeps, process_job
+from impostarr.pipeline import PipelineDeps, _stage_transcript, process_job
 from impostarr.plugins.base import (
     AssetBundle,
     Candidate,
@@ -239,8 +240,14 @@ def install_fake_extractors(monkeypatch) -> ExtractorCounters:
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "audio.wav"
         out_path.write_bytes(b"wav")
+        # Mirrors extract.extract_audio's real start-computation: 0.0 if the
+        # (fake) file is shorter than the requested offset, else offset_s.
+        start = 0.0 if DURATION_S <= offset_s else offset_s
         return extract.ExtractedAsset(
-            type="audio", path=str(out_path), input_fingerprint=fp, tool_meta={}
+            type="audio",
+            path=str(out_path),
+            input_fingerprint=fp,
+            tool_meta={"start_s": start, "offset_s": start},
         )
 
     async def fake_extract_embedded_subs(path, out_dir, probe_result=None):
@@ -514,6 +521,84 @@ async def test_transcript_stage_tolerates_transcribe_error(tmp_path, session_fac
             select(Asset).where(Asset.type == "transcript")
         ).scalars().all()
     assert transcript_assets == []
+
+
+class _FakeTranscriber:
+    """Returns a fixed, slice-relative (0-based) `TranscriptResult` --
+    stands in for a real backend, which always reports timestamps relative
+    to the audio slice it was handed, never the whole file."""
+
+    def __init__(self, segments: list[TranscriptSegment]) -> None:
+        self._segments = segments
+
+    async def transcribe(self, wav_path) -> TranscriptResult:
+        return TranscriptResult(segments=list(self._segments), language="en")
+
+
+def _get_file(session_factory, job_id: int) -> File:
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        return session.get(File, job.file_id)
+
+
+async def test_stage_transcript_shifts_segments_by_audio_offset(tmp_path, session_factory):
+    """Defect 1 regression: whisper's segment timestamps are relative to the
+    audio slice `extract_audio` sliced out, not the whole file. `offset_s`
+    on the audio asset's tool_meta (here 60.0, matching AUDIO_OFFSET_S) must
+    be added into every segment's start/end before the transcript is
+    persisted, so stored/UI timestamps are absolute file time."""
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    file = _get_file(session_factory, job_id)
+    audio_asset = extract.ExtractedAsset(
+        type="audio",
+        path=str(tmp_path / "audio.wav"),
+        input_fingerprint="fp-audio-nonzero",
+        tool_meta={"offset_s": 60.0, "start_s": 60.0},
+    )
+    transcriber = _FakeTranscriber(
+        [
+            TranscriptSegment(start=0.0, end=2.0, text="hello"),
+            TranscriptSegment(start=2.0, end=4.5, text="world"),
+        ]
+    )
+
+    with session_factory() as session:
+        payload = await _stage_transcript(session, file, audio_asset, transcriber)
+
+    assert payload["segments"] == [
+        {"start": 60.0, "end": 62.0, "text": "hello"},
+        {"start": 62.0, "end": 64.5, "text": "world"},
+    ]
+    with session_factory() as session:
+        row = session.execute(
+            select(Asset).where(Asset.type == "transcript")
+        ).scalars().one()
+    assert row.tool_meta["offset_s"] == 60.0
+
+
+async def test_stage_transcript_zero_offset_unchanged(tmp_path, session_factory):
+    """Zero-offset case (file shorter than the audio-slice offset, or a
+    pre-slice source): segments must be stored exactly as the transcriber
+    returned them -- no accidental shift."""
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    file = _get_file(session_factory, job_id)
+    audio_asset = extract.ExtractedAsset(
+        type="audio",
+        path=str(tmp_path / "audio.wav"),
+        input_fingerprint="fp-audio-zero",
+        tool_meta={"offset_s": 0.0, "start_s": 0.0},
+    )
+    transcriber = _FakeTranscriber([TranscriptSegment(start=1.0, end=3.0, text="hi")])
+
+    with session_factory() as session:
+        payload = await _stage_transcript(session, file, audio_asset, transcriber)
+
+    assert payload["segments"] == [{"start": 1.0, "end": 3.0, "text": "hi"}]
+    with session_factory() as session:
+        row = session.execute(
+            select(Asset).where(Asset.type == "transcript")
+        ).scalars().one()
+    assert row.tool_meta["offset_s"] == 0.0
 
 
 @respx.mock

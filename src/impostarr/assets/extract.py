@@ -182,7 +182,17 @@ async def extract_audio(
         type="audio",
         path=str(out_path),
         input_fingerprint=fp,
-        tool_meta={"ffmpeg_version": version, "start_s": start, "duration_s": take},
+        # `offset_s` is the actual slice start applied (== `start`, which is
+        # 0.0 rather than `offset_s` when the file is shorter than the
+        # requested offset) -- downstream consumers (the transcript stage)
+        # need this to shift relative whisper timestamps back to absolute
+        # file time. `start_s` is kept alongside for back-compat.
+        tool_meta={
+            "ffmpeg_version": version,
+            "start_s": start,
+            "offset_s": start,
+            "duration_s": take,
+        },
     )
 
 

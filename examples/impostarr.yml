@@ -59,6 +59,32 @@ thresholds:
   # is added to the local corpus used for future frame-hash comparisons.
   phash_store: 0.9
 
+# How per-candidate confidences from multiple plugins are pooled into the
+# single score `thresholds` above routes on. See docs/scoring.md for the
+# full rationale and worked example. All values below are the defaults.
+scoring:
+  # "linear": today's weighted arithmetic mean of confidences (kept for
+  # back-compat/comparison). "logodds": pools in log-odds space instead, so
+  # decisive (near-0/near-1) plugin reports dominate hedging ones instead of
+  # every plugin pulling the mean with equal leverage — a lone low report is
+  # far less able to veto two independent high ones.
+  fusion: logodds
+  # Confidences are clamped to [eps, 1-eps] before the log-odds transform
+  # (logit(0)/logit(1) are +-infinity). logodds only.
+  eps: 0.02
+  # If >= outlier_min_agreeing plugins report a candidate at >= outlier_high
+  # AND every other reporting plugin is at <= outlier_low, the low
+  # reporters are excluded from that candidate's pool entirely (not just
+  # down-weighted) and recorded in the verdict's evidence as
+  # outliers_excluded. Rationale: a plugin scoring ~0 on a candidate two
+  # independent plugins call a ~90%+ match is far more likely to be
+  # mis-sourced (e.g. matched against a reference subtitle for a different
+  # episode) than to be correctly catching a mismatch the others missed.
+  outlier_rejection: true
+  outlier_high: 0.8
+  outlier_low: 0.2
+  outlier_min_agreeing: 2
+
 # External identifier plugins.
 plugins:
   # Pinned pip specs for external plugin collections, installed at boot
