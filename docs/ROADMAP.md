@@ -69,3 +69,17 @@ iGPU transcription acceleration is an install-time choice, not a
 compile-your-own exercise. An OpenVINO transcriber backend is the other
 candidate for Intel acceleration; both slot in via the existing
 `impostarr.transcribers` entry-point group.
+
+## Maybe pile
+
+- Plugin-reliability feedback: operators rate plugin results; sustained
+  unreliability lowers a plugin's effective weight over time. Overlaps the
+  calibration loop (verdict history already feeds per-plugin calibration) —
+  the additional idea is an explicit rating affordance in the UI.
+- Composable scoring DAGs as first-order installables: nestable
+  `algo: [plugins | algo: [...]]` structures (consensus groups inside
+  tiers inside fallbacks — at a certain point it's a DAG). Users install a
+  named DAG (default, anime, community-published) rather than hand-wiring
+  plugin lists; power users author their own. Explicitly NOT a node-flow
+  editor UI — config-file/document shaped.
+- Character-recognition identifier (see plugin taxonomy above).
