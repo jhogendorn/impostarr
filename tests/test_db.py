@@ -28,13 +28,23 @@ def test_fresh_db_migrates_to_head_with_sync_and_dupe_columns(tmp_path):
     assert "dupe_info" in verdict_cols
 
 
+def test_fresh_db_migrates_to_head_with_apply_at_column(tmp_path):
+    settings = Settings(state_dir=tmp_path)
+    engine = init_db(settings)
+
+    verdict_cols = {c["name"] for c in sa.inspect(engine).get_columns("verdicts")}
+    assert "apply_at" in verdict_cols
+
+
 def test_downgrade_then_upgrade_round_trip_preserves_head_columns(tmp_path):
     settings = Settings(state_dir=tmp_path)
     engine = init_db(settings)
     dsn = resolve_dsn(settings)
     cfg = _alembic_config(dsn)
 
-    command.downgrade(cfg, "-2")
+    # -3 from head (verdict apply_at -> trash_items -> sync timestamps/dupe
+    # info) lands on the initial schema revision.
+    command.downgrade(cfg, "-3")
     insp = sa.inspect(engine)
     instance_cols = {c["name"] for c in insp.get_columns("instances")}
     assert "last_polled_at" not in instance_cols
@@ -46,6 +56,7 @@ def test_downgrade_then_upgrade_round_trip_preserves_head_columns(tmp_path):
     verdict_cols = {c["name"] for c in insp.get_columns("verdicts")}
     assert {"last_polled_at", "last_backfilled_at"} <= instance_cols
     assert "dupe_info" in verdict_cols
+    assert "apply_at" in verdict_cols
     assert "trash_items" in insp.get_table_names()
 
 
@@ -64,15 +75,15 @@ def test_fresh_db_migrates_to_head_with_trash_items_table(tmp_path):
 
 
 def test_trash_items_migration_downgrades_alone(tmp_path):
-    """Downgrading just the trash_items revision (-1) must drop only that
-    table, leaving the sync-timestamps/dupe-info columns from the prior
-    revision intact."""
+    """Downgrading past the verdict-apply_at revision (-2 from head) must
+    drop only trash_items, leaving the sync-timestamps/dupe-info columns
+    from the prior revision intact."""
     settings = Settings(state_dir=tmp_path)
     engine = init_db(settings)
     dsn = resolve_dsn(settings)
     cfg = _alembic_config(dsn)
 
-    command.downgrade(cfg, "-1")
+    command.downgrade(cfg, "-2")
     insp = sa.inspect(engine)
     assert "trash_items" not in insp.get_table_names()
     instance_cols = {c["name"] for c in insp.get_columns("instances")}
@@ -80,3 +91,23 @@ def test_trash_items_migration_downgrades_alone(tmp_path):
 
     command.upgrade(cfg, "head")
     assert "trash_items" in sa.inspect(engine).get_table_names()
+
+
+def test_verdict_apply_at_migration_downgrades_alone(tmp_path):
+    """Downgrading just the verdict-apply_at revision (-1) must drop only
+    that column, leaving trash_items and the sync-timestamps/dupe-info
+    columns intact."""
+    settings = Settings(state_dir=tmp_path)
+    engine = init_db(settings)
+    dsn = resolve_dsn(settings)
+    cfg = _alembic_config(dsn)
+
+    command.downgrade(cfg, "-1")
+    insp = sa.inspect(engine)
+    verdict_cols = {c["name"] for c in insp.get_columns("verdicts")}
+    assert "apply_at" not in verdict_cols
+    assert "dupe_info" in verdict_cols
+    assert "trash_items" in insp.get_table_names()
+
+    command.upgrade(cfg, "head")
+    assert "apply_at" in {c["name"] for c in sa.inspect(engine).get_columns("verdicts")}

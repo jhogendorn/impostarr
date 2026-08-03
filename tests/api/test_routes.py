@@ -872,6 +872,37 @@ def test_job_detail_includes_dupe_info(app):
 
 
 @respx.mock
+def test_job_detail_verdict_apply_at_defaults_null(app):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    _make_verdict(session_factory, job_id, outcome="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.json()["verdict"]["apply_at"] is None
+
+
+@respx.mock
+def test_job_detail_verdict_apply_at_round_trips(app):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    apply_at = "2026-08-04T00:00:00+00:00"
+    _make_verdict(session_factory, job_id, outcome="quarantine", apply_at=apply_at)
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.json()["verdict"]["apply_at"] == apply_at
+
+
+@respx.mock
 def test_job_detail_includes_frame_hash_and_phash_corpus(app):
     mock_series()
     session_factory = _session_factory(app)
@@ -995,6 +1026,59 @@ def test_job_detail_episode_labels_empty_on_lookup_failure(app):
     assert response.json()["episode_labels"] == {}
 
 
+# -- series_episodes (inspect v3 episode picker) -------------------------
+
+
+@respx.mock
+def test_job_detail_series_episodes_includes_all_and_sorted(app):
+    mock_series()
+    respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 201, "title": "S2E1", "seasonNumber": 2, "episodeNumber": 1, "episodeFileId": 0, "hasFile": False},
+                {"id": 101, "title": "Pilot", "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 9001, "hasFile": True},
+                {"id": 102, "title": "Second", "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 0, "hasFile": False},
+            ],
+        )
+    )
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id, episode_ids=[101])
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    body = response.json()
+    # episode_labels stays filtered to referenced ids (just the file's own
+    # claimed episode here)...
+    assert set(body["episode_labels"].keys()) == {"101"}
+    # ...but series_episodes lists every episode in the series, sorted by
+    # (season, episode) ascending regardless of Sonarr's response order.
+    assert body["series_episodes"] == [
+        {"id": 101, "season": 1, "episode": 1, "title": "Pilot"},
+        {"id": 102, "season": 1, "episode": 2, "title": "Second"},
+        {"id": 201, "season": 2, "episode": 1, "title": "S2E1"},
+    ]
+
+
+@respx.mock
+def test_job_detail_series_episodes_empty_on_lookup_failure(app):
+    mock_series()
+    respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(return_value=httpx.Response(500, json={}))
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["series_episodes"] == []
+
+
 # -- embedded subs / reference subtitles (three-way text comparison) -----
 
 
@@ -1020,7 +1104,10 @@ def test_job_detail_embedded_subs_payload_parses_srt_from_disk(app, tmp_path):
         response = client.get(f"{API_PREFIX}/jobs/{job_id}")
 
     subs_asset = next(a for a in response.json()["assets"] if a["type"] == "subs")
-    assert subs_asset["payload"] == {"cues": ["Hello embedded"], "language": "en"}
+    assert subs_asset["payload"] == {
+        "cues": [{"start_s": 0.0, "text": "Hello embedded"}],
+        "language": "en",
+    }
 
 
 @respx.mock
@@ -1050,6 +1137,7 @@ def test_job_detail_embedded_subs_payload_null_for_image_sub_codec(app, tmp_path
 @respx.mock
 def test_job_detail_reference_subtitles_from_whisper_subs_evidence(app, tmp_path):
     mock_series()
+    _episodes_with_titles()
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
     file_id = _make_file(session_factory, instance_id)
@@ -1081,7 +1169,14 @@ def test_job_detail_reference_subtitles_from_whisper_subs_evidence(app, tmp_path
         response = client.get(f"{API_PREFIX}/jobs/{job_id}")
 
     tracks = response.json()["reference_subtitles"]
-    assert tracks == [{"label": "S01E01", "language": "en", "cues": ["Hello reference"]}]
+    assert tracks == [
+        {
+            "label": "S01E01",
+            "language": "en",
+            "cues": [{"start_s": 0.0, "text": "Hello reference"}],
+            "episode_ids": [101],
+        }
+    ]
 
 
 @respx.mock
@@ -1431,6 +1526,65 @@ def test_approve_wrong_state_409(app):
 
     with TestClient(app) as client:
         response = client.post(f"{API_PREFIX}/jobs/{job_id}/approve")
+
+    assert response.status_code == 409
+
+
+def test_replace_quarantine_with_no_proposed_action_invokes_remediator(app, monkeypatch):
+    FakeRemediator.calls = []
+    monkeypatch.setattr("impostarr.api.routes.Remediator", FakeRemediator)
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    # No verdict at all -- replace must not require one.
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/jobs/{job_id}/replace")
+
+    assert response.status_code == 200
+    assert response.json() == {"result": "remediated"}
+    assert FakeRemediator.calls == [("replace", job_id, "api-anon")]
+    assert _get_job(session_factory, job_id).status == "remediated"
+
+
+def test_replace_inconclusive_invokes_remediator(app, monkeypatch):
+    FakeRemediator.calls = []
+    monkeypatch.setattr("impostarr.api.routes.Remediator", FakeRemediator)
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="inconclusive")
+    _make_verdict(session_factory, job_id, outcome="inconclusive", proposed_action={"kind": "remap", "target_episode_ids": [1]})
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/jobs/{job_id}/replace")
+
+    assert response.status_code == 200
+    assert response.json() == {"result": "remediated"}
+    assert FakeRemediator.calls == [("replace", job_id, "api-anon")]
+
+
+def test_replace_wrong_state_409(app):
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="pending")
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/jobs/{job_id}/replace")
+
+    assert response.status_code == 409
+
+
+def test_replace_matched_state_409(app):
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="matched")
+
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/jobs/{job_id}/replace")
 
     assert response.status_code == 409
 

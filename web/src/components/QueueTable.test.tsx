@@ -303,12 +303,12 @@ describe('QueueTable', () => {
     await user.click(screen.getByLabelText('Select job 1')) // quarantine: rerun-eligible only
 
     expect(screen.getByText('1 selected')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Rerun (1)' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reidentify (1)' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Park (0)' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Unpark (0)' })).toBeDisabled()
   })
 
-  it('bulk Rerun calls the API only for eligible selected rows, sequentially, then refetches', async () => {
+  it('bulk Reidentify calls the API only for eligible selected rows, sequentially, then refetches', async () => {
     rerunJobMock.mockResolvedValue({ result: 'pending' })
     const user = userEvent.setup()
     const onChanged = vi.fn()
@@ -316,7 +316,7 @@ describe('QueueTable', () => {
 
     await user.click(screen.getByLabelText('Select job 1')) // quarantine: eligible
     await user.click(screen.getByLabelText('Select job 2')) // pending: not rerun-eligible
-    await user.click(screen.getByRole('button', { name: /^Rerun \(/ }))
+    await user.click(screen.getByRole('button', { name: /^Reidentify \(/ }))
 
     await waitFor(() => expect(onChanged).toHaveBeenCalled())
     expect(rerunJobMock).toHaveBeenCalledTimes(1)

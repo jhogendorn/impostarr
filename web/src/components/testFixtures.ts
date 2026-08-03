@@ -186,6 +186,7 @@ export const jobDetailFixture: JobDetail = {
     source: 'auto',
     human_ident: null,
     dupe_info: null,
+    apply_at: null,
   },
   assets: [
     {
@@ -233,6 +234,7 @@ export const jobDetailFixture: JobDetail = {
   episode_labels: {
     '100': { id: 100, season: 1, episode: 1, title: 'Pilot' },
   },
+  series_episodes: [{ id: 100, season: 1, episode: 1, title: 'Pilot' }],
   reference_subtitles: [],
   frame_hash_present: true,
   frame_hash: { algo: 'phash', version: 1, n_frames: 16 },
@@ -253,6 +255,7 @@ export const jobDetailHumanIdentFixture: JobDetail = {
     source: 'human',
     human_ident: { season: 2, episodes: [3, 4] },
     dupe_info: null,
+    apply_at: null,
   },
 }
 
@@ -269,6 +272,7 @@ export const jobDetailMatchedFixture: JobDetail = {
     source: 'auto',
     human_ident: null,
     dupe_info: null,
+    apply_at: null,
   },
 }
 
