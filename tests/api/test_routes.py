@@ -683,6 +683,89 @@ def test_queues_sort_instance(app):
     assert [item["job_id"] for item in desc.json()["items"]] == [job_b, job_a]
 
 
+def test_queues_order_is_deterministic_under_ties(app):
+    """P0 regression. Root cause of "clicked E20's row, opened E01's job":
+    GET /queues/{status}'s ORDER BY had no secondary/tiebreak key, so jobs
+    tied on the sort column (very possible on updated_at/created_at/
+    confidence/series/instance) came back in whatever order the DB engine's
+    query plan happened to visit them — an implementation detail, not a
+    guarantee, that a later *identical* request (e.g. App.tsx's debounced
+    refetch after an unrelated SSE `job_update`) is not promised to
+    reproduce. When the tied group's order silently flips between the
+    user's initial render and a refetch, a row's on-screen position points
+    at a different job than a moment before, with no visible reorder to
+    warn the user before they click. Fix: every sort field now gets a
+    deterministic `Job.id` tiebreak, so identical query params always
+    return identical ordering regardless of unrelated writes elsewhere."""
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    tied_at = datetime(2026, 1, 1, tzinfo=UTC)
+    ids = []
+    for i in range(4):
+        file_id = _make_file(session_factory, instance_id, episode_file_id=9500 + i)
+        job_id = _make_job(session_factory, file_id, status="quarantine")
+        with session_factory() as session:
+            job = session.get(Job, job_id)
+            job.updated_at = tied_at  # exact tie across all 4 jobs
+            session.commit()
+        ids.append(job_id)
+
+    with TestClient(app) as client:
+        first = client.get(f"{API_PREFIX}/queues/quarantine")
+        # An unrelated write lands between the initial render and a
+        # debounced SSE-triggered refetch of the identical query.
+        other_file = _make_file(session_factory, instance_id, episode_file_id=9599)
+        _make_job(session_factory, other_file, status="pending")
+        second = client.get(f"{API_PREFIX}/queues/quarantine")
+
+    first_ids = [item["job_id"] for item in first.json()["items"]]
+    second_ids = [item["job_id"] for item in second.json()["items"]]
+    # dir defaults to desc -> tiebreak is Job.id desc among the tied group.
+    assert first_ids == second_ids == list(reversed(ids))
+
+
+def test_click_after_sse_refetch_still_opens_correct_job(app):
+    """P0 regression, literal reproduction of the reported bug: sort the
+    queue, note which job a given row holds, simulate the debounced
+    SSE-triggered refetch that follows an unrelated job update, then
+    "click" that same row again (re-fetch the queue, read the row's
+    job_id, then GET that job's detail exactly as InspectModal does) — it
+    must resolve to the SAME job every time, never one that silently slid
+    into that position because of an unstable tiebreak."""
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    tied_at = datetime(2026, 1, 1, tzinfo=UTC)
+    e01_file = _make_file(session_factory, instance_id, episode_file_id=9601, episode_ids=[1])
+    e20_file = _make_file(session_factory, instance_id, episode_file_id=9620, episode_ids=[20])
+    e01_job = _make_job(session_factory, e01_file, status="quarantine")
+    e20_job = _make_job(session_factory, e20_file, status="quarantine")
+    for job_id in (e01_job, e20_job):
+        with session_factory() as session:
+            job = session.get(Job, job_id)
+            job.updated_at = tied_at
+            session.commit()
+
+    with TestClient(app) as client:
+        initial = client.get(f"{API_PREFIX}/queues/quarantine").json()
+        # The row the user is about to click: whichever position e20_job holds.
+        row_index = next(i for i, item in enumerate(initial["items"]) if item["job_id"] == e20_job)
+
+        # Simulate an SSE `job_update` for a different, unrelated job,
+        # triggering App.tsx's debounced refetch of this exact same query.
+        other_file = _make_file(session_factory, instance_id, episode_file_id=9699)
+        _make_job(session_factory, other_file, status="pending")
+        refetched = client.get(f"{API_PREFIX}/queues/quarantine").json()
+
+        clicked_job_id = refetched["items"][row_index]["job_id"]
+        assert clicked_job_id == e20_job, "same row must still hold E20's job after the SSE-triggered refetch"
+
+        modal = client.get(f"{API_PREFIX}/jobs/{clicked_job_id}").json()
+
+    assert modal["job"]["id"] == e20_job
+    assert modal["file"]["episode_ids"] == [20]
+    assert e01_job != e20_job
+
+
 # -- job detail / assets -----------------------------------------------------
 
 

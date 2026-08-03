@@ -287,6 +287,26 @@ def get_queue(
     # (updated_at/created_at/series/instance), correct for confidence (a job
     # with no verdict yet, or a null s_claimed, sorts after every scored one).
     order = sort_column.asc().nulls_last() if dir == "asc" else sort_column.desc().nulls_last()
+    # Job.id tiebreak, same direction as the primary sort: `sort_column`
+    # alone is not guaranteed unique (many jobs can share the same
+    # updated_at/created_at/confidence/series/instance value), so without a
+    # deterministic final key, ties are ordered however the DB engine
+    # happens to visit matching rows for a given query plan — an
+    # implementation detail, NOT a documented guarantee, that can differ
+    # between two otherwise-identical requests (e.g. an unrelated row's
+    # write nudging the query plan or physical layout between the initial
+    # queue fetch and a debounced SSE-triggered refetch of the same page).
+    # When that happens, a row's on-screen *position* can silently point at
+    # a different job than it did a moment before, with no visible reorder
+    # — this is the root cause of a click landing on the wrong job's modal
+    # (P0: "clicked E20's row, got E01's job"). Root-caused via `git log`/
+    # code review, not observed failure — SQLite's plain-scan tie order is
+    # incidentally stable in this test suite, but the missing tiebreak is a
+    # real correctness gap, more readily observable on Postgres (different
+    # scan/plan strategies) and under real concurrent writes. Tying every
+    # sort field to a final deterministic key removes the non-determinism
+    # regardless of backend.
+    tiebreak = Job.id.asc() if dir == "asc" else Job.id.desc()
     with _session_factory(request)() as session:
         base_where = [Job.status == status]
         joins: list = []
@@ -308,7 +328,12 @@ def get_queue(
             count_query = count_query.join(target, on_clause)
             job_query = job_query.join(target, on_clause)
         count_query = count_query.where(*base_where)
-        job_query = job_query.where(*base_where).order_by(order).offset((page - 1) * page_size).limit(page_size)
+        job_query = (
+            job_query.where(*base_where)
+            .order_by(order, tiebreak)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
 
         total = session.execute(count_query).scalar_one()
         job_rows = session.execute(job_query).scalars().all()
