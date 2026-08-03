@@ -47,6 +47,31 @@ Results are zipped back against the window list in its original,
 distance-sorted order, so candidate ordering stays deterministic regardless
 of fetch completion order.
 
+Evidence integrity — claimed episode's reference subtitle unavailable:
+production data (job 14, American Dad S05E07) showed this plugin comparing
+several *other* episodes in the window successfully while the claimed
+episode's own reference subtitle fetch failed/was uncached, and previously
+still emitting a `confidence=0.0` candidate for the claimed episode with
+`evidence={"note": "no reference subs for claimed"}`. That candidate reads
+downstream as "certain non-match" when what actually happened is "not
+measured" — the plugin never compared the claimed episode's content to
+anything, so it has no basis for scoring it low. This poisoned aggregate
+scoring (a fabricated 0.0 dragging `s_claimed` toward quarantine) even when
+every other identifier plugin agreed on a high-confidence match. Manufacturing
+a number for a condition that was never measured is worse than abstaining:
+a 0.0 is indistinguishable, to the scorer, from a real comparison that found
+no similarity at all. This plugin therefore treats "claimed episode refsub
+unavailable" as `status="abstain"` (reason: "no reference subtitles for the
+claimed episode") rather than emitting any candidates — even when other
+episodes in the window *were* successfully compared — because without a
+claimed-episode comparison, those other episodes' scores are unanchored:
+they can't be read as "better" or "worse" than a claim that was never
+evaluated, so the whole result is uninterpretable for routing. This is
+distinct from the claimed episode's refsub being available but scoring
+genuinely low (e.g. empty/garbage reference content, or the "formulaic
+dialogue" baseline where several episodes cluster in a narrow band) — that
+IS a real measurement and is reported as-is, not suppressed.
+
 Plugin config wiring: the loader (`impostarr.plugins.loader`) validates
 `Settings.plugins.identifiers["whisper-subs"].options` into `WhisperSubsConfig`
 and passes it to the constructor as `config`, per the `IdentifierPlugin` base
@@ -241,15 +266,13 @@ class WhisperSubsPlugin(IdentifierPlugin):
             return PluginResult(status="abstain", reason="no reference subtitles")
 
         if not claimed_covered:
-            candidates.append(
-                Candidate(
-                    confidence=0.0,
-                    ident=CandidateIdent(
-                        series="claimed", season=claimed.season, episodes=list(claimed.episodes)
-                    ),
-                    numbering="tvdb",
-                    evidence={"note": "no reference subs for claimed"},
-                )
+            # Other episodes were measured, but the claimed episode's own
+            # refsub was not -- do not manufacture a 0.0 for it (see module
+            # docstring, "Evidence integrity"). Without a claimed-episode
+            # comparison the other candidates are unanchored, so the whole
+            # result abstains rather than reporting a partial candidate set.
+            return PluginResult(
+                status="abstain", reason="no reference subtitles for the claimed episode"
             )
 
         candidates.sort(key=lambda c: c.confidence, reverse=True)

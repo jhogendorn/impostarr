@@ -24,6 +24,44 @@ show's data). Linear pooling: `(0.90 + 0.90 + 0.00) / 3 = 0.600` — squarely
 in the quarantine mid-band, discarding two confident agreements because of
 one mis-sourced input.
 
+## Evidence integrity: plugins report only what they measured
+
+Fusion and outlier rejection (below) make aggregate scoring more robust to
+a bad input outvoting good ones, but they are mitigations, not a substitute
+for plugins reporting honestly in the first place. The rule: **an
+identifier plugin must never turn "I could not measure this" into a
+numeric confidence.** A confidence of `0.0` means "I compared this and
+found no similarity" — it must not also mean "I didn't compare this at
+all." Those are different facts and collapsing them into the same number
+is indistinguishable to the scorer, which will treat a fabricated 0.0 as
+real disconfirming evidence.
+
+Concretely: `whisper-subs` used to emit a `confidence=0.0` candidate for
+the claimed episode whenever its reference-subtitle fetch failed, even if
+it had successfully compared several *other* episodes in the window. This
+is exactly the job 14 case above — the plugin never actually compared the
+claimed episode's content to anything, so the resulting `0.00` was not
+"a mismatch," it was an unmeasured claim reported as a certain one. It has
+since been fixed to return `status="abstain"` (reason: "no reference
+subtitles for the claimed episode") whenever the claimed episode's own
+reference subtitle is unavailable, instead of emitting any candidates —
+because without a claimed-episode comparison, its other candidates'
+scores are unanchored (not interpretable as better-or-worse than the
+claim), making the whole result unusable for routing.
+
+This does not apply when a comparison genuinely happened and scored low
+(e.g. empty/garbage reference content, or several episodes clustering in
+a narrow band because the show's dialogue is formulaic) — that is real
+evidence and is reported as measured, not suppressed. The distinction is
+never "was the confidence low," it's "did a comparison happen at all."
+
+The same reasoning applies to the LLM-based plugins' derived claimed
+candidate (`subs-llm`, `transcript-llm`: `confidence = max(0, 1 -
+llm_confidence)`) — but that candidate is a real inference (the LLM
+asserted a *different* episode, which implicitly disputes the claim), and
+it is only built after a successful LLM response; provider failure or
+abstention short-circuits before it's ever constructed.
+
 ## `fusion: "logodds"` (default)
 
 Instead of averaging confidences directly, each confidence is converted to
