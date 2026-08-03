@@ -69,6 +69,13 @@ plugins:
     whisper-subs:
       enabled: true
       weight: 1.0
+      # Max EXECUTIONS (identify() calls, not cache hits) per UTC day for
+      # this plugin; unset = unlimited. Exceeding it skips the call and
+      # synthesizes an abstain ("daily budget reached") instead -- a
+      # per-plugin companion to the pool-wide throttle: section above,
+      # useful for capping a paid/rate-limited backend independently of
+      # overall job throughput. Available on every plugin, not just this one.
+      # daily_budget: 500
       options:
         min_lines: 20 # minimum transcript segments required to attempt a comparison
         min_compared: 10 # reference lines below which match confidence is discounted
@@ -85,6 +92,38 @@ plugins:
         # base_url: http://ollama:11434/v1
         # model: llama3.1
         # api_key: ""
+        #
+        # Optional ordered provider failover list -- takes precedence over
+        # base_url/model/api_key above when set. Tried in order; falls
+        # through to the next provider only when one looks unavailable
+        # (401/402/403/429, an insufficient_quota error body, a persistent
+        # 5xx, or a transport error) -- not on a bad/unparseable reply from
+        # a reachable provider, which surfaces as an error instead.
+        # providers:
+        #   - name: primary
+        #     base_url: http://ollama:11434/v1
+        #     model: llama3.1
+        #     api_key: ""
+        #   - name: fallback
+        #     base_url: https://api.openai.com/v1
+        #     model: gpt-4o-mini
+        #     api_key: CHANGE_ME
+    transcript-llm:
+      enabled: false
+      weight: 1.0
+      options:
+        base_url: http://ollama:11434/v1
+        model: llama3
+        api_key: CHANGE_ME
+        min_segments: 20 # minimum transcript segments required to attempt identification
+        max_segments: 100 # transcript segments sent per request
+        # Same config shape as subs-llm above (base_url/model/api_key as
+        # the single-provider case, or an equivalent `providers:` failover
+        # list) -- identifies from the whisper transcript instead of
+        # embedded subtitles, so it also covers files with no embedded
+        # subs. Disabled by default since it duplicates subs-llm's job
+        # when both embedded subs and a transcript are available; useful
+        # as the LLM-based identifier when only a transcript exists.
 
 # Reference subtitle service (OpenSubtitles), shared by identifier plugins.
 refsubs:
@@ -94,8 +133,15 @@ refsubs:
   daily_quota: 20
   cache_dir: /assets/refsubs
   # Manual local-SRT drop-in directory, checked before cache/API. Layout:
-  # <manual_dir>/<tvdb_id>/SxxEyy.srt
+  # <manual_dir>/<tvdb_id>/SxxEyy.<lang>.srt (e.g. S01E02.ja.srt), falling
+  # back to the legacy unsuffixed SxxEyy.srt if no language-suffixed file
+  # is present.
   manual_dir: /config/refsubs-manual
+  # Fallback language preference order (ISO 639-1), tried after whatever
+  # language a caller passes (e.g. whisper-subs passes the transcript's
+  # detected language first) -- so a Japanese-audio file is compared
+  # against Japanese subs instead of always assuming English.
+  languages: ["en"]
 
 # Identity/audit layer. Impostarr does not currently have a requirement for
 # access control: all actions are admin actions. Users who need
@@ -185,6 +231,20 @@ trash:
   enabled: true
   dir: /trash
   retention_days: 14
+
+# Worker-pool scheduling controls (see README's Throttling section).
+throttle:
+  # "HH-HH" hour range (0-23, UTC, both bounds inclusive), wrapping past
+  # midnight allowed (e.g. "22-06" = active 22:00 through 06:59); null =
+  # always active.
+  active_hours: null
+  # Max job claims per rolling hour across the whole worker pool; null =
+  # unlimited.
+  jobs_per_hour: null
+  # Startup default for the pause flag. Flippable at runtime without
+  # touching this file via POST /api/v1/pause and /resume (or the UI's
+  # Pause/Resume button) -- this value only applies at boot.
+  paused: false
 
 # Volumes (see README).
 state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay

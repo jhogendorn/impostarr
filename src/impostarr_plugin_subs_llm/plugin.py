@@ -44,23 +44,34 @@ lives in `impostarr`'s plugin-facing API instead).
 
 HTTP client lifecycle: mirrors `RefSubService`'s injection pattern — an
 `httpx.AsyncClient` can be passed to the constructor (caller owns it, e.g.
-Task 14's pipeline sharing one client across plugins); otherwise the plugin
-lazily creates and owns one on first use, closable via `aclose()`.
+Task 14's pipeline sharing one client across plugins); otherwise it's
+lazily created and owned by the underlying `LlmClient`, closable via this
+plugin's `aclose()`.
 
-Retry: on a malformed-JSON reply, the retry appends the model's own invalid
-reply as an `assistant` turn before the reminder `user` turn — small models
-self-correct better when they can see what they just said.
+Provider failover: the actual HTTP/retry machinery lives in
+`impostarr.llm.LlmClient` (shared with `impostarr_plugin_transcript_llm`),
+imported here rather than reimplemented — an intentional, documented
+exception to "importing only from `impostarr.plugins.*`" above: `llm.py`
+is shared plugin-facing infrastructure, same category as
+`impostarr.plugins.subtitles.parse_srt`, just not nested under the
+`plugins` package. `base_url`/`model`/`api_key` remain the single-provider
+degenerate case for config back-compat; an explicit `providers` list takes
+precedence when set (`SubsLlmConfig.resolved_providers()`). Malformed-JSON
+retry (reminder message, appending the model's own invalid reply first so
+small models can see what they just said) is `LlmClient`'s job now; this
+module only supplies the episode-JSON shape validator
+(`episode_json_valid`) so a syntactically-valid-but-wrong-shape reply (e.g.
+`episodes` not a list) still triggers the retry instead of failing outright.
 
 This package is a standalone, installable plugin — it depends on
-`impostarr` (for the `IdentifierPlugin` contract and `parse_srt`) but is not
-part of the `impostarr` package itself, exemplifying how a third-party
-identifier plugin is structured: own package, own `pyproject.toml` entry
-point, own config model, importing only from `impostarr.plugins.*`.
+`impostarr` (for the `IdentifierPlugin` contract, `parse_srt`, and the
+shared `llm` module) but is not part of the `impostarr` package itself,
+exemplifying how a third-party identifier plugin is structured: own
+package, own `pyproject.toml` entry point, own config model.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -68,10 +79,16 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
+from impostarr.llm import (
+    LlmClient,
+    LlmContentError,
+    LlmProvider,
+    LlmUnavailable,
+    build_episode_candidates,
+    episode_json_valid,
+)
 from impostarr.plugins.base import (
     AssetBundle,
-    Candidate,
-    CandidateIdent,
     ClaimedIdent,
     IdentifierPlugin,
     PluginResult,
@@ -82,8 +99,13 @@ from impostarr.plugins.subtitles import parse_srt
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
-_JSON_REMINDER = "Your previous reply was not valid JSON. Reply with valid JSON only."
 _MAX_ATTEMPTS = 2
+
+
+class _LlmError(RuntimeError):
+    """Raised for any LLM-call failure (provider-unavailable fallthrough
+    exhausted, or a content failure); caught once in `identify` and mapped
+    to a PluginResult(status="error")."""
 
 
 class SubsLlmConfig(BaseModel):
@@ -92,12 +114,15 @@ class SubsLlmConfig(BaseModel):
     api_key: str = ""
     max_cues: int = Field(default=80, ge=1)
     timeout_s: float = Field(default=60, gt=0)
+    # Ordered provider failover list; takes precedence over base_url/model/
+    # api_key above when set (those remain the single-provider degenerate
+    # case for config back-compat).
+    providers: list[LlmProvider] | None = None
 
-
-class _LlmError(RuntimeError):
-    """Raised for any LLM-call failure (HTTP error, transport error, or
-    malformed JSON after the retry); caught once in `identify` and mapped to
-    a PluginResult(status="error")."""
+    def resolved_providers(self) -> list[LlmProvider]:
+        if self.providers:
+            return self.providers
+        return [LlmProvider(name="default", base_url=self.base_url, model=self.model, api_key=self.api_key)]
 
 
 def _first_srt(sub_paths: list[str]) -> str | None:
@@ -146,18 +171,6 @@ def _build_prompt(ctx: SeriesContext, claimed: ClaimedIdent, cues: list[str]) ->
     )
 
 
-def _parse_llm_json(content: str) -> dict[str, Any] | None:
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(data, dict) or "season" not in data or "episodes" not in data:
-        return None
-    if not isinstance(data["episodes"], list):
-        return None
-    return data
-
-
 class SubsLlmPlugin(IdentifierPlugin):
     name = "subs-llm"
     version = "1.0.0"
@@ -166,67 +179,24 @@ class SubsLlmPlugin(IdentifierPlugin):
     def __init__(
         self, config: SubsLlmConfig | None = None, http: httpx.AsyncClient | None = None
     ) -> None:
-        super().__init__(config or SubsLlmConfig())
-        self._http = http
-        self._owns_http = http is None
+        config = config or SubsLlmConfig()
+        super().__init__(config)
+        self._llm = LlmClient(config.resolved_providers(), http=http, timeout_s=config.timeout_s)
 
     async def aclose(self) -> None:
         """Closes the lazily-created owned client, if any. No-op when an
         `httpx.AsyncClient` was injected — the injector owns that
         lifecycle."""
-        if self._owns_http and self._http is not None:
-            await self._http.aclose()
-            self._http = None
+        await self._llm.aclose()
 
-    async def _get_http(self) -> httpx.AsyncClient:
-        if self._http is None:
-            self._http = httpx.AsyncClient(timeout=self.config.timeout_s)
-        return self._http
-
-    async def _call_llm(self, prompt: str) -> dict[str, Any]:
+    async def _call_llm(self, prompt: str) -> tuple[dict[str, Any], str]:
         messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
-        headers = {}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        url = f"{self.config.base_url.rstrip('/')}/chat/completions"
-        client = await self._get_http()
-
-        for attempt in range(_MAX_ATTEMPTS):
-            try:
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    json={
-                        "model": self.config.model,
-                        "messages": messages,
-                        "response_format": {"type": "json_object"},
-                        "temperature": 0,
-                    },
-                )
-            except httpx.HTTPError as exc:
-                raise _LlmError(f"LLM request failed: {exc}") from exc
-
-            if resp.status_code != 200:
-                raise _LlmError(f"LLM request failed: HTTP {resp.status_code}")
-
-            try:
-                content = resp.json()["choices"][0]["message"]["content"]
-            except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
-                raise _LlmError(f"LLM response malformed: {exc}") from exc
-
-            parsed = _parse_llm_json(content)
-            if parsed is not None:
-                return parsed
-
-            # Include the model's own invalid reply before the reminder —
-            # small models self-correct better seeing what they just said.
-            messages = [
-                *messages,
-                {"role": "assistant", "content": content},
-                {"role": "user", "content": _JSON_REMINDER},
-            ]
-
-        raise _LlmError("LLM did not return valid JSON after retry")
+        try:
+            return await self._llm.chat_json(
+                messages, validate=episode_json_valid, max_attempts=_MAX_ATTEMPTS
+            )
+        except (LlmUnavailable, LlmContentError) as exc:
+            raise _LlmError(str(exc)) from exc
 
     async def identify(
         self, claimed: ClaimedIdent, assets: AssetBundle, ctx: SeriesContext
@@ -238,7 +208,7 @@ class SubsLlmPlugin(IdentifierPlugin):
         if srt_path is None:
             return PluginResult(status="abstain", reason="PGS/VobSub OCR not supported in PoC")
 
-        if not self.config.api_key and self.config.base_url == DEFAULT_BASE_URL:
+        if not self.config.providers and not self.config.api_key and self.config.base_url == DEFAULT_BASE_URL:
             return PluginResult(status="abstain", reason="no LLM configured")
 
         srt_text = Path(srt_path).read_text(encoding="utf-8", errors="replace")
@@ -246,38 +216,28 @@ class SubsLlmPlugin(IdentifierPlugin):
         prompt = _build_prompt(ctx, claimed, cues)
 
         try:
-            data = await self._call_llm(prompt)
+            data, provider_name = await self._call_llm(prompt)
             llm_season = int(data["season"])
             llm_episodes = [int(e) for e in data["episodes"]]
             llm_confidence = _clamp01(float(data.get("confidence", 0.0)))
             reasoning = str(data.get("reasoning", ""))
+            provider_model = next(
+                (p.model for p in self._llm.providers if p.name == provider_name), self.config.model
+            )
 
-            llm_candidate = Candidate(
-                confidence=llm_confidence,
-                ident=CandidateIdent(series="claimed", season=llm_season, episodes=llm_episodes),
-                numbering="tvdb",
-                evidence={
+            candidates = build_episode_candidates(
+                llm_season,
+                llm_episodes,
+                llm_confidence,
+                claimed.season,
+                claimed.episodes,
+                {
                     "reasoning": reasoning,
                     "cue_count": len(cues),
-                    "model": self.config.model,
+                    "model": provider_model,
+                    "provider": provider_name,
                 },
             )
-
-            identified_claimed = llm_season == claimed.season and set(llm_episodes) == set(
-                claimed.episodes
-            )
-            if identified_claimed:
-                candidates = [llm_candidate]
-            else:
-                claimed_candidate = Candidate(
-                    confidence=max(0.0, 1.0 - llm_confidence),
-                    ident=CandidateIdent(
-                        series="claimed", season=claimed.season, episodes=list(claimed.episodes)
-                    ),
-                    numbering="tvdb",
-                    evidence={"source": "derived"},
-                )
-                candidates = [llm_candidate, claimed_candidate]
         except _LlmError as exc:
             logger.warning("subs-llm call failed: %s", exc)
             return PluginResult(status="error", reason=str(exc))

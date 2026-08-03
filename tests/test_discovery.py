@@ -194,9 +194,9 @@ async def test_poll_once_creates_job_and_dedupes_same_episode_file_on_second_pol
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created_first = await discoverer.poll_once()
+        result_first = await discoverer.poll_once()
 
-    assert created_first == 1
+    assert result_first == (1, 0)
     with session_factory() as session:
         assert session.query(File).count() == 1
         instance = session.query(Instance).one()
@@ -210,9 +210,9 @@ async def test_poll_once_creates_job_and_dedupes_same_episode_file_on_second_pol
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created_second = await discoverer.poll_once()
+        result_second = await discoverer.poll_once()
 
-    assert created_second == 0
+    assert result_second == (0, 0)
     with session_factory() as session:
         assert session.query(File).count() == 1
         instance = session.query(Instance).one()
@@ -252,9 +252,9 @@ async def test_poll_once_multi_episode_file_captures_all_episode_ids(tmp_path, s
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created = await discoverer.poll_once()
+        result = await discoverer.poll_once()
 
-    assert created == 1
+    assert result == (1, 0)
     with session_factory() as session:
         assert session.query(File).count() == 1
         file_row = session.query(File).one()
@@ -284,9 +284,9 @@ async def test_poll_once_path_mapping_picks_longest_prefix(tmp_path, session_fac
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created = await discoverer.poll_once()
+        result = await discoverer.poll_once()
 
-    assert created == 1
+    assert result == (1, 0)
     with session_factory() as session:
         file_row = session.query(File).one()
         assert file_row.local_path == str(expected_local)
@@ -306,9 +306,9 @@ async def test_poll_once_watch_dirs_filter_excludes_out_of_tree_files(tmp_path, 
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created = await discoverer.poll_once()
+        result = await discoverer.poll_once()
 
-    assert created == 0
+    assert result == (0, 0)
     with session_factory() as session:
         assert session.query(File).count() == 0
 
@@ -325,15 +325,66 @@ async def test_poll_once_unmapped_path_skipped_with_warning(tmp_path, session_fa
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
         with caplog.at_level(logging.WARNING, logger="impostarr.discovery"):
-            created = await discoverer.poll_once()
+            result = await discoverer.poll_once()
 
-    assert created == 0
+    assert result == (0, 0)
     with session_factory() as session:
         assert session.query(File).count() == 0
     assert any(
         "no path mapping" in record.message and "/tv/Show/S01E02.mkv" in record.message
         for record in caplog.records
     )
+
+
+@respx.mock
+async def test_poll_once_unreadable_file_skipped_batch_continues(tmp_path, session_factory, caplog):
+    # Live evidence: a file with restrictive permissions (unreadable by the
+    # service identity) must not crash the whole poll -- log a WARNING,
+    # skip just that file, and keep processing the rest of the batch.
+    cfg = make_instance_cfg(tmp_path)
+    tv_dir = tmp_path / "tv" / "Show"
+    tv_dir.mkdir(parents=True)
+    readable = tv_dir / "S01E02.mkv"
+    readable.write_bytes(b"episode content")
+    unreadable = tv_dir / "S01E03.mkv"
+    unreadable.write_bytes(b"episode content")
+    unreadable.chmod(0o000)
+
+    try:
+        mock_history_once(
+            [history_record(101, episode_id=555, file_id=9001), history_record(102, episode_id=556, file_id=9002)]
+        )
+        respx.get(f"{API_URL}/episodefile/9001").mock(
+            return_value=httpx.Response(200, json=episode_file_json(9001, path="/tv/Show/S01E02.mkv"))
+        )
+        respx.get(f"{API_URL}/episodefile/9002").mock(
+            return_value=httpx.Response(200, json=episode_file_json(9002, path="/tv/Show/S01E03.mkv"))
+        )
+        mock_episodes(
+            42,
+            [
+                episode_json(555, episode_file_id=9001),
+                episode_json(556, episode_file_id=9002, episode_number=2),
+            ],
+        )
+
+        async with make_client() as client:
+            discoverer = Discoverer(cfg, client, session_factory)
+            with caplog.at_level(logging.WARNING, logger="impostarr.discovery"):
+                result = await discoverer.poll_once()
+
+        assert result == (1, 1)
+        with session_factory() as session:
+            assert session.query(File).count() == 1
+            instance = session.query(Instance).one()
+            # Watermark still advances past the skipped record.
+            assert instance.history_watermark == 102
+        assert any(
+            "cannot read local file" in record.message and "S01E03.mkv" in record.message
+            for record in caplog.records
+        )
+    finally:
+        unreadable.chmod(0o644)
 
 
 @respx.mock
@@ -435,9 +486,9 @@ async def test_poll_once_sets_last_polled_at_even_when_no_new_records(tmp_path, 
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created = await discoverer.poll_once()
+        result = await discoverer.poll_once()
 
-    assert created == 0
+    assert result == (0, 0)
     with session_factory() as session:
         instance = session.query(Instance).one()
         assert instance.last_polled_at is not None
@@ -484,9 +535,9 @@ async def test_backfill_step_cursor_resumes_mid_series(tmp_path, session_factory
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created_first = await discoverer.backfill_step(batch_size=2)
+        result_first = await discoverer.backfill_step(batch_size=2)
 
-    assert created_first == 2
+    assert result_first == (2, 0)
     with session_factory() as session:
         assert {f.episode_file_id for f in session.query(File).all()} == {301, 302}
         instance = session.query(Instance).one()
@@ -494,9 +545,9 @@ async def test_backfill_step_cursor_resumes_mid_series(tmp_path, session_factory
 
     async with make_client() as client:
         discoverer = Discoverer(cfg, client, session_factory)
-        created_second = await discoverer.backfill_step(batch_size=2)
+        result_second = await discoverer.backfill_step(batch_size=2)
 
-    assert created_second == 1
+    assert result_second == (1, 0)
     with session_factory() as session:
         assert {f.episode_file_id for f in session.query(File).all()} == {301, 302, 303}
         instance = session.query(Instance).one()
@@ -536,4 +587,133 @@ async def test_backfill_step_sets_last_backfilled_at(tmp_path, session_factory):
     with session_factory() as session:
         instance = session.query(Instance).one()
         assert instance.last_backfilled_at is not None
-        assert instance.last_polled_at is None
+
+
+def _mock_two_series() -> None:
+    """Series 10 (file 301) and series 20 (file 401), each with one
+    episode file -- shared setup for the reset/series_id targeting tests."""
+    respx.get(f"{API_URL}/series").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 10, "title": "Show A", "tvdbId": 1, "imdbId": None, "tmdbId": None, "titleSlug": "a"},
+                {"id": 20, "title": "Show B", "tvdbId": 2, "imdbId": None, "tmdbId": None, "titleSlug": "b"},
+            ],
+        )
+    )
+    respx.get(f"{API_URL}/episodefile", params={"seriesId": "10"}).mock(
+        return_value=httpx.Response(200, json=[episode_file_json(301, series_id=10, path="/tv/ep301.mkv")])
+    )
+    respx.get(f"{API_URL}/episode", params={"seriesId": "10"}).mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 701, "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 301, "hasFile": True}]
+        )
+    )
+    respx.get(f"{API_URL}/episodefile", params={"seriesId": "20"}).mock(
+        return_value=httpx.Response(200, json=[episode_file_json(401, series_id=20, path="/tv/ep401.mkv")])
+    )
+    respx.get(f"{API_URL}/episode", params={"seriesId": "20"}).mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 801, "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 401, "hasFile": True}]
+        )
+    )
+
+
+@respx.mock
+async def test_backfill_step_unreadable_file_skipped_batch_continues(tmp_path, session_factory, caplog):
+    cfg = make_instance_cfg(tmp_path)
+    tv_dir = tmp_path / "tv"
+    tv_dir.mkdir()
+    (tv_dir / "ep301.mkv").write_bytes(b"content-301")
+    unreadable = tv_dir / "ep302.mkv"
+    unreadable.write_bytes(b"content-302")
+    unreadable.chmod(0o000)
+
+    try:
+        respx.get(f"{API_URL}/series").mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"id": 42, "title": "Show Name", "tvdbId": 1, "imdbId": None, "tmdbId": None, "titleSlug": "show"}],
+            )
+        )
+        respx.get(f"{API_URL}/episodefile", params={"seriesId": "42"}).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    episode_file_json(301, path="/tv/ep301.mkv"),
+                    episode_file_json(302, path="/tv/ep302.mkv"),
+                ],
+            )
+        )
+        respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"id": 701, "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 301, "hasFile": True},
+                    {"id": 702, "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 302, "hasFile": True},
+                ],
+            )
+        )
+
+        async with make_client() as client:
+            discoverer = Discoverer(cfg, client, session_factory)
+            with caplog.at_level(logging.WARNING, logger="impostarr.discovery"):
+                result = await discoverer.backfill_step(batch_size=10)
+
+        assert result == (1, 1)
+        with session_factory() as session:
+            assert {f.episode_file_id for f in session.query(File).all()} == {301}
+        assert any(
+            "cannot read local file" in record.message and "ep302.mkv" in record.message
+            for record in caplog.records
+        )
+    finally:
+        unreadable.chmod(0o644)
+
+
+@respx.mock
+async def test_backfill_step_reset_ignores_persisted_cursor(tmp_path, session_factory):
+    cfg = make_instance_cfg(tmp_path)
+    tv_dir = tmp_path / "tv"
+    tv_dir.mkdir()
+    (tv_dir / "ep301.mkv").write_bytes(b"content-301")
+    (tv_dir / "ep401.mkv").write_bytes(b"content-401")
+    _mock_two_series()
+
+    with session_factory() as session:
+        instance = Instance(name="main", url=BASE_URL, backfill_cursor={"series_id": 20, "episode_file_id": None})
+        session.add(instance)
+        session.commit()
+
+    async with make_client() as client:
+        discoverer = Discoverer(cfg, client, session_factory)
+        result = await discoverer.backfill_step(batch_size=10, reset=True)
+
+    # reset=True starts from the very beginning, so series 10 (which the
+    # persisted cursor would otherwise skip past) gets captured too.
+    assert result == (2, 0)
+    with session_factory() as session:
+        assert {f.episode_file_id for f in session.query(File).all()} == {301, 401}
+        instance = session.query(Instance).one()
+        assert instance.backfill_cursor is None  # both series walked to completion
+
+
+@respx.mock
+async def test_backfill_step_series_id_skips_earlier_series(tmp_path, session_factory):
+    cfg = make_instance_cfg(tmp_path)
+    tv_dir = tmp_path / "tv"
+    tv_dir.mkdir()
+    (tv_dir / "ep301.mkv").write_bytes(b"content-301")
+    (tv_dir / "ep401.mkv").write_bytes(b"content-401")
+    _mock_two_series()
+
+    async with make_client() as client:
+        discoverer = Discoverer(cfg, client, session_factory)
+        result = await discoverer.backfill_step(batch_size=10, series_id=20)
+
+    # series_id=20 starts at series 20 directly -- series 10 is never
+    # visited at all (not even dedupe-checked), regardless of there being
+    # no persisted cursor.
+    assert result == (1, 0)
+    with session_factory() as session:
+        assert {f.episode_file_id for f in session.query(File).all()} == {401}

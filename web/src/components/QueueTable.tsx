@@ -150,8 +150,8 @@ function QueueTable({
   const allItems = page?.items ?? []
   const total = page?.total ?? 0
   const rangeStart = total === 0 ? 0 : (pageIndex - 1) * pageSize + 1
-  const rangeEnd = Math.min(pageIndex * pageSize, total)
   const hasNext = pageIndex * pageSize < total
+  const lastPage = Math.max(1, Math.ceil(total / pageSize))
 
   const needle = filterText.trim().toLowerCase()
   const items = needle
@@ -345,45 +345,55 @@ function QueueTable({
       </table>
       {items.length === 0 && <p className="px-3 py-6 text-sm text-slate-500">No jobs in this queue.</p>}
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400">
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-slate-400">
-            Page size
-            <select
-              aria-label="Page size"
-              value={pageSize}
-              onChange={(e) => onPageSizeChange(Number(e.target.value))}
-              className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-slate-200"
-            >
-              {PAGE_SIZE_OPTIONS.map((size) => (
-                <option key={size} value={size}>
-                  {size}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span>
-            {rangeStart}–{rangeEnd} of {total}
-          </span>
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            disabled={pageIndex <= 1}
-            onClick={() => onPageChange(pageIndex - 1)}
-            className="rounded-lg border border-slate-700 px-3 py-1 disabled:opacity-40"
+      <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-sm text-slate-400">
+        <button
+          type="button"
+          disabled={pageIndex <= 1}
+          onClick={() => onPageChange(1)}
+          className="rounded-lg border border-slate-700 px-3 py-1 disabled:opacity-40"
+        >
+          « First
+        </button>
+        <button
+          type="button"
+          disabled={pageIndex <= 1}
+          onClick={() => onPageChange(pageIndex - 1)}
+          className="rounded-lg border border-slate-700 px-3 py-1 disabled:opacity-40"
+        >
+          ‹ Prev
+        </button>
+        <span className="flex items-center gap-1 px-1">
+          <span>{rangeStart}–</span>
+          <select
+            aria-label="Records per page"
+            value={pageSize}
+            onChange={(e) => onPageSizeChange(Number(e.target.value))}
+            className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-slate-200"
           >
-            Prev
-          </button>
-          <button
-            type="button"
-            disabled={!hasNext}
-            onClick={() => onPageChange(pageIndex + 1)}
-            className="rounded-lg border border-slate-700 px-3 py-1 disabled:opacity-40"
-          >
-            Next
-          </button>
-        </div>
+            {PAGE_SIZE_OPTIONS.map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
+          </select>
+          <span>of {total}</span>
+        </span>
+        <button
+          type="button"
+          disabled={!hasNext}
+          onClick={() => onPageChange(pageIndex + 1)}
+          className="rounded-lg border border-slate-700 px-3 py-1 disabled:opacity-40"
+        >
+          Next ›
+        </button>
+        <button
+          type="button"
+          disabled={!hasNext}
+          onClick={() => onPageChange(lastPage)}
+          className="rounded-lg border border-slate-700 px-3 py-1 disabled:opacity-40"
+        >
+          Last »
+        </button>
       </div>
     </div>
   )

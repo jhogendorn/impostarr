@@ -52,6 +52,10 @@ class PluginConfig(BaseModel):
     enabled: bool = True
     weight: float = Field(default=1.0, ge=0)
     options: dict = Field(default_factory=dict)
+    # Max plugin EXECUTIONS (identify() calls, not cache hits) per UTC day;
+    # None = unlimited. Exceeding it synthesizes an abstain instead of
+    # calling the plugin -- see pipeline.py's `_run_plugin_stage`.
+    daily_budget: int | None = None
 
 
 class PluginsConfig(BaseModel):
@@ -66,6 +70,10 @@ class RefSubsConfig(BaseModel):
     daily_quota: int = 20
     cache_dir: str | None = None
     manual_dir: str | None = None
+    # Fallback language preference order (ISO 639-1), tried after whatever
+    # language a caller passes to RefSubService.get() (e.g. a transcript's
+    # detected language) -- see refsubs.py's module docstring.
+    languages: list[str] = Field(default_factory=lambda: ["en"])
     # OpenSubtitles enforces per-key rate limits in the ballpark of 5
     # req/s (tighter still for login, handled separately). Concurrent
     # get() callers used to stampede /download with no pacing at all,
@@ -94,6 +102,20 @@ class TrashConfig(BaseModel):
     enabled: bool = True
     dir: Path = Path("/trash")
     retention_days: int = 14
+
+
+class ThrottleConfig(BaseModel):
+    # "HH-HH" hour range (0-23, UTC, both bounds inclusive), wrapping past
+    # midnight allowed (e.g. "22-06"); None = always active. See
+    # throttle.in_active_hours.
+    active_hours: str | None = None
+    # Max job claims per rolling hour across the whole worker pool; None =
+    # unlimited. See throttle.TokenBucket.
+    jobs_per_hour: int | None = None
+    # Runtime-only pause flag: startup default from config, but flipped by
+    # POST /api/v1/pause|resume without touching the config file (routes.py
+    # mutates this instance in place; the worker pool reads it live).
+    paused: bool = False
 
 
 class WorkersConfig(BaseModel):
@@ -130,6 +152,7 @@ class Settings(BaseSettings):
     db: DbConfig = Field(default_factory=DbConfig)
     workers: WorkersConfig = Field(default_factory=WorkersConfig)
     trash: TrashConfig = Field(default_factory=TrashConfig)
+    throttle: ThrottleConfig = Field(default_factory=ThrottleConfig)
 
     # Strongly recommended for first runs against a real library: no files
     # are touched, no Sonarr state is changed; every action is logged as

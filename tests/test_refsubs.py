@@ -64,7 +64,7 @@ async def test_manual_dir_takes_precedence_over_cache(tmp_path):
 @respx.mock
 async def test_cache_hit_skips_network(tmp_path):
     cfg = make_cfg(tmp_path)
-    cache_path = Path(cfg.cache_dir) / "123456" / "S01E02.srt"
+    cache_path = Path(cfg.cache_dir) / "123456" / "S01E02.en.srt"
     write_srt(cache_path, "cache content")
 
     service = await make_service(cfg)
@@ -127,7 +127,7 @@ async def test_api_success_path_caches_file_and_increments_quota(tmp_path):
     service = await make_service(cfg)
     result = await service.get({"tvdb": 123456}, season=1, episode=2)
 
-    expected_path = Path(cfg.cache_dir) / "123456" / "S01E02.srt"
+    expected_path = Path(cfg.cache_dir) / "123456" / "S01E02.en.srt"
     assert result == expected_path
     assert result.read_text() == "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
 
@@ -210,7 +210,7 @@ async def test_search_5xx_returns_none_without_crash(tmp_path):
     result = await service.get({"tvdb": 123456}, season=1, episode=2)
 
     assert result is None
-    assert not (Path(cfg.cache_dir) / "123456" / "S01E02.srt").exists()
+    assert not (Path(cfg.cache_dir) / "123456" / "S01E02.en.srt").exists()
 
 
 @respx.mock
@@ -758,3 +758,180 @@ async def test_search_429_then_success_retries_once(tmp_path):
 
     assert result is not None
     assert search_route.call_count == 2
+
+
+# -- language-aware fetching ---------------------------------------------
+
+
+@respx.mock
+async def test_language_arg_tried_first_in_search_params(tmp_path):
+    cfg = make_cfg(tmp_path)  # default languages=["en"]
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2, language="ja")
+
+    assert result is not None
+    assert search_route.calls.last.request.url.params["languages"] == "ja"
+
+
+@respx.mock
+async def test_language_arg_falls_back_to_configured_languages_on_miss(tmp_path):
+    # Requested language ("ja") comes back empty from every search
+    # strategy (imdb/tvdb/query all live here since series_ext_ids has
+    # none of imdb/title -- only tvdb, so just one strategy per language);
+    # falls back to the configured "en".
+    cfg = make_cfg(tmp_path, languages=["en"])
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(
+        side_effect=[
+            httpx.Response(200, json={"data": []}),  # ja: tvdb strategy, no hits
+            httpx.Response(200, json=_mock_search_hit()),  # en: tvdb strategy, hit
+        ]
+    )
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2, language="ja")
+
+    assert result is not None
+    assert search_route.call_count == 2
+    assert search_route.calls[0].request.url.params["languages"] == "ja"
+    assert search_route.calls[1].request.url.params["languages"] == "en"
+
+
+@respx.mock
+async def test_language_arg_deduped_against_configured_languages(tmp_path):
+    # language="en" is already the sole configured fallback -- must not be
+    # tried twice.
+    cfg = make_cfg(tmp_path, languages=["en"])
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json={"data": []}))
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2, language="en")
+
+    assert result is None
+    assert search_route.call_count == 1
+
+
+@respx.mock
+async def test_no_language_arg_uses_configured_languages_order(tmp_path):
+    cfg = make_cfg(tmp_path, languages=["ja", "en"])
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    search_route = respx.get(f"{BASE_URL}/subtitles").mock(
+        side_effect=[
+            httpx.Response(200, json={"data": []}),
+            httpx.Response(200, json=_mock_search_hit()),
+        ]
+    )
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2)
+
+    assert result is not None
+    assert search_route.calls[0].request.url.params["languages"] == "ja"
+    assert search_route.calls[1].request.url.params["languages"] == "en"
+
+
+@respx.mock
+async def test_cache_path_is_language_scoped(tmp_path):
+    cfg = make_cfg(tmp_path)
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2, language="ja")
+
+    assert result == Path(cfg.cache_dir) / "123456" / "S01E02.ja.srt"
+
+
+@respx.mock
+async def test_cache_hit_for_one_language_does_not_serve_another(tmp_path):
+    cfg = make_cfg(tmp_path, languages=["en"])
+    en_cache = Path(cfg.cache_dir) / "123456" / "S01E02.en.srt"
+    write_srt(en_cache, "english cache content")
+    respx.post(f"{BASE_URL}/login").mock(return_value=httpx.Response(200, json={"token": "jwt"}))
+    respx.get(f"{BASE_URL}/subtitles").mock(return_value=httpx.Response(200, json=_mock_search_hit()))
+    _mock_download_and_file()
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2, language="ja")
+
+    # ja isn't cached -- must go to the API for ja, not silently return
+    # the en cache entry.
+    assert result == Path(cfg.cache_dir) / "123456" / "S01E02.ja.srt"
+    assert respx.calls.call_count > 0
+
+
+@respx.mock
+async def test_manual_dir_prefers_language_suffixed_over_legacy(tmp_path):
+    cfg = make_cfg(tmp_path)
+    suffixed = Path(cfg.manual_dir) / "123456" / "S01E02.en.srt"
+    legacy = Path(cfg.manual_dir) / "123456" / "S01E02.srt"
+    write_srt(suffixed, "suffixed content")
+    write_srt(legacy, "legacy content")
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2, language="en")
+
+    assert result == suffixed
+    assert result.read_text() == "suffixed content"
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+async def test_manual_dir_falls_back_to_legacy_unsuffixed_name(tmp_path):
+    cfg = make_cfg(tmp_path)
+    legacy = Path(cfg.manual_dir) / "123456" / "S01E02.srt"
+    write_srt(legacy, "legacy content")
+
+    service = await make_service(cfg)
+    result = await service.get({"tvdb": 123456}, season=1, episode=2, language="ja")
+
+    assert result == legacy
+    assert result.read_text() == "legacy content"
+    assert len(respx.calls) == 0
+
+
+# -- quota_status ---------------------------------------------------------
+
+
+async def test_quota_status_none_without_cache_dir(tmp_path):
+    cfg = make_cfg(tmp_path, cache_dir=None)
+    service = await make_service(cfg)
+
+    assert service.quota_status() is None
+
+
+async def test_quota_status_zero_used_when_no_quota_file_yet(tmp_path):
+    cfg = make_cfg(tmp_path, daily_quota=20)
+    service = await make_service(cfg)
+
+    assert service.quota_status() == {"used": 0, "limit": 20}
+
+
+async def test_quota_status_reflects_current_usage(tmp_path):
+    cfg = make_cfg(tmp_path, daily_quota=20)
+    quota_path = Path(cfg.cache_dir) / "quota.json"
+    quota_path.parent.mkdir(parents=True, exist_ok=True)
+    today = datetime.datetime.now(datetime.UTC).date().isoformat()
+    quota_path.write_text(json.dumps({"date": today, "count": 7}))
+    service = await make_service(cfg)
+
+    assert service.quota_status() == {"used": 7, "limit": 20}
+
+
+async def test_quota_status_resets_on_stale_date(tmp_path):
+    cfg = make_cfg(tmp_path, daily_quota=20)
+    quota_path = Path(cfg.cache_dir) / "quota.json"
+    quota_path.parent.mkdir(parents=True, exist_ok=True)
+    yesterday = (datetime.datetime.now(datetime.UTC).date() - datetime.timedelta(days=1)).isoformat()
+    quota_path.write_text(json.dumps({"date": yesterday, "count": 15}))
+    service = await make_service(cfg)
+
+    assert service.quota_status() == {"used": 0, "limit": 20}

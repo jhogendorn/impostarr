@@ -10,6 +10,7 @@ build/
 .mypy_cache/
 web/node_modules/
 web/dist/
+.worktrees/
 
 # Demo/e2e harness runtime state (generated media, Sonarr/Impostarr
 # volumes) — regenerated fresh by demo/e2e.sh on every run.

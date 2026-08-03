@@ -69,6 +69,33 @@ end-to-end; the audit trail marks what would have happened instead of
 actually happening. When active, the UI shows an amber "DRY RUN" badge in
 the header.
 
+## Throttling
+
+Worker-pool scheduling controls, under `throttle:` in `impostarr.yml`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `active_hours` | unset (always active) | An `"HH-HH"` hour range (0-23, UTC, both bounds inclusive), e.g. `"22-06"` for overnight-only — wrapping past midnight is fine. Outside the window, workers claim no jobs. |
+| `jobs_per_hour` | unset (unlimited) | Max job claims per rolling hour across the whole worker pool. |
+| `paused` | `false` | Startup default for the pause flag (see below). |
+
+**Pause/resume**: `POST /api/v1/pause` and `POST /api/v1/resume` flip a
+runtime-only flag — no config file edit or restart needed. This does *not*
+persist to `impostarr.yml`; on restart the pool goes back to `paused`'s
+configured value. The UI's header shows an amber "Paused" badge and a
+Pause/Resume button when active; `GET /api/v1/status` also exposes it
+(`paused`).
+
+**Per-plugin daily budget**: any plugin's `options` block can set
+`daily_budget` (max real executions — not cache hits — per UTC day); once
+reached, further calls are skipped and synthesized as an abstain
+("daily budget reached") instead of hitting the plugin, e.g. to cap a
+paid/rate-limited LLM backend independently of overall job throughput.
+
+**Reference-subtitle quota**: OpenSubtitles' own daily download quota
+(`refsubs.daily_quota`) usage is surfaced in `GET /api/v1/status`
+(`refsubs_quota: {used, limit}`) and shown in the UI header's tooltip.
+
 ## Volumes
 
 | Volume    | Contents                                                        | Notes |
@@ -135,6 +162,12 @@ Transcriber backends (see GPU section above) are also an entry-point group
 factory-function convention instead of a class — see
 `src/impostarr/plugins/transcribers.py`.
 
+| Plugin | Compares against | Needs |
+|---|---|---|
+| [whisper-subs](#whisper-subs) | whisper transcript vs. reference subtitles | transcription + reference subtitles (OpenSubtitles or manual drop-in) |
+| [subs-llm](#subs-llm) | embedded subtitles vs. an LLM's episode guess | embedded text subtitles + an OpenAI-compatible endpoint |
+| [transcript-llm](#transcript-llm) | whisper transcript vs. an LLM's episode guess | transcription + an OpenAI-compatible endpoint |
+
 ### whisper-subs
 
 Compares a whisper transcript of the file's audio against reference
@@ -148,7 +181,16 @@ subtitles for nearby episodes.
 Needs reference subtitles to compare against: either OpenSubtitles
 credentials (`refsubs.username`/`refsubs.password`/`refsubs.api_key`) for
 automatic fetching, or a manual SRT drop-in directory
-(`refsubs.manual_dir`, layout `<tvdb_id>/SxxEyy.srt`).
+(`refsubs.manual_dir`, layout `<tvdb_id>/SxxEyy.<lang>.srt`, falling back to
+the legacy unsuffixed `SxxEyy.srt` when no language-tagged file exists).
+
+**Language-aware fetching**: reference subtitles are fetched in the
+transcript's own detected language first, then `refsubs.languages`
+(fallback preference order, default `["en"]`) — so e.g. a Japanese-audio
+file is compared against Japanese reference subtitles instead of always
+assuming English. Cache paths and manual drop-ins are language-scoped
+accordingly (see above). The language actually compared is recorded per
+candidate as evidence (`refsub_language`).
 
 ### subs-llm
 
@@ -162,20 +204,54 @@ endpoint and asks it which episode the cues belong to.
 | `api_key` | `""` | Bearer token; leave empty for endpoints that don't require one (e.g. local Ollama). |
 | `max_cues` | 80 | Max subtitle cues sent per request. |
 | `timeout_s` | 60 | HTTP request timeout. |
+| `providers` | unset | Optional ordered failover list (`[{name, base_url, model, api_key}, ...]`), taking precedence over `base_url`/`model`/`api_key` above when set — see [LLM provider failover](#llm-provider-failover). |
 
 Needs embedded text subtitles in the media file (image-based subs like
 PGS/VobSub aren't supported) and an OpenAI-compatible endpoint — Ollama
 works, and needs no API key.
 
+### transcript-llm
+
+Sibling of `subs-llm`, same LLM episode-identification contract and config
+shape (including `providers` failover), but identifies from the whisper
+*transcript* instead of embedded subtitles — useful when a file has no
+embedded subs, as long as transcription ran. The prompt is tuned for ASR
+noise (states that the text is an automatic-speech-recognition transcript
+and to expect errors).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `base_url` / `model` / `api_key` / `timeout_s` / `providers` | same as subs-llm | see subs-llm above |
+| `min_segments` | 20 | Minimum transcript segments required to attempt identification; shorter transcripts abstain. |
+| `max_segments` | 100 | Max transcript segments sent per request. |
+
+Disabled by default (it duplicates subs-llm's job whenever embedded subs
+are also available) — enable it for libraries where transcription is
+configured but embedded subtitles usually aren't.
+
+### LLM provider failover
+
+`subs-llm` and `transcript-llm` share an ordered-provider chat client: set
+`providers` (instead of the single `base_url`/`model`/`api_key`) to try
+several OpenAI-compatible endpoints in order, e.g. a local Ollama first and
+a paid API as fallback. A provider is skipped in favor of the next one only
+when it looks unavailable (auth/quota errors, a persistent 5xx, or a
+transport failure) — a bad or unparseable reply from a *reachable* provider
+is not retried against a different one; it surfaces as an error instead, so
+a broken prompt/response contract doesn't get silently papered over.
+Evidence records which provider actually served each result (`provider`).
+
 ### Writing a plugin
 
-`whisper-subs` and `subs-llm` are themselves ordinary third-party-style
-plugins bundled with Impostarr for convenience, not special-cased code: each
-lives in its own package under `src/` (`src/impostarr_plugin_whisper_subs/`,
-`src/impostarr_plugin_subs_llm/`), registers its own entry point, defines
-its own config model, and imports only from `impostarr.plugins.*` — exactly
-what an external plugin package looks like. Use either as a reference
-implementation.
+`whisper-subs`, `subs-llm`, and `transcript-llm` are themselves ordinary
+third-party-style plugins bundled with Impostarr for convenience, not
+special-cased code: each lives in its own package under `src/`
+(`src/impostarr_plugin_whisper_subs/`, `src/impostarr_plugin_subs_llm/`,
+`src/impostarr_plugin_transcript_llm/`), registers its own entry point,
+defines its own config model, and imports only from `impostarr.plugins.*`
+(plus, for the two LLM plugins, the shared `impostarr.llm` client) — mostly
+what an external plugin package looks like. Use any of the three as a
+reference implementation.
 
 Plugins are discovered via the `impostarr.identifiers` entry-point group.
 Subclass `IdentifierPlugin` (`impostarr.plugins.base.IdentifierPlugin`), set

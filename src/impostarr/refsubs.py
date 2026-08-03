@@ -7,6 +7,20 @@ per-episode cache -> OpenSubtitles REST API (JWT-authenticated, quota-aware).
 Never raises to callers: any failure (network, auth, quota, missing tvdb id,
 no results) is logged and yields `None` so dependent plugins abstain instead
 of crashing.
+
+Language awareness: `get()` accepts an optional `language` (ISO 639-1, e.g.
+a transcript's detected language). Languages are tried in order: `language`
+first (if given), then `RefSubsConfig.languages` (deduped against
+`language`) -- e.g. whisper-subs compares a Japanese-audio transcript
+against Japanese subs first rather than always assuming English. Each
+language is tried end-to-end (manual dir -> cache -> API) before moving to
+the next, mirroring `_search`'s imdb -> tvdb -> title fallback shape.
+
+Cache paths are language-scoped (`<cache>/<tvdb>/SxxEyy.<lang>.srt`) so
+different languages for the same episode don't collide. The manual
+drop-in directory checks the language-suffixed name first, then falls back
+to the legacy unsuffixed name (`SxxEyy.srt`) for back-compat with existing
+manual drop-ins predating language awareness.
 """
 
 from __future__ import annotations
@@ -67,28 +81,89 @@ class RefSubService:
         self._pacing_lock = asyncio.Lock()
         self._last_request_at: float | None = None
 
-    async def get(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> Path | None:
+    def _language_order(self, language: str | None) -> list[str]:
+        """`language` first (if given), then `cfg.languages`, deduped
+        while preserving order."""
+        ordered = [language] if language else []
+        for lang in self.cfg.languages:
+            if lang not in ordered:
+                ordered.append(lang)
+        return ordered
+
+    @staticmethod
+    def _srt_name(season: int, episode: int, language: str | None = None) -> str:
+        base = f"S{season:02d}E{episode:02d}"
+        return f"{base}.{language}.srt" if language else f"{base}.srt"
+
+    def _manual_path(self, tvdb_id: Any, season: int, episode: int, langs: list[str]) -> Path | None:
+        if not self.cfg.manual_dir:
+            return None
+        manual_dir = Path(self.cfg.manual_dir) / str(tvdb_id)
+        for lang in langs:
+            path = manual_dir / self._srt_name(season, episode, lang)
+            if path.exists():
+                return path
+        # Legacy unsuffixed name, predating language awareness.
+        legacy_path = manual_dir / self._srt_name(season, episode)
+        if legacy_path.exists():
+            return legacy_path
+        return None
+
+    def quota_status(self) -> dict[str, int] | None:
+        """Current daily OpenSubtitles quota usage, for surfacing in
+        `GET /status` (`refsubs_quota`). `None` when no `cache_dir` is
+        configured -- quota tracking has nowhere to persist its counter in
+        that case (see `get()`)."""
+        if not self.cfg.cache_dir:
+            return None
+        data = self._load_quota(Path(self.cfg.cache_dir))
+        return {"used": data.get("count", 0), "limit": self.cfg.daily_quota}
+
+    async def get(
+        self, series_ext_ids: dict[str, Any], season: int, episode: int, language: str | None = None
+    ) -> Path | None:
         tvdb_id = series_ext_ids.get("tvdb")
         if not tvdb_id:
             logger.warning("series_ext_ids has no tvdb id, cannot fetch reference subtitle")
             return None
 
-        name = f"S{season:02d}E{episode:02d}.srt"
+        langs = self._language_order(language)
 
-        if self.cfg.manual_dir:
-            manual_path = Path(self.cfg.manual_dir) / str(tvdb_id) / name
-            if manual_path.exists():
-                return manual_path
+        manual_hit = self._manual_path(tvdb_id, season, episode, langs)
+        if manual_hit is not None:
+            return manual_hit
 
         if not self.cfg.cache_dir:
             logger.warning("no cache_dir configured, cannot fetch reference subtitles")
             return None
         cache_dir = Path(self.cfg.cache_dir)
 
-        cache_path = cache_dir / str(tvdb_id) / name
-        if cache_path.exists():
-            return cache_path
+        # Each language is tried to exhaustion (cache, then a live API
+        # fetch) before moving to the next -- a cached fallback-language
+        # file must not silently pre-empt fetching the preferred language,
+        # or the whole point of language awareness (comparing against the
+        # right language) is defeated.
+        for lang in langs:
+            cache_path = cache_dir / str(tvdb_id) / self._srt_name(season, episode, lang)
+            if cache_path.exists():
+                return cache_path
+            result = await self._fetch(series_ext_ids, season, episode, lang, cache_dir, cache_path)
+            if result is not None:
+                return result
+        return None
 
+    async def _fetch(
+        self,
+        series_ext_ids: dict[str, Any],
+        season: int,
+        episode: int,
+        language: str,
+        cache_dir: Path,
+        cache_path: Path,
+    ) -> Path | None:
+        """One end-to-end API fetch attempt for a single language: quota
+        reservation, search, download, save. Mirrors the pre-language-aware
+        `get()` body exactly, just parameterized on `language`."""
         if not await self._reserve_quota(cache_dir):
             logger.info("reference subtitle daily quota exhausted, skipping API fetch")
             return None
@@ -99,7 +174,7 @@ class RefSubService:
         # transient error doesn't burn a real quota unit.
         committed = False
         try:
-            file_id = await self._search(series_ext_ids, season, episode)
+            file_id = await self._search(series_ext_ids, season, episode, language)
             if file_id is None:
                 return None
             link = await self._download(file_id)
@@ -277,7 +352,9 @@ class RefSubService:
         text = str(raw).removeprefix("tt")
         return int(text) if text.isdigit() else None
 
-    async def _search(self, series_ext_ids: dict[str, Any], season: int, episode: int) -> int | None:
+    async def _search(
+        self, series_ext_ids: dict[str, Any], season: int, episode: int, language: str
+    ) -> int | None:
         """Tries `parent_imdb_id` -> `parent_tvdb_id` -> `query` (series
         title), moving to the next strategy whenever one comes back empty
         (id unavailable, 4xx/5xx, or zero results) -- OpenSubtitles' tvdb
@@ -288,7 +365,7 @@ class RefSubService:
             file_id = await self._search_query(
                 {
                     "episode_number": episode,
-                    "languages": "en",
+                    "languages": language,
                     "parent_imdb_id": imdb_id,
                     "season_number": season,
                 }
@@ -302,7 +379,7 @@ class RefSubService:
             file_id = await self._search_query(
                 {
                     "episode_number": episode,
-                    "languages": "en",
+                    "languages": language,
                     "parent_tvdb_id": tvdb_id,
                     "season_number": season,
                 }
@@ -316,7 +393,7 @@ class RefSubService:
             file_id = await self._search_query(
                 {
                     "episode_number": episode,
-                    "languages": "en",
+                    "languages": language,
                     "query": title,
                     "season_number": season,
                 }

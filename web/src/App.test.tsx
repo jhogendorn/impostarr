@@ -105,4 +105,19 @@ describe('App SSE wiring', () => {
     // neither child re-applies its own ring now that the card owns it
     expect(tabList).not.toHaveClass('glow-panel')
   })
+
+  it('the initial queue fetch requests the same page size the Records-per-page select displays', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    render(<App />)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    expect(getQueueMock).toHaveBeenCalledTimes(1)
+    const [, opts] = getQueueMock.mock.calls[0]
+    const requestedPageSize = (opts as { pageSize: number }).pageSize
+
+    expect(screen.getByLabelText('Records per page')).toHaveValue(String(requestedPageSize))
+  })
 })

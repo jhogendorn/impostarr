@@ -51,7 +51,8 @@ describe('QueueTable', () => {
     expect(screen.getByText('200, 201')).toBeInTheDocument()
     expect(screen.getAllByText('main', { selector: 'td' }).length).toBeGreaterThan(0)
     expect(screen.getByText('backup', { selector: 'td' })).toBeInTheDocument()
-    expect(screen.getByText('1–4 of 4')).toBeInTheDocument()
+    expect(screen.getByText('1–')).toBeInTheDocument()
+    expect(screen.getByText('of 4')).toBeInTheDocument()
   })
 
   it('renders Confidence as a rounded percentage, color-coded by band', () => {
@@ -131,23 +132,82 @@ describe('QueueTable', () => {
     expect(screen.getByText('1 selected')).toBeInTheDocument()
   })
 
-  it('changing the page size fires onPageSizeChange', async () => {
+  it('changing the records-per-page select fires onPageSizeChange', async () => {
     const user = userEvent.setup()
     const onPageSizeChange = vi.fn()
     render(<QueueTable page={queuePageFixture} {...defaultProps} onPageSizeChange={onPageSizeChange} />)
 
-    await user.selectOptions(screen.getByLabelText('Page size'), '100')
+    await user.selectOptions(screen.getByLabelText('Records per page'), '100')
 
     expect(onPageSizeChange).toHaveBeenCalledWith(100)
   })
 
-  it('the page-size select sits in the same bottom bar as the pagination range and Prev/Next', () => {
+  it('the initial pageSize prop always matches the records-per-page select value', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} pageSize={50} />)
+
+    expect(screen.getByLabelText('Records per page')).toHaveValue('50')
+  })
+
+  it('the records-per-page select sits in the same centered bar as the range and First/Prev/Next/Last', () => {
     render(<QueueTable page={queuePageFixture} {...defaultProps} />)
 
-    const bar = screen.getByLabelText('Page size').closest('div')!.parentElement!
-    expect(within(bar).getByText('1–4 of 4')).toBeInTheDocument()
-    expect(within(bar).getByRole('button', { name: 'Prev' })).toBeInTheDocument()
-    expect(within(bar).getByRole('button', { name: 'Next' })).toBeInTheDocument()
+    const bar = screen.getByLabelText('Records per page').closest('span')!.parentElement!
+    expect(within(bar).getByText('1–')).toBeInTheDocument()
+    expect(within(bar).getByText('of 4')).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: '« First' })).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: '‹ Prev' })).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: 'Next ›' })).toBeInTheDocument()
+    expect(within(bar).getByRole('button', { name: 'Last »' })).toBeInTheDocument()
+  })
+
+  it('First/Prev are disabled on page 1; Next/Last are disabled on the last page', () => {
+    render(<QueueTable page={queuePageFixture} {...defaultProps} pageIndex={1} pageSize={50} />)
+
+    expect(screen.getByRole('button', { name: '« First' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '‹ Prev' })).toBeDisabled()
+    // queuePageFixture: total 4, pageSize 50 -> page 1 is also the last page.
+    expect(screen.getByRole('button', { name: 'Next ›' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Last »' })).toBeDisabled()
+  })
+
+  it('First/Prev are enabled mid-list; clicking First jumps to page 1', async () => {
+    const user = userEvent.setup()
+    const onPageChange = vi.fn()
+    render(
+      <QueueTable
+        page={{ total: 231, page_size: 50, items: queuePageFixture.items }}
+        {...defaultProps}
+        pageIndex={3}
+        pageSize={50}
+        onPageChange={onPageChange}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: '« First' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '‹ Prev' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Next ›' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Last »' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: '« First' }))
+    expect(onPageChange).toHaveBeenCalledWith(1)
+  })
+
+  it('clicking Last jumps to the computed last page from total/pageSize', async () => {
+    const user = userEvent.setup()
+    const onPageChange = vi.fn()
+    render(
+      <QueueTable
+        page={{ total: 231, page_size: 50, items: queuePageFixture.items }}
+        {...defaultProps}
+        pageIndex={1}
+        pageSize={50}
+        onPageChange={onPageChange}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Last »' }))
+
+    expect(onPageChange).toHaveBeenCalledWith(5) // ceil(231 / 50)
   })
 
   it('hides the instance filter when there is only one instance', () => {

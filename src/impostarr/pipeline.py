@@ -55,11 +55,12 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import xxhash
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from impostarr import jobs
@@ -445,6 +446,21 @@ def _plugin_fingerprint(
     return xxhash.xxh64(encoded.encode()).hexdigest()
 
 
+def _plugin_executions_today(session: Session, plugin_name: str) -> int:
+    """Count of `plugin_results` rows for `plugin_name` created since UTC
+    midnight -- an execution is a real `identify()` call that produced a
+    row (cache hits and budget-synthesized abstains don't insert one), so
+    this is the true per-UTC-day call count `PluginConfig.daily_budget`
+    gates."""
+    start_of_day = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return session.execute(
+        select(func.count(PluginResultRow.id)).where(
+            PluginResultRow.plugin_name == plugin_name,
+            PluginResultRow.created_at >= start_of_day,
+        )
+    ).scalar_one()
+
+
 async def _run_plugin_stage(
     session: Session,
     job: Job,
@@ -487,6 +503,20 @@ async def _run_plugin_stage(
                 reason=cached_row.reason,
                 candidates=[Candidate.model_validate(c) for c in cached_row.candidates],
             )
+        elif (
+            loaded.daily_budget is not None
+            and _plugin_executions_today(session, loaded.plugin.name) >= loaded.daily_budget
+        ):
+            # Budget exceeded: skip the actual identify() call entirely and
+            # synthesize an abstain instead. Deliberately NOT persisted as
+            # a plugin_results row -- doing so would count toward (and
+            # inflate) the very execution count this check reads, and an
+            # execution never actually happened.
+            logger.info(
+                "plugin %s daily budget (%s) reached, skipping execution",
+                loaded.plugin.name, loaded.daily_budget,
+            )
+            result = PluginResult(status="abstain", reason="daily budget reached")
         else:
             try:
                 result = await loaded.plugin.identify(claimed, bundle, ctx)

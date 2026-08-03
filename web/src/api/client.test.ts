@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, getJob, getStatus } from './client'
+import { ApiError, getJob, getStatus, pauseWorkers, resumeWorkers } from './client'
 
 describe('api client', () => {
   afterEach(() => {
@@ -55,5 +55,31 @@ describe('api client', () => {
       expect(apiError.status).toBe(502)
       expect(apiError.body).toBe('<html>502 Bad Gateway</html>')
     }
+  })
+
+  it('pauseWorkers POSTs to /pause', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ paused: true }), { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(pauseWorkers()).resolves.toEqual({ paused: true })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/pause',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('resumeWorkers POSTs to /resume', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ paused: false }), { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(resumeWorkers()).resolves.toEqual({ paused: false })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/resume',
+      expect.objectContaining({ method: 'POST' }),
+    )
   })
 })

@@ -6,6 +6,7 @@ import type {
   JobDetail,
   JobStatus,
   LogsResponse,
+  PauseResponse,
   QueuePage,
   RestoreTrashResponse,
   StatusResponse,
@@ -50,6 +51,14 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getStatus(): Promise<StatusResponse> {
   return api<StatusResponse>('/status')
+}
+
+export function pauseWorkers(): Promise<PauseResponse> {
+  return api<PauseResponse>('/pause', { method: 'POST' })
+}
+
+export function resumeWorkers(): Promise<PauseResponse> {
+  return api<PauseResponse>('/resume', { method: 'POST' })
 }
 
 export function getQueue(status: JobStatus, opts: GetQueueOptions = {}): Promise<QueuePage> {

@@ -12,6 +12,7 @@ from impostarr.config import PluginConfig, Settings
 from impostarr.plugins import loader
 from impostarr.plugins.loader import ENTRY_POINT_GROUP
 from impostarr_plugin_subs_llm import SubsLlmPlugin
+from impostarr_plugin_transcript_llm import TranscriptLlmPlugin
 from impostarr_plugin_whisper_subs import WhisperSubsPlugin
 from tests.plugins.fake_plugin import BrokenFakePlugin, FakePlugin, NoConfigFakePlugin
 
@@ -75,6 +76,26 @@ def test_weight_and_options_applied(monkeypatch):
     assert len(loaded) == 1
     assert loaded[0].weight == 2.5
     assert loaded[0].config.confidence == 0.3
+
+
+def test_daily_budget_threaded_through(monkeypatch):
+    _patch_entry_points(monkeypatch, [FakeEntryPoint("fake", FakePlugin)])
+    settings = Settings(
+        plugins={"identifiers": {"fake": PluginConfig(daily_budget=50)}}
+    )
+
+    loaded = loader.load_plugins(settings)
+
+    assert loaded[0].daily_budget == 50
+
+
+def test_daily_budget_defaults_to_none(monkeypatch):
+    _patch_entry_points(monkeypatch, [FakeEntryPoint("fake", FakePlugin)])
+    settings = Settings()
+
+    loaded = loader.load_plugins(settings)
+
+    assert loaded[0].daily_budget is None
 
 
 def test_loader_survives_entry_point_load_error(monkeypatch, caplog):
@@ -158,14 +179,16 @@ def test_loader_warns_on_configured_name_with_no_entry_point(monkeypatch, caplog
 
 def test_real_entry_points_resolve_both_bundled_plugins():
     """Non-mocked: reads the actual `impostarr.identifiers` entry-point group
-    as installed (editable install), confirming both bundled plugin packages
-    (`impostarr_plugin_whisper_subs`, `impostarr_plugin_subs_llm`) register
-    and load correctly from their new, standalone-package module paths."""
+    as installed (editable install), confirming all bundled plugin packages
+    (`impostarr_plugin_whisper_subs`, `impostarr_plugin_subs_llm`,
+    `impostarr_plugin_transcript_llm`) register and load correctly from
+    their new, standalone-package module paths."""
     eps = {ep.name: ep for ep in entry_points(group=ENTRY_POINT_GROUP)}
 
-    assert set(eps) == {"whisper-subs", "subs-llm"}
+    assert set(eps) == {"whisper-subs", "subs-llm", "transcript-llm"}
     assert eps["whisper-subs"].load() is WhisperSubsPlugin
     assert eps["subs-llm"].load() is SubsLlmPlugin
+    assert eps["transcript-llm"].load() is TranscriptLlmPlugin
 
 
 # -- ensure_external_plugins ------------------------------------------------
