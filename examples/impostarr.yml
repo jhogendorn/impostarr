@@ -101,6 +101,22 @@ plugins:
         #     base_url: https://api.openai.com/v1
         #     model: gpt-4o-mini
         #     api_key: CHANGE_ME
+    transcript-llm:
+      enabled: false
+      weight: 1.0
+      options:
+        base_url: http://ollama:11434/v1
+        model: llama3
+        api_key: CHANGE_ME
+        min_segments: 20 # minimum transcript segments required to attempt identification
+        max_segments: 100 # transcript segments sent per request
+        # Same config shape as subs-llm above (base_url/model/api_key as
+        # the single-provider case, or an equivalent `providers:` failover
+        # list) -- identifies from the whisper transcript instead of
+        # embedded subtitles, so it also covers files with no embedded
+        # subs. Disabled by default since it duplicates subs-llm's job
+        # when both embedded subs and a transcript are available; useful
+        # as the LLM-based identifier when only a transcript exists.
 
 # Reference subtitle service (OpenSubtitles), shared by identifier plugins.
 refsubs:

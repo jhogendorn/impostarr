@@ -12,6 +12,7 @@ from impostarr.config import PluginConfig, Settings
 from impostarr.plugins import loader
 from impostarr.plugins.loader import ENTRY_POINT_GROUP
 from impostarr_plugin_subs_llm import SubsLlmPlugin
+from impostarr_plugin_transcript_llm import TranscriptLlmPlugin
 from impostarr_plugin_whisper_subs import WhisperSubsPlugin
 from tests.plugins.fake_plugin import BrokenFakePlugin, FakePlugin, NoConfigFakePlugin
 
@@ -158,14 +159,16 @@ def test_loader_warns_on_configured_name_with_no_entry_point(monkeypatch, caplog
 
 def test_real_entry_points_resolve_both_bundled_plugins():
     """Non-mocked: reads the actual `impostarr.identifiers` entry-point group
-    as installed (editable install), confirming both bundled plugin packages
-    (`impostarr_plugin_whisper_subs`, `impostarr_plugin_subs_llm`) register
-    and load correctly from their new, standalone-package module paths."""
+    as installed (editable install), confirming all bundled plugin packages
+    (`impostarr_plugin_whisper_subs`, `impostarr_plugin_subs_llm`,
+    `impostarr_plugin_transcript_llm`) register and load correctly from
+    their new, standalone-package module paths."""
     eps = {ep.name: ep for ep in entry_points(group=ENTRY_POINT_GROUP)}
 
-    assert set(eps) == {"whisper-subs", "subs-llm"}
+    assert set(eps) == {"whisper-subs", "subs-llm", "transcript-llm"}
     assert eps["whisper-subs"].load() is WhisperSubsPlugin
     assert eps["subs-llm"].load() is SubsLlmPlugin
+    assert eps["transcript-llm"].load() is TranscriptLlmPlugin
 
 
 # -- ensure_external_plugins ------------------------------------------------

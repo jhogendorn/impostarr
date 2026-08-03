@@ -84,12 +84,11 @@ from impostarr.llm import (
     LlmContentError,
     LlmProvider,
     LlmUnavailable,
+    build_episode_candidates,
     episode_json_valid,
 )
 from impostarr.plugins.base import (
     AssetBundle,
-    Candidate,
-    CandidateIdent,
     ClaimedIdent,
     IdentifierPlugin,
     PluginResult,
@@ -226,33 +225,19 @@ class SubsLlmPlugin(IdentifierPlugin):
                 (p.model for p in self._llm.providers if p.name == provider_name), self.config.model
             )
 
-            llm_candidate = Candidate(
-                confidence=llm_confidence,
-                ident=CandidateIdent(series="claimed", season=llm_season, episodes=llm_episodes),
-                numbering="tvdb",
-                evidence={
+            candidates = build_episode_candidates(
+                llm_season,
+                llm_episodes,
+                llm_confidence,
+                claimed.season,
+                claimed.episodes,
+                {
                     "reasoning": reasoning,
                     "cue_count": len(cues),
                     "model": provider_model,
                     "provider": provider_name,
                 },
             )
-
-            identified_claimed = llm_season == claimed.season and set(llm_episodes) == set(
-                claimed.episodes
-            )
-            if identified_claimed:
-                candidates = [llm_candidate]
-            else:
-                claimed_candidate = Candidate(
-                    confidence=max(0.0, 1.0 - llm_confidence),
-                    ident=CandidateIdent(
-                        series="claimed", season=claimed.season, episodes=list(claimed.episodes)
-                    ),
-                    numbering="tvdb",
-                    evidence={"source": "derived"},
-                )
-                candidates = [llm_candidate, claimed_candidate]
         except _LlmError as exc:
             logger.warning("subs-llm call failed: %s", exc)
             return PluginResult(status="error", reason=str(exc))

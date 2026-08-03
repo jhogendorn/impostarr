@@ -37,6 +37,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from impostarr.plugins.base import Candidate, CandidateIdent
+
 logger = logging.getLogger(__name__)
 
 _JSON_REMINDER = "Your previous reply was not valid JSON. Reply with valid JSON only."
@@ -61,6 +63,38 @@ class LlmContentError(RuntimeError):
     into usable JSON (any other HTTP error, or invalid JSON/shape even
     after the retry-with-reminder) -- `chat_json` does NOT fall through
     on this; it's a failure of that response, not of provider reachability."""
+
+
+def build_episode_candidates(
+    llm_season: int,
+    llm_episodes: list[int],
+    llm_confidence: float,
+    claimed_season: int,
+    claimed_episodes: list[int],
+    llm_evidence: dict[str, Any],
+) -> list[Candidate]:
+    """Shared claimed/derived candidate-building logic for LLM episode-
+    identification plugins (subs-llm, transcript-llm): if the LLM's answer
+    already IS the claimed episode, that's the only candidate returned;
+    otherwise the LLM's answer becomes one candidate and a second, derived
+    candidate represents "the claimed episode, at low confidence"
+    (1 - llm_confidence) -- so the claimed ident is always represented."""
+    llm_candidate = Candidate(
+        confidence=llm_confidence,
+        ident=CandidateIdent(series="claimed", season=llm_season, episodes=llm_episodes),
+        numbering="tvdb",
+        evidence=llm_evidence,
+    )
+    identified_claimed = llm_season == claimed_season and set(llm_episodes) == set(claimed_episodes)
+    if identified_claimed:
+        return [llm_candidate]
+    claimed_candidate = Candidate(
+        confidence=max(0.0, 1.0 - llm_confidence),
+        ident=CandidateIdent(series="claimed", season=claimed_season, episodes=list(claimed_episodes)),
+        numbering="tvdb",
+        evidence={"source": "derived"},
+    )
+    return [llm_candidate, claimed_candidate]
 
 
 def episode_json_valid(data: dict[str, Any]) -> bool:

@@ -27,6 +27,7 @@ postgres = ["psycopg[binary]>=3.2"]
 [project.entry-points."impostarr.identifiers"]
 whisper-subs = "impostarr_plugin_whisper_subs:WhisperSubsPlugin"
 subs-llm = "impostarr_plugin_subs_llm:SubsLlmPlugin"
+transcript-llm = "impostarr_plugin_transcript_llm:TranscriptLlmPlugin"
 
 [project.entry-points."impostarr.transcribers"]
 faster-whisper = "impostarr.plugins.transcribers:faster_whisper_factory"
@@ -54,6 +55,7 @@ packages = [
     "src/impostarr",
     "src/impostarr_plugin_whisper_subs",
     "src/impostarr_plugin_subs_llm",
+    "src/impostarr_plugin_transcript_llm",
 ]
 
 [tool.pytest.ini_options]
