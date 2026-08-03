@@ -896,3 +896,42 @@ async def test_manual_dir_falls_back_to_legacy_unsuffixed_name(tmp_path):
     assert result == legacy
     assert result.read_text() == "legacy content"
     assert len(respx.calls) == 0
+
+
+# -- quota_status ---------------------------------------------------------
+
+
+async def test_quota_status_none_without_cache_dir(tmp_path):
+    cfg = make_cfg(tmp_path, cache_dir=None)
+    service = await make_service(cfg)
+
+    assert service.quota_status() is None
+
+
+async def test_quota_status_zero_used_when_no_quota_file_yet(tmp_path):
+    cfg = make_cfg(tmp_path, daily_quota=20)
+    service = await make_service(cfg)
+
+    assert service.quota_status() == {"used": 0, "limit": 20}
+
+
+async def test_quota_status_reflects_current_usage(tmp_path):
+    cfg = make_cfg(tmp_path, daily_quota=20)
+    quota_path = Path(cfg.cache_dir) / "quota.json"
+    quota_path.parent.mkdir(parents=True, exist_ok=True)
+    today = datetime.datetime.now(datetime.UTC).date().isoformat()
+    quota_path.write_text(json.dumps({"date": today, "count": 7}))
+    service = await make_service(cfg)
+
+    assert service.quota_status() == {"used": 7, "limit": 20}
+
+
+async def test_quota_status_resets_on_stale_date(tmp_path):
+    cfg = make_cfg(tmp_path, daily_quota=20)
+    quota_path = Path(cfg.cache_dir) / "quota.json"
+    quota_path.parent.mkdir(parents=True, exist_ok=True)
+    yesterday = (datetime.datetime.now(datetime.UTC).date() - datetime.timedelta(days=1)).isoformat()
+    quota_path.write_text(json.dumps({"date": yesterday, "count": 15}))
+    service = await make_service(cfg)
+
+    assert service.quota_status() == {"used": 0, "limit": 20}

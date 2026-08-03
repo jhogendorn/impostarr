@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getQueue, getStatus } from './api/client'
+import { getQueue, getStatus, pauseWorkers, resumeWorkers } from './api/client'
 import { useEvents } from './api/sse'
 import type { QueuePage, QueueSortField, SortDir, SseEvent, StatusResponse } from './api/types'
 import ActiveStrip from './components/ActiveStrip'
@@ -146,9 +146,19 @@ function App() {
     fetchStatus()
   }
 
+  function handleTogglePause() {
+    const action = status?.paused ? resumeWorkers() : pauseWorkers()
+    action.then(fetchStatus).catch((err: unknown) => console.error('pause/resume failed', err))
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <StatusHeader status={status} connected={connected} onToggleLogs={() => setLogsOpen((open) => !open)} />
+      <StatusHeader
+        status={status}
+        connected={connected}
+        onToggleLogs={() => setLogsOpen((open) => !open)}
+        onTogglePause={handleTogglePause}
+      />
       <ActiveStrip activeJobs={status?.active_jobs ?? []} system={status?.system} />
       {/* One inset rounded card for the whole queue area — tab bar, filter
        * row, table, and pagination together — matching the Active section's

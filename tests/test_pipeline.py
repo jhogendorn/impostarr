@@ -17,7 +17,7 @@ from impostarr.assets.transcribe import (
     Transcriber,
     TranscriptResult,
 )
-from impostarr.config import Settings, SonarrInstance, Thresholds, TrashConfig
+from impostarr.config import Settings, SonarrInstance, Thresholds, ThrottleConfig, TrashConfig
 from impostarr.db import init_db, make_session_factory
 from impostarr.jobs import LeaseLost, claim_next, reap_stale, release
 from impostarr.models import (
@@ -81,6 +81,7 @@ def make_deps(
     thresholds: Thresholds | None = None,
     transcriber: Transcriber | None = None,
     approval_required: bool = False,
+    throttle: ThrottleConfig | None = None,
 ) -> PipelineDeps:
     cfg = instance_cfg or make_instance_cfg(tmp_path)
     settings = Settings(
@@ -93,6 +94,7 @@ def make_deps(
         # trash dir it can actually write to, same as state_dir/assets_dir
         # above.
         trash=TrashConfig(dir=tmp_path / "trash"),
+        throttle=throttle or ThrottleConfig(),
     )
     client = SonarrClient(BASE_URL, API_KEY, backoff=(0, 0, 0))
     return PipelineDeps(
@@ -684,6 +686,101 @@ async def test_cached_error_is_not_reused_plugin_reexecutes(tmp_path, session_fa
 
 
 @respx.mock
+async def test_plugin_daily_budget_synthesizes_abstain_after_reached(tmp_path, session_factory):
+    mock_series_and_episodes(
+        42, [episode_json(555, episode_number=2), episode_json(556, episode_number=3)]
+    )
+    job1_id, _ = make_pending_job(session_factory, tmp_path, episode_ids=(555,), episode_file_id=9001)
+
+    # A second file/job under the same instance -- Instance.name is
+    # unique, so inserted by hand rather than a second make_pending_job
+    # call. The daily budget counts EXECUTIONS across all jobs, so a
+    # second, distinct job is needed to exercise "budget reached partway
+    # through the day" rather than a single job's own plugin-result cache.
+    content = b"z"
+    local_path2 = tmp_path / "media2.mkv"
+    local_path2.write_bytes(content)
+    with session_factory() as session:
+        instance = session.execute(select(Instance).where(Instance.name == "main")).scalar_one()
+        file2 = File(
+            instance_id=instance.id,
+            sonarr_path="/tv/Show/S01E03.mkv",
+            local_path=str(local_path2),
+            size=len(content),
+            content_hash="def456",
+            series_id=42,
+            episode_ids=[556],
+            episode_file_id=9002,
+            quality={"quality": {"id": 7}},
+            languages=[{"id": 1}],
+        )
+        session.add(file2)
+        session.flush()
+        job2 = Job(file_id=file2.id, status="pending")
+        session.add(job2)
+        session.commit()
+        job2_id = job2.id
+    with session_factory() as session:
+        claim_next(session, WORKER_ID)  # claims job2 (job1 already active)
+
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(
+        session_factory, tmp_path, [LoadedPlugin(plugin=plugin, weight=1.0, config=None, daily_budget=1)]
+    )
+
+    await process_job(job1_id, deps)
+    assert plugin.call_count == 1
+    assert get_job(session_factory, job1_id).status == "matched"
+
+    await process_job(job2_id, deps)
+    await deps.sonarr_client.close()
+
+    # Budget (1/day) already spent by job1 -- job2's execution is skipped
+    # and synthesized as an abstain instead of calling the plugin again.
+    assert plugin.call_count == 1
+    assert get_job(session_factory, job2_id).status == "inconclusive"
+
+    with session_factory() as session:
+        rows = session.execute(
+            select(PluginResultRow).where(PluginResultRow.job_id == job2_id)
+        ).scalars().all()
+        assert rows == []  # budget-skip is not persisted as a plugin_results row
+
+
+@respx.mock
+async def test_plugin_daily_budget_resets_after_utc_day_rollover(tmp_path, session_factory):
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+
+    # A plugin_results row from "yesterday" must not count toward today's
+    # budget.
+    with session_factory() as session:
+        row = PluginResultRow(
+            job_id=job_id,
+            plugin_name="fake",
+            plugin_version="1.0.0",
+            status="ok",
+            candidates=[],
+            normalized=[],
+            input_fingerprint="stale",
+            created_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(row)
+        session.commit()
+
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(
+        session_factory, tmp_path, [LoadedPlugin(plugin=plugin, weight=1.0, config=None, daily_budget=1)]
+    )
+
+    await process_job(job_id, deps)
+    await deps.sonarr_client.close()
+
+    assert plugin.call_count == 1
+    assert get_job(session_factory, job_id).status == "matched"
+
+
+@respx.mock
 async def test_asset_extraction_cached_across_runs(tmp_path, session_factory, fake_extractors):
     mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
     job_id, _ = make_pending_job(session_factory, tmp_path)
@@ -845,6 +942,135 @@ async def test_worker_pool_processes_seeded_job_end_to_end(tmp_path, session_fac
         await deps.sonarr_client.close()
 
     assert get_job(session_factory, job_id).status == "matched"
+
+
+@respx.mock
+async def test_paused_pool_does_not_claim_jobs(tmp_path, session_factory):
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        job.status = "pending"
+        job.claimed_by = None
+        job.claimed_at = None
+        job.heartbeat_at = None
+        session.commit()
+
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(session_factory, tmp_path, [loaded(plugin)], throttle=ThrottleConfig(paused=True))
+    pool = WorkerPool({"main": deps}, {}, pool_size=1, lease_timeout_s=5.0)
+    await pool.start()
+    try:
+        await asyncio.sleep(0.3)
+    finally:
+        await pool.stop()
+        await deps.sonarr_client.close()
+
+    assert get_job(session_factory, job_id).status == "pending"
+    assert plugin.call_count == 0
+
+
+@respx.mock
+async def test_active_hours_window_blocks_claims_outside_window(tmp_path, session_factory, monkeypatch):
+    from impostarr import worker as worker_module
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(worker_module, "datetime", _FixedDatetime)
+
+    mock_series_and_episodes(42, [episode_json(555, episode_number=2)])
+    job_id, _ = make_pending_job(session_factory, tmp_path)
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        job.status = "pending"
+        job.claimed_by = None
+        job.claimed_at = None
+        job.heartbeat_at = None
+        session.commit()
+
+    # "12" (noon UTC, per the fixed clock above) is outside "00-01".
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(
+        session_factory, tmp_path, [loaded(plugin)], throttle=ThrottleConfig(active_hours="00-01")
+    )
+    pool = WorkerPool({"main": deps}, {}, pool_size=1, lease_timeout_s=5.0)
+    await pool.start()
+    try:
+        await asyncio.sleep(0.3)
+    finally:
+        await pool.stop()
+        await deps.sonarr_client.close()
+
+    assert get_job(session_factory, job_id).status == "pending"
+    assert plugin.call_count == 0
+
+
+@respx.mock
+async def test_jobs_per_hour_throttle_limits_claims(tmp_path, session_factory):
+    mock_series_and_episodes(
+        42, [episode_json(555, episode_number=2), episode_json(556, episode_number=3)]
+    )
+    job1_id, _ = make_pending_job(session_factory, tmp_path, episode_ids=(555,), episode_file_id=9001)
+    with session_factory() as session:
+        job = session.get(Job, job1_id)
+        job.status = "pending"
+        job.claimed_by = None
+        job.claimed_at = None
+        job.heartbeat_at = None
+        session.commit()
+
+    # A second file/job under the SAME instance -- Instance.name is
+    # unique, so this is inserted by hand rather than via a second
+    # make_pending_job call (which would try to insert a second "main"
+    # instance and violate that constraint).
+    content = b"z"
+    local_path2 = tmp_path / "media2.mkv"
+    local_path2.write_bytes(content)
+    with session_factory() as session:
+        instance = session.execute(select(Instance).where(Instance.name == "main")).scalar_one()
+        file2 = File(
+            instance_id=instance.id,
+            sonarr_path="/tv/Show/S01E03.mkv",
+            local_path=str(local_path2),
+            size=len(content),
+            content_hash="def456",
+            series_id=42,
+            episode_ids=[556],
+            episode_file_id=9002,
+            quality={"quality": {"id": 7}},
+            languages=[{"id": 1}],
+        )
+        session.add(file2)
+        session.flush()
+        job2 = Job(file_id=file2.id, status="pending")
+        session.add(job2)
+        session.commit()
+        job2_id = job2.id
+
+    plugin = ConfigurablePlugin("fake", claimed_only(0.9))
+    deps = make_deps(
+        session_factory, tmp_path, [loaded(plugin)], throttle=ThrottleConfig(jobs_per_hour=1)
+    )
+    pool = WorkerPool({"main": deps}, {}, pool_size=1, lease_timeout_s=5.0)
+    await pool.start()
+    try:
+        for _ in range(100):
+            if get_job(session_factory, job1_id).status == "matched":
+                break
+            await asyncio.sleep(0.05)
+        # The rate limiter allows only one claim per hour -- give the pool
+        # a further beat to (incorrectly) claim job2 if the limiter isn't
+        # actually enforced, then assert it didn't.
+        await asyncio.sleep(0.3)
+    finally:
+        await pool.stop()
+        await deps.sonarr_client.close()
+
+    assert get_job(session_factory, job1_id).status == "matched"
+    assert get_job(session_factory, job2_id).status == "pending"
 
 
 async def test_worker_pool_sweeps_expired_trash_at_startup(tmp_path, session_factory):

@@ -69,6 +69,13 @@ plugins:
     whisper-subs:
       enabled: true
       weight: 1.0
+      # Max EXECUTIONS (identify() calls, not cache hits) per UTC day for
+      # this plugin; unset = unlimited. Exceeding it skips the call and
+      # synthesizes an abstain ("daily budget reached") instead -- a
+      # per-plugin companion to the pool-wide throttle: section above,
+      # useful for capping a paid/rate-limited backend independently of
+      # overall job throughput. Available on every plugin, not just this one.
+      # daily_budget: 500
       options:
         min_lines: 20 # minimum transcript segments required to attempt a comparison
         min_compared: 10 # reference lines below which match confidence is discounted
@@ -224,6 +231,20 @@ trash:
   enabled: true
   dir: /trash
   retention_days: 14
+
+# Worker-pool scheduling controls (see README's Throttling section).
+throttle:
+  # "HH-HH" hour range (0-23, UTC, both bounds inclusive), wrapping past
+  # midnight allowed (e.g. "22-06" = active 22:00 through 06:59); null =
+  # always active.
+  active_hours: null
+  # Max job claims per rolling hour across the whole worker pool; null =
+  # unlimited.
+  jobs_per_hour: null
+  # Startup default for the pause flag. Flippable at runtime without
+  # touching this file via POST /api/v1/pause and /resume (or the UI's
+  # Pause/Resume button) -- this value only applies at boot.
+  paused: false
 
 # Volumes (see README).
 state_dir: /config # SQLite DB, watermarks, lock-hashes, plugin venv overlay

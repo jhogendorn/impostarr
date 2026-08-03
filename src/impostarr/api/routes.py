@@ -209,6 +209,7 @@ def get_status(request: Request) -> dict:
         "cpu_percent": psutil.cpu_percent(interval=None),
         "mem_percent": psutil.virtual_memory().percent,
     }
+    refsub_service = getattr(request.app.state, "refsub_service", None)
     return {
         "instances": instances_out,
         "queues": queues,
@@ -219,7 +220,27 @@ def get_status(request: Request) -> dict:
         "workers": {"pool_size": request.app.state.pool_size},
         "dry_run": request.app.state.settings.dry_run,
         "trash_count": trash_count,
+        "paused": request.app.state.settings.throttle.paused,
+        "refsubs_quota": refsub_service.quota_status() if refsub_service is not None else None,
     }
+
+
+# -- throttle: pause / resume ------------------------------------------------
+
+
+@router.post("/pause")
+def pause(request: Request) -> dict:
+    """Flips the runtime-only pause flag (see `config.ThrottleConfig.paused`
+    and `worker.py`'s `_worker_loop`) -- NOT persisted to the config file,
+    so it resets to the config's startup value on restart."""
+    request.app.state.settings.throttle.paused = True
+    return {"paused": True}
+
+
+@router.post("/resume")
+def resume(request: Request) -> dict:
+    request.app.state.settings.throttle.paused = False
+    return {"paused": False}
 
 
 # -- queues / job detail --------------------------------------------------

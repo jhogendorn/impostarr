@@ -45,12 +45,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
+from datetime import UTC, datetime
 
 from impostarr import jobs, trash
 from impostarr.discovery import Discoverer
 from impostarr.jobs import LeaseLost
 from impostarr.models import Job
 from impostarr.pipeline import PipelineDeps, process_job
+from impostarr.throttle import TokenBucket, in_active_hours
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,12 @@ class WorkerPool:
         self.pool_size = pool_size
         self.lease_timeout_s = lease_timeout_s
         self._session_factory = next(iter(deps_per_instance.values())).session_factory
+        # Pool-wide (not per-instance, not per-worker-task) rate limiter --
+        # `jobs_per_hour` throttles total claims across every worker-loop
+        # task in this pool, so it's constructed once here and shared by
+        # reference into `_worker_loop`.
+        throttle_cfg = next(iter(deps_per_instance.values())).settings.throttle
+        self._rate_limiter = TokenBucket(throttle_cfg.jobs_per_hour)
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -117,6 +125,17 @@ class WorkerPool:
             if not instance_names:
                 await asyncio.sleep(POLL_EMPTY_SLEEP_S)
                 continue
+
+            throttle_cfg = deps_per_instance[instance_names[0]].settings.throttle
+            if throttle_cfg.paused or not in_active_hours(
+                throttle_cfg.active_hours, datetime.now(UTC).hour
+            ):
+                await asyncio.sleep(POLL_EMPTY_SLEEP_S)
+                continue
+            if not self._rate_limiter.has_capacity():
+                await asyncio.sleep(POLL_EMPTY_SLEEP_S)
+                continue
+
             claimed = False
             for _ in range(len(instance_names)):
                 name = instance_names[idx]
@@ -125,6 +144,7 @@ class WorkerPool:
                 with deps.session_factory() as session:
                     job = await asyncio.to_thread(jobs.claim_next, session, deps.worker_id)
                 if job is not None:
+                    self._rate_limiter.consume()
                     claimed = True
                     await self._run_job(job.id, deps)
                     break

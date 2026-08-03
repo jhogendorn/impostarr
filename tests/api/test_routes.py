@@ -15,7 +15,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from impostarr import jobs
-from impostarr.config import Settings, SonarrInstance, TrashConfig, WorkersConfig
+from impostarr.config import (
+    RefSubsConfig,
+    Settings,
+    SonarrInstance,
+    ThrottleConfig,
+    TrashConfig,
+    WorkersConfig,
+)
 from impostarr.discovery import Discoverer
 from impostarr.jobs import claim_next
 from impostarr.main import create_app
@@ -322,6 +329,70 @@ def test_status_dry_run_reflects_settings(tmp_path, monkeypatch):
     with TestClient(app) as client:
         response = client.get(f"{API_PREFIX}/status")
     assert response.json()["dry_run"] is True
+
+
+def test_status_paused_defaults_false(app):
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/status")
+    assert response.json()["paused"] is False
+
+
+def test_status_paused_reflects_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(Discoverer, "poll_once", AsyncMock(return_value=0))
+    settings = Settings(state_dir=tmp_path / "state", throttle=ThrottleConfig(paused=True))
+    app = create_app(settings)
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/status")
+    assert response.json()["paused"] is True
+
+
+def test_pause_endpoint_flips_runtime_flag_not_config(app):
+    assert app.state.settings.throttle.paused is False
+    with TestClient(app) as client:
+        response = client.post(f"{API_PREFIX}/pause")
+        assert response.status_code == 200
+        assert response.json() == {"paused": True}
+
+        status = client.get(f"{API_PREFIX}/status")
+        assert status.json()["paused"] is True
+
+    assert app.state.settings.throttle.paused is True
+
+
+def test_resume_endpoint_clears_pause(tmp_path):
+    settings = Settings(state_dir=tmp_path / "state", throttle=ThrottleConfig(paused=True))
+    with TestClient(create_app(settings)) as client:
+        response = client.post(f"{API_PREFIX}/resume")
+        assert response.status_code == 200
+        assert response.json() == {"paused": False}
+
+        status = client.get(f"{API_PREFIX}/status")
+        assert status.json()["paused"] is False
+
+
+def test_status_refsubs_quota_defaults_present(app):
+    # main.create_app defaults refsubs.cache_dir to <state_dir>/refsubs_cache
+    # when unset, so quota tracking (and therefore `refsubs_quota`) is
+    # always available out of the box, not just when explicitly configured.
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/status")
+    assert response.json()["refsubs_quota"] == {"used": 0, "limit": 20}
+
+
+def test_status_refsubs_quota_reflects_usage(tmp_path, monkeypatch):
+    monkeypatch.setattr(Discoverer, "poll_once", AsyncMock(return_value=0))
+    cache_dir = tmp_path / "refsubs_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "quota.json").write_text(
+        json.dumps({"date": datetime.now(UTC).date().isoformat(), "count": 4})
+    )
+    settings = Settings(
+        state_dir=tmp_path / "state", refsubs=RefSubsConfig(cache_dir=str(cache_dir), daily_quota=20)
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/status")
+    assert response.json()["refsubs_quota"] == {"used": 4, "limit": 20}
 
 
 def test_status_trash_count_reflects_active_items_only(app, tmp_path):

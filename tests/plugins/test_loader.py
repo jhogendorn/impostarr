@@ -78,6 +78,26 @@ def test_weight_and_options_applied(monkeypatch):
     assert loaded[0].config.confidence == 0.3
 
 
+def test_daily_budget_threaded_through(monkeypatch):
+    _patch_entry_points(monkeypatch, [FakeEntryPoint("fake", FakePlugin)])
+    settings = Settings(
+        plugins={"identifiers": {"fake": PluginConfig(daily_budget=50)}}
+    )
+
+    loaded = loader.load_plugins(settings)
+
+    assert loaded[0].daily_budget == 50
+
+
+def test_daily_budget_defaults_to_none(monkeypatch):
+    _patch_entry_points(monkeypatch, [FakeEntryPoint("fake", FakePlugin)])
+    settings = Settings()
+
+    loaded = loader.load_plugins(settings)
+
+    assert loaded[0].daily_budget is None
+
+
 def test_loader_survives_entry_point_load_error(monkeypatch, caplog):
     _patch_entry_points(
         monkeypatch,

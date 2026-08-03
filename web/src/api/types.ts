@@ -47,6 +47,11 @@ export interface SystemStats {
   mem_percent: number
 }
 
+export interface RefsubsQuota {
+  used: number
+  limit: number
+}
+
 export interface StatusResponse {
   instances: InstanceSummary[]
   queues: Record<JobStatus, number>
@@ -57,6 +62,12 @@ export interface StatusResponse {
   workers: { pool_size: number }
   dry_run: boolean
   trash_count: number
+  paused: boolean
+  refsubs_quota: RefsubsQuota | null
+}
+
+export interface PauseResponse {
+  paused: boolean
 }
 
 // -- /queues/{status} ---------------------------------------------------

@@ -190,6 +190,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     fastapi_app.state.deps_per_instance = deps_per_instance
     fastapi_app.state.pool_size = settings.workers.pool_size if deps_per_instance else 0
     fastapi_app.state.log_buffer = log_buffer
+    fastapi_app.state.refsub_service = refsub_service
 
     fastapi_app.add_middleware(AuthMiddleware, settings=settings)
     fastapi_app.include_router(router)

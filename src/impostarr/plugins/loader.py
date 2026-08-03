@@ -54,6 +54,10 @@ class LoadedPlugin:
     plugin: IdentifierPlugin
     weight: float
     config: BaseModel | None
+    # Max plugin EXECUTIONS per UTC day (PluginConfig.daily_budget); None =
+    # unlimited. Enforced by pipeline.py's `_run_plugin_stage`, not here --
+    # the loader only threads the configured value through.
+    daily_budget: int | None = None
 
 
 def load_plugins(settings: Settings) -> list[LoadedPlugin]:
@@ -88,7 +92,8 @@ def load_plugins(settings: Settings) -> list[LoadedPlugin]:
             )
             continue
 
-        loaded.append(LoadedPlugin(plugin=plugin, weight=weight, config=config))
+        daily_budget = plugin_cfg.daily_budget if plugin_cfg is not None else None
+        loaded.append(LoadedPlugin(plugin=plugin, weight=weight, config=config, daily_budget=daily_budget))
 
     for name in settings.plugins.identifiers:
         if name not in discovered_names:

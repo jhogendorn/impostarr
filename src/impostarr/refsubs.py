@@ -109,6 +109,16 @@ class RefSubService:
             return legacy_path
         return None
 
+    def quota_status(self) -> dict[str, int] | None:
+        """Current daily OpenSubtitles quota usage, for surfacing in
+        `GET /status` (`refsubs_quota`). `None` when no `cache_dir` is
+        configured -- quota tracking has nowhere to persist its counter in
+        that case (see `get()`)."""
+        if not self.cfg.cache_dir:
+            return None
+        data = self._load_quota(Path(self.cfg.cache_dir))
+        return {"used": data.get("count", 0), "limit": self.cfg.daily_quota}
+
     async def get(
         self, series_ext_ids: dict[str, Any], season: int, episode: int, language: str | None = None
     ) -> Path | None:

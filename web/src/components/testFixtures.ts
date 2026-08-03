@@ -29,9 +29,13 @@ export const statusFixture: StatusResponse = {
   workers: { pool_size: 2 },
   dry_run: false,
   trash_count: 2,
+  paused: false,
+  refsubs_quota: { used: 3, limit: 20 },
 }
 
 export const dryRunStatusFixture: StatusResponse = { ...statusFixture, dry_run: true }
+
+export const pausedStatusFixture: StatusResponse = { ...statusFixture, paused: true }
 
 export const activeJobsFixture: ActiveJob[] = [
   {

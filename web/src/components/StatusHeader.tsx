@@ -5,10 +5,17 @@ interface StatusHeaderProps {
   status: StatusResponse | null
   connected: boolean
   onToggleLogs: () => void
+  onTogglePause: () => void
 }
 
 const CONNECTION_TOOLTIP =
   'Live updates connected/disconnected — the UI auto-reconnects and refreshes when events arrive.'
+
+function refsubsQuotaTooltip(status: StatusResponse): string {
+  const quota = status.refsubs_quota
+  if (!quota) return 'Reference-subtitle fetch quota: not tracked (no cache directory configured).'
+  return `Reference-subtitle fetches used today: ${quota.used} of ${quota.limit} (OpenSubtitles daily quota).`
+}
 
 function instanceTooltip(instance: InstanceSummary): string {
   const lastSync = instance.last_polled_at ? relativeTime(instance.last_polled_at) : 'never'
@@ -19,7 +26,7 @@ function instanceTooltip(instance: InstanceSummary): string {
 /** Presentational: instances (chips with sync/backfill tooltips), queued/processed
  * summary, worker pool size, SSE connection dot, dry-run badge, logs drawer toggle. Data
  * owned/fetched by the parent. */
-function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
+function StatusHeader({ status, connected, onToggleLogs, onTogglePause }: StatusHeaderProps) {
   return (
     <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 bg-slate-900 px-6 py-3">
       <div className="flex items-center gap-6">
@@ -30,6 +37,14 @@ function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
             className="rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-amber-400"
           >
             Dry Run
+          </span>
+        )}
+        {status?.paused && (
+          <span
+            data-testid="paused-badge"
+            className="rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-amber-400"
+          >
+            Paused
           </span>
         )}
         <div className="flex flex-wrap gap-2 text-sm text-slate-300">
@@ -49,6 +64,21 @@ function StatusHeader({ status, connected, onToggleLogs }: StatusHeaderProps) {
           {status ? `${status.summary.unprocessed} queued · ${status.summary.processed} processed` : '—'}
         </span>
         <span>workers: {status?.workers.pool_size ?? '—'}</span>
+        {status && (
+          <span title={refsubsQuotaTooltip(status)}>
+            refsubs:{' '}
+            {status.refsubs_quota
+              ? `${status.refsubs_quota.used}/${status.refsubs_quota.limit}`
+              : '—'}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onTogglePause}
+          className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+        >
+          {status?.paused ? 'Resume' : 'Pause'}
+        </button>
         <button
           type="button"
           onClick={onToggleLogs}
