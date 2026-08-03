@@ -1,4 +1,4 @@
-import { useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
+import { useState, type Dispatch, type SetStateAction } from 'react'
 import {
   ApiError,
   approveJob,
@@ -57,56 +57,19 @@ function formatError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-interface HoverKeyProps {
-  hoverKey: string
-  setActiveKey: Dispatch<SetStateAction<string | null>>
-  children: ReactNode
-  /** Defaults to `inline-block` (right for a single button sitting inline
-   * in the flex-wrap left group). The Apply Remap group passes `w-full`
-   * instead — `inline-block` shrink-to-fits its content, which silently
-   * defeats the combobox's `flex-1`/`w-full` sizing (there's no width to
-   * fill: the wrapper's own width comes FROM its content in that mode),
-   * which is exactly what broke the width-match-to-RHS-panel requirement
-   * (item 2) — the combobox+button group rendered ~125px narrower than
-   * the RHS panel because of this one wrapper. */
-  className?: string
-}
-
-/** Wraps one control so hovering/focusing it sets the section-wide "which
- * explainer is showing" key — the explainer text itself renders once, in
- * the permanently-allocated `ActionExplanation` block below the button
- * row (item 6), not per-button. */
-function HoverTarget({ hoverKey, setActiveKey, children, className = 'inline-block' }: HoverKeyProps) {
-  return (
-    <div
-      onMouseEnter={() => setActiveKey(hoverKey)}
-      onMouseLeave={() => setActiveKey((current) => (current === hoverKey ? null : current))}
-      onFocus={() => setActiveKey(hoverKey)}
-      onBlur={() => setActiveKey((current) => (current === hoverKey ? null : current))}
-      className={className}
-    >
-      {children}
-    </div>
-  )
-}
-
 const EXPLAINERS: Record<string, string> = {
-  markCorrect:
-    'Marks this file as verified — positively asserts the label is correct, records gold truth, and feeds the fingerprint corpus. Moves this job to Matched.',
-  applyRemap:
-    'Preview an episode below, then confirm — remaps the file to it via Sonarr\'s manual import and moves this job to Remediated. Previewing alone never mutates anything.',
+  markCorrect: 'Confirms this file is the labelled episode. Moves it to Matched.',
+  applyRemap: 'Re-links this file to the selected episode in Sonarr. Moves it to Remediated.',
   trashRegrab:
-    'Moves the current file to Trash (kept for its configured retention window, if any), blocklists the release when possible, and triggers a fresh Sonarr search to regrab a replacement. Moves this job to Remediated.',
-  dismiss:
-    "Clears the pending proposal. Its main purpose is cancelling a scheduled auto-apply once that feature exists — the job stays in Quarantine either way.",
-  ignoreMismatch:
-    'Asserts nothing about correctness — moves this job to Inconclusive. No gold record or fingerprint-corpus write (unlike Mark Correct, which positively asserts the label is right).',
-  reidentify: 'Resets this job back to Pending for a fresh verification attempt.',
-  park: "Pauses this pending job on Hold — the worker pool won't claim it until you Unpark.",
-  unpark: 'Releases this held job back to Pending so a worker can claim it.',
+    'Removes this file (a copy is kept in Trash) and asks Sonarr for a replacement. Moves it to Remediated.',
+  dismiss: 'Clears the suggested fix. The file stays in Quarantine.',
+  ignoreMismatch: 'Stops flagging this file without confirming it. Moves it to Inconclusive.',
+  reidentify: 'Runs identification again. The file returns to Pending.',
+  park: 'Holds this file so no worker picks it up.',
+  unpark: 'Releases this file back to Pending.',
 }
 
-const NO_PROPOSAL_EXPLANATION = 'No proposed action for this job — choose one of the actions above based on your own review.'
+const NO_PROPOSAL_EXPLANATION = 'Nothing is proposed for this file. Hover an action to see what it does.'
 
 /** Section B's default explanation — the CURRENT proposed action's
  * explainer, always populated (item 6's "default content"). */
@@ -117,25 +80,28 @@ function defaultExplanation(job: JobDetail): string {
   return NO_PROPOSAL_EXPLANATION
 }
 
-/** Permanent explanation slot (item 6) — occupies real flow space with a
- * fixed min-height so hovering a button swaps its text in place, with no
- * reflow (unlike the earlier absolutely-positioned overlay approach this
- * supersedes). Defaults to the current proposed action's explanation. */
-function ActionExplanation({ activeKey, job }: { activeKey: string | null; job: JobDetail }) {
-  const text = activeKey ? (EXPLAINERS[activeKey] ?? defaultExplanation(job)) : defaultExplanation(job)
-  return <p className="mt-3 min-h-[2.5rem] text-sm leading-snug text-slate-300">{text}</p>
-}
-
 interface ButtonProps {
   label: string
   tone: ActionTone
   disabled?: boolean
   onClick: () => void
+  hoverKey: string
+  setActiveKey: Dispatch<SetStateAction<string | null>>
 }
 
-function ActionButton({ label, tone, disabled, onClick }: ButtonProps) {
+function ActionButton({ label, tone, disabled, onClick, hoverKey, setActiveKey }: ButtonProps) {
+  const clear = () => setActiveKey((current) => (current === hoverKey ? null : current))
   return (
-    <button type="button" disabled={disabled} onClick={onClick} className={`${BASE_CONTROL_CLASS} ${TONE_CLASSES[tone]}`}>
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      onMouseEnter={() => setActiveKey(hoverKey)}
+      onMouseLeave={clear}
+      onFocus={() => setActiveKey(hoverKey)}
+      onBlur={clear}
+      className={`${BASE_CONTROL_CLASS} ${TONE_CLASSES[tone]}`}
+    >
       {label}
     </button>
   )
@@ -202,57 +168,43 @@ function ActionBar({ job, onChanged, selectedEpisodeId, onSelectEpisode, candida
         <div className="flex flex-wrap items-center gap-2">
           {showVerdictButtons && (
             <>
-              <HoverTarget hoverKey="markCorrect" setActiveKey={setActiveKey}>
-                <ActionButton
+              <ActionButton hoverKey="markCorrect" setActiveKey={setActiveKey}
                   label="Mark Correct"
                   tone="confirm"
                   disabled={pending}
                   onClick={() => void run(() => postVerdict(job.job.id, { verdict: 'is_claimed' }))}
                 />
-              </HoverTarget>
 
-              <HoverTarget hoverKey="trashRegrab" setActiveKey={setActiveKey}>
-                <ActionButton
+              <ActionButton hoverKey="trashRegrab" setActiveKey={setActiveKey}
                   label="Trash and Regrab"
                   tone="destructive"
                   disabled={pending}
                   onClick={() => void run(() => replaceJob(job.job.id))}
                 />
-              </HoverTarget>
 
               {showDismiss && (
-                <HoverTarget hoverKey="dismiss" setActiveKey={setActiveKey}>
-                  <ActionButton label="Dismiss" tone="neutral" disabled={pending} onClick={() => void run(() => rejectJob(job.job.id))} />
-                </HoverTarget>
+                <ActionButton hoverKey="dismiss" setActiveKey={setActiveKey} label="Dismiss" tone="neutral" disabled={pending} onClick={() => void run(() => rejectJob(job.job.id))} />
               )}
 
-              <HoverTarget hoverKey="ignoreMismatch" setActiveKey={setActiveKey}>
-                <ActionButton
+              <ActionButton hoverKey="ignoreMismatch" setActiveKey={setActiveKey}
                   label="Ignore Mismatch"
                   tone="neutral"
                   disabled={pending}
                   onClick={() => void run(() => postVerdict(job.job.id, { verdict: 'ignore' }))}
                 />
-              </HoverTarget>
             </>
           )}
 
           {showReidentify && (
-            <HoverTarget hoverKey="reidentify" setActiveKey={setActiveKey}>
-              <ActionButton label="Reidentify" tone="neutral" disabled={pending} onClick={() => void run(() => rerunJob(job.job.id))} />
-            </HoverTarget>
+            <ActionButton hoverKey="reidentify" setActiveKey={setActiveKey} label="Reidentify" tone="neutral" disabled={pending} onClick={() => void run(() => rerunJob(job.job.id))} />
           )}
 
           {showPark && (
-            <HoverTarget hoverKey="park" setActiveKey={setActiveKey}>
-              <ActionButton label="Park" tone="neutral" disabled={pending} onClick={() => void run(() => parkJob(job.job.id))} />
-            </HoverTarget>
+            <ActionButton hoverKey="park" setActiveKey={setActiveKey} label="Park" tone="neutral" disabled={pending} onClick={() => void run(() => parkJob(job.job.id))} />
           )}
 
           {showUnpark && (
-            <HoverTarget hoverKey="unpark" setActiveKey={setActiveKey}>
-              <ActionButton label="Unpark" tone="neutral" disabled={pending} onClick={() => void run(() => unparkJob(job.job.id))} />
-            </HoverTarget>
+            <ActionButton hoverKey="unpark" setActiveKey={setActiveKey} label="Unpark" tone="neutral" disabled={pending} onClick={() => void run(() => unparkJob(job.job.id))} />
           )}
         </div>
 
@@ -260,8 +212,7 @@ function ActionBar({ job, onChanged, selectedEpisodeId, onSelectEpisode, candida
 
         <div className="justify-self-stretch">
           {showVerdictButtons && (
-            <HoverTarget hoverKey="applyRemap" setActiveKey={setActiveKey} className="w-full">
-              <div className="flex w-full items-stretch gap-2">
+            <div className="flex w-full items-stretch gap-2">
                 <EpisodeCombobox
                   ariaLabel="Apply Remap"
                   value={selectedEpisodeId}
@@ -281,11 +232,12 @@ function ActionBar({ job, onChanged, selectedEpisodeId, onSelectEpisode, candida
                   {remapButtonLabel}
                 </button>
               </div>
-            </HoverTarget>
           )}
         </div>
       </div>
-      <ActionExplanation activeKey={activeKey} job={job} />
+      <p className="mt-3 text-sm leading-snug text-slate-300">
+        {activeKey ? (EXPLAINERS[activeKey] ?? defaultExplanation(job)) : defaultExplanation(job)}
+      </p>
     </div>
   )
 }

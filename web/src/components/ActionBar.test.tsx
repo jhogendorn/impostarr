@@ -239,23 +239,23 @@ describe('ActionBar', () => {
 
     // Default content is populated (the current proposal's explanation) —
     // not empty, and not absolutely positioned (permanent flow space, item 6).
-    const explanation = screen.getByText(/Preview an episode below, then confirm/)
+    const explanation = screen.getByText(/Re-links this file to the selected episode/)
     expect(explanation.tagName).toBe('P')
     expect(explanation).not.toHaveClass('absolute')
 
     await user.hover(screen.getByRole('button', { name: 'Mark Correct' }))
-    expect(screen.getByText(/Marks this file as verified/)).toBeInTheDocument()
+    expect(screen.getByText(/Confirms this file is the labelled episode/)).toBeInTheDocument()
 
     await user.hover(screen.getByRole('button', { name: 'Trash and Regrab' }))
-    expect(screen.getByText(/Moves the current file to Trash/)).toBeInTheDocument()
-    expect(screen.queryByText(/Marks this file as verified/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Removes this file/)).toBeInTheDocument()
+    expect(screen.queryByText(/Confirms this file is the labelled episode/)).not.toBeInTheDocument()
 
     await user.unhover(screen.getByRole('button', { name: 'Trash and Regrab' }))
-    expect(screen.getByText(/Preview an episode below, then confirm/)).toBeInTheDocument()
+    expect(screen.getByText(/Re-links this file to the selected episode/)).toBeInTheDocument()
   })
 
   it('defaults the explanation to "No proposed action" copy when there is no proposal', () => {
     renderActionBar({ ...jobDetailFixture, verdict: { ...jobDetailFixture.verdict!, proposed_action: null } })
-    expect(screen.getByText(/No proposed action for this job/)).toBeInTheDocument()
+    expect(screen.getByText(/Nothing is proposed for this file/)).toBeInTheDocument()
   })
 })
