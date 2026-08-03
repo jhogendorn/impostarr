@@ -8,8 +8,9 @@ import httpx
 import pytest
 import respx
 
+from impostarr.llm import _JSON_REMINDER, LlmProvider
 from impostarr.plugins.base import AssetBundle, ClaimedIdent, SeriesContext
-from impostarr_plugin_subs_llm.plugin import _JSON_REMINDER, SubsLlmConfig, SubsLlmPlugin
+from impostarr_plugin_subs_llm.plugin import SubsLlmConfig, SubsLlmPlugin
 
 BASE_URL = "https://llm.test/v1"
 
@@ -94,6 +95,7 @@ async def test_match_case_single_merged_claimed_candidate(tmp_path):
     assert candidate.numbering == "tvdb"
     assert candidate.evidence["reasoning"] == "matches"
     assert candidate.evidence["model"] == "test-model"
+    assert candidate.evidence["provider"] == "default"
 
 
 @respx.mock
@@ -240,6 +242,8 @@ async def test_prompt_contains_episode_titles_from_ctx(tmp_path):
 
 @respx.mock
 async def test_http_500_returns_error(tmp_path):
+    # A persistent 5xx (still 5xx after LlmClient's one built-in retry)
+    # exhausts the single configured provider -> surfaces as an error.
     srt = tmp_path / "S01E05.srt"
     write_srt(srt, ["hello there"])
     ctx = make_ctx(make_series(), [make_episode(1, 5)])
@@ -255,7 +259,7 @@ async def test_http_500_returns_error(tmp_path):
 
     assert result.status == "error"
     assert result.reason
-    assert route.call_count == 1
+    assert route.call_count == 2
 
 
 @respx.mock
@@ -311,6 +315,37 @@ async def test_episodes_as_string_triggers_retry_path(tmp_path):
 
     assert result.status == "ok"
     assert route.call_count == 2
+
+
+@respx.mock
+async def test_providers_list_takes_precedence_and_falls_through(tmp_path):
+    # `providers` set -> base_url/model/api_key are ignored; the first
+    # provider is unavailable (429) so the second one serves the request,
+    # and its name/model are recorded in evidence.
+    srt = tmp_path / "S01E05.srt"
+    write_srt(srt, ["hello there"])
+    ctx = make_ctx(make_series(), [make_episode(1, 5)])
+    claimed = make_claimed(season=1, episodes=[5])
+    assets = AssetBundle(sub_paths=[str(srt)])
+
+    respx.post("https://primary.test/v1/chat/completions").mock(return_value=httpx.Response(429))
+    respx.post("https://backup.test/v1/chat/completions").mock(
+        return_value=llm_response({"season": 1, "episodes": [5], "confidence": 0.6, "reasoning": "r"})
+    )
+
+    config = make_config(
+        providers=[
+            LlmProvider(name="primary", base_url="https://primary.test/v1", model="model-1"),
+            LlmProvider(name="backup", base_url="https://backup.test/v1", model="model-2"),
+        ]
+    )
+    plugin = SubsLlmPlugin(config)
+    result = await plugin.identify(claimed, assets, ctx)
+
+    assert result.status == "ok"
+    candidate = result.candidates[0]
+    assert candidate.evidence["provider"] == "backup"
+    assert candidate.evidence["model"] == "model-2"
 
 
 @respx.mock

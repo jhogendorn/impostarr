@@ -85,6 +85,22 @@ plugins:
         # base_url: http://ollama:11434/v1
         # model: llama3.1
         # api_key: ""
+        #
+        # Optional ordered provider failover list -- takes precedence over
+        # base_url/model/api_key above when set. Tried in order; falls
+        # through to the next provider only when one looks unavailable
+        # (401/402/403/429, an insufficient_quota error body, a persistent
+        # 5xx, or a transport error) -- not on a bad/unparseable reply from
+        # a reachable provider, which surfaces as an error instead.
+        # providers:
+        #   - name: primary
+        #     base_url: http://ollama:11434/v1
+        #     model: llama3.1
+        #     api_key: ""
+        #   - name: fallback
+        #     base_url: https://api.openai.com/v1
+        #     model: gpt-4o-mini
+        #     api_key: CHANGE_ME
 
 # Reference subtitle service (OpenSubtitles), shared by identifier plugins.
 refsubs:
