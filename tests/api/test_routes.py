@@ -23,7 +23,7 @@ from impostarr.config import (
     TrashConfig,
     WorkersConfig,
 )
-from impostarr.discovery import Discoverer
+from impostarr.discovery import Discoverer, DiscoveryResult
 from impostarr.jobs import claim_next
 from impostarr.main import create_app
 from impostarr.models import (
@@ -1203,15 +1203,30 @@ def test_rerun_on_pending_job_409(app):
 
 def test_backfill_invokes_discoverer(app, monkeypatch):
     runtime = app.state.instances["main"]
-    backfill_mock = AsyncMock(return_value=7)
+    backfill_mock = AsyncMock(return_value=DiscoveryResult(created=7, skipped=2))
     monkeypatch.setattr(runtime.discoverer, "backfill_step", backfill_mock)
 
     with TestClient(app) as client:
         response = client.post(f"{API_PREFIX}/instances/main/backfill", json={"batch_size": 10})
 
     assert response.status_code == 200
-    assert response.json() == {"created": 7}
-    backfill_mock.assert_awaited_once_with(10)
+    assert response.json() == {"created": 7, "skipped": 2}
+    backfill_mock.assert_awaited_once_with(10, reset=False, series_id=None)
+
+
+def test_backfill_passes_reset_and_series_id_through(app, monkeypatch):
+    runtime = app.state.instances["main"]
+    backfill_mock = AsyncMock(return_value=DiscoveryResult(created=0, skipped=0))
+    monkeypatch.setattr(runtime.discoverer, "backfill_step", backfill_mock)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{API_PREFIX}/instances/main/backfill",
+            json={"batch_size": 10, "reset": True, "series_id": 42},
+        )
+
+    assert response.status_code == 200
+    backfill_mock.assert_awaited_once_with(10, reset=True, series_id=42)
 
 
 def test_backfill_unknown_instance_404(app):

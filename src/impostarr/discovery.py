@@ -18,6 +18,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 import xxhash
 from sqlalchemy import select
@@ -31,6 +32,17 @@ from impostarr.sonarr.types import EpisodeFile
 logger = logging.getLogger(__name__)
 
 HASH_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB
+
+
+class DiscoveryResult(NamedTuple):
+    """`poll_once`/`backfill_step`'s per-call outcome. `skipped` counts
+    only files skipped for the per-file-tolerance reason (an OSError/
+    PermissionError reading the file) -- NOT the other, pre-existing skip
+    reasons (dedupe, unmapped path, watch_dirs filter, file missing at
+    poll time), which were never errors to begin with."""
+
+    created: int
+    skipped: int
 
 
 def _utcnow() -> datetime:
@@ -136,15 +148,20 @@ class Discoverer:
         indexer: str | None = None,
         guid: str | None = None,
         episode_ids_resolver: Callable[[], Awaitable[list[int]]] | None = None,
-    ) -> bool:
-        """Stage a `files` row + `jobs` row on `session` (no commit). Returns
-        whether a job was created (False for any skip reason).
+    ) -> tuple[bool, bool]:
+        """Stage a `files` row + `jobs` row on `session` (no commit).
 
-        `episode_ids` is used as-is when given; when `None`,
-        `episode_ids_resolver` is awaited instead (kept lazy so a file that
-        gets skipped below never triggers the resolver's network call)."""
+        Returns `(created, errored)`: `created` is whether a job was
+        created (False for any skip reason); `errored` is True only for
+        the per-file-tolerance skip (an OSError/PermissionError reading
+        the file, e.g. restrictive on-disk permissions) -- an EXPECTED
+        condition for a read-only-blast-radius deployment, not a reason to
+        fail the whole batch. `episode_ids` is used as-is when given; when
+        `None`, `episode_ids_resolver` is awaited instead (kept lazy so a
+        file that gets skipped below never triggers the resolver's network
+        call)."""
         if self._file_exists(session, instance.id, ep_file.id):
-            return False
+            return False, False
 
         local_path = self._map_local_path(ep_file.path)
         if local_path is None:
@@ -153,20 +170,29 @@ class Discoverer:
                 ep_file.path,
                 self.instance_cfg.name,
             )
-            return False
+            return False, False
 
         if not self._watch_dirs_allowed(local_path):
-            return False
+            return False, False
 
-        if not local_path.exists():
+        try:
+            exists = local_path.exists()
+        except OSError as exc:
+            logger.warning("cannot access local file, skipping: %s (%s)", local_path, exc)
+            return False, True
+        if not exists:
             logger.warning("local file missing, skipping: %s", local_path)
-            return False
+            return False, False
 
         if episode_ids is None:
             assert episode_ids_resolver is not None
             episode_ids = await episode_ids_resolver()
 
-        content_hash = hash_file(local_path)
+        try:
+            content_hash = hash_file(local_path)
+        except OSError as exc:
+            logger.warning("cannot read local file, skipping: %s (%s)", local_path, exc)
+            return False, True
         file_row = File(
             instance_id=instance.id,
             sonarr_path=ep_file.path,
@@ -187,15 +213,17 @@ class Discoverer:
         session.add(file_row)
         session.flush()  # assign file_row.id for the Job FK
         session.add(Job(file_id=file_row.id, status="pending"))
-        return True
+        return True, False
 
     # -- poll ---------------------------------------------------------
 
-    async def poll_once(self) -> int:
+    async def poll_once(self) -> DiscoveryResult:
         """Fetch history since the stored watermark and file each new import.
-        Returns the count of jobs created. Advances the watermark to the
-        highest history id seen this call (including skipped records — a
-        skip reason like an unmapped path won't be retried forever)."""
+        Returns the count of jobs created (and, separately, files skipped
+        for the per-file-tolerance reason — see `DiscoveryResult`).
+        Advances the watermark to the highest history id seen this call
+        (including skipped records — a skip reason like an unmapped path
+        won't be retried forever)."""
         with self.session_factory() as session:
             instance = self._get_or_create_instance(session)
             instance_id = instance.id
@@ -207,9 +235,10 @@ class Discoverer:
                 instance = session.get(Instance, instance_id)
                 instance.last_polled_at = _utcnow()
                 session.commit()
-            return 0
+            return DiscoveryResult(created=0, skipped=0)
 
         created = 0
+        skipped = 0
         # Per-series episodeFileId -> episode_ids grouping, cached across
         # this call's records (client.episodes(series_id) is fetched at
         # most once per distinct series_id seen in this batch).
@@ -256,7 +285,7 @@ class Discoverer:
                         )
                     return episode_ids_by_series[series_id].get(file_id) or fallback
 
-                if await self._capture_file(
+                captured, errored = await self._capture_file(
                     session,
                     instance,
                     ep_file=ep_file,
@@ -270,12 +299,15 @@ class Discoverer:
                     source_title=record.source_title,
                     indexer=record.indexer,
                     guid=record.guid,
-                ):
+                )
+                if captured:
                     created += 1
+                if errored:
+                    skipped += 1
             instance.history_watermark = last_id
             instance.last_polled_at = _utcnow()
             session.commit()
-        return created
+        return DiscoveryResult(created=created, skipped=skipped)
 
     # -- backfill -------------------------------------------------------
 
@@ -287,23 +319,41 @@ class Discoverer:
                 mapping.setdefault(episode.episode_file_id, []).append(episode.id)
         return mapping
 
-    async def backfill_step(self, batch_size: int) -> int:
+    async def backfill_step(
+        self, batch_size: int, *, reset: bool = False, series_id: int | None = None
+    ) -> DiscoveryResult:
         """Process up to `batch_size` episode files from the existing
         library, resuming from the persisted cursor. Series are walked in
         ascending id order, files within a series in ascending id order.
         Returns the count of jobs created this step (may be less than
-        `batch_size` files processed, since dedupe can skip files). When
-        every series is exhausted, resets the cursor to null and returns 0.
+        `batch_size` files processed, since dedupe can skip files) and the
+        count skipped for the per-file-tolerance reason (see
+        `DiscoveryResult`). When every series is exhausted, resets the
+        cursor to null and returns 0 created.
+
+        `reset`/`series_id` retarget where the walk starts, as a one-shot
+        override of the persisted cursor for this call only (simplest
+        correct form of "pre-position the cursor" -- the normal end-of-call
+        cursor write then persists wherever this step actually left off,
+        so a later call with neither flag resumes from there): `series_id`
+        (if given) starts at that series, skipping earlier ones, at its
+        first file -- takes precedence over `reset`. Otherwise `reset`
+        starts from the very beginning. With neither, resumes from the
+        persisted cursor as before.
         """
         with self.session_factory() as session:
             instance = self._get_or_create_instance(session)
             instance_id = instance.id
-            cursor = instance.backfill_cursor
+            cursor = None if reset else instance.backfill_cursor
 
         all_series = sorted(await self.client.all_series(), key=lambda s: s.id)
 
-        start_series_id = cursor["series_id"] if cursor else None
-        start_after_file_id = cursor["episode_file_id"] if cursor else None
+        if series_id is not None:
+            start_series_id: int | None = series_id
+            start_after_file_id: int | None = None
+        else:
+            start_series_id = cursor["series_id"] if cursor else None
+            start_after_file_id = cursor["episode_file_id"] if cursor else None
         if start_series_id is None:
             start_idx = 0
         else:
@@ -313,6 +363,7 @@ class Discoverer:
             )
 
         created = 0
+        skipped = 0
         processed = 0
         new_cursor: dict[str, int] | None = None
 
@@ -332,7 +383,7 @@ class Discoverer:
                         series_exhausted = False
                         break
                     processed += 1
-                    if await self._capture_file(
+                    captured, errored = await self._capture_file(
                         session,
                         instance,
                         ep_file=ep_file,
@@ -340,8 +391,11 @@ class Discoverer:
                         episode_ids=episode_ids_by_file.get(ep_file.id, []),
                         quality=ep_file.quality,
                         languages=ep_file.languages,
-                    ):
+                    )
+                    if captured:
                         created += 1
+                    if errored:
+                        skipped += 1
                     new_cursor = {"series_id": series.id, "episode_file_id": ep_file.id}
 
                 if not series_exhausted:
@@ -356,4 +410,4 @@ class Discoverer:
             instance.backfill_cursor = new_cursor
             instance.last_backfilled_at = _utcnow()
             session.commit()
-        return created
+        return DiscoveryResult(created=created, skipped=skipped)
