@@ -8,6 +8,7 @@
  * can all import the same logic instead of re-deriving it. */
 import type { ReactNode } from 'react'
 import type { EpisodeLabel, JobDetail, TimedCue } from '../api/types'
+import EpisodeRef from '../components/EpisodeRef'
 import { ExternalLinks } from '../components/ExternalLinks'
 import { formatSeasonEpisode } from './format'
 
@@ -109,6 +110,22 @@ export function normalizedAnnotation(entry: unknown): ReactNode | null {
   if (record.kind === 'junk') return <>no match</>
   if (typeof record.reason === 'string') return <>could not map: {record.reason}</>
   return <>{JSON.stringify(entry)}</>
+}
+
+/** The Sonarr episode ids a plugin's `candidates[i]` normalized against,
+ * from the parallel `normalized[i]` in-series entry (same index — both
+ * describe the same candidate) — used to resolve each of
+ * `candidates[i].ident.episodes`' tvdb ids via `episode_labels` for the
+ * plugin-results table's per-episode TVDB links (item A). `undefined`
+ * when `normalized[i]` isn't an in-series entry (cross_series/junk/
+ * unnormalizable) or is missing — candidates still render, just without
+ * a link for that row. */
+export function normalizedInSeriesEpisodeIds(normalized: unknown, index: number): number[] | undefined {
+  if (!Array.isArray(normalized)) return undefined
+  const entry = normalized[index]
+  if (normalizedKind(entry) !== 'in_series') return undefined
+  const ids = (entry as NormalizedInSeries).episode_ids
+  return Array.isArray(ids) ? ids : undefined
 }
 
 export function isRemediationStep(value: unknown): value is RemediationStep {
@@ -239,6 +256,88 @@ export function collectAlternates(detail: JobDetail, excludeIds: Set<number>): A
   return [...byKey.values()].sort((a, b) => b.confidence - a.confidence)
 }
 
+/** Whether a populated (non-empty) reference-subtitle track exists for
+ * `episodeId` — drives the Apply Remap/Content Identity default (item 13):
+ * never default the RHS preview to an episode with no cached refsubs when
+ * a populated one exists for some other in-play episode. */
+export function hasCuedRefsubsFor(detail: JobDetail, episodeId: number): boolean {
+  return detail.reference_subtitles.some((track) => track.episode_ids.includes(episodeId) && track.cues.length > 0)
+}
+
+/** The episode id the RHS/badge should treat as the leading identification
+ * — fixes a real data-display bug where the panel always previewed the
+ * top plugin-suggested ALTERNATE even when the file's claimed episode
+ * scored higher (e.g. s_claimed=0.600 vs s_alt=0.468 rendered as
+ * "Identified as [alt] · 47%", contradicting the system's own conclusion
+ * that the claimed label is more likely right, just not confidently
+ * enough to auto-match).
+ *
+ * A human `is_other` override is a definitive decision, not a confidence
+ * comparison, so it always wins when present. Otherwise: the claimed
+ * episode leads whenever `s_claimed >= s_alt` (or there's no s_alt at
+ * all) — only when the alternate's score is strictly higher does it lead.
+ * `verdict.proposed_action` is deliberately NOT consulted here: it drives
+ * the Proposed Action banner's own text, a separate concern from which
+ * episode the RHS/badge/Apply-Remap-default treats as "currently
+ * leading". */
+export function leadingEpisodeId(detail: JobDetail, candidates: AlternateCandidate[]): number {
+  const verdict = detail.verdict
+  if (verdict?.source === 'human' && verdict.human_ident) {
+    const { season, episodes } = verdict.human_ident
+    const match = (detail.series_episodes ?? []).find((ep) => ep.season === season && ep.episode === episodes[0])
+    if (match) return match.id
+  }
+  const sClaimed = verdict?.s_claimed ?? null
+  const sAlt = verdict?.s_alt ?? null
+  const claimedLeads = sClaimed !== null && (sAlt === null || sClaimed >= sAlt)
+  if (!claimedLeads && candidates.length > 0) return candidates[0].episodeIds[0]
+  return detail.file.episode_ids[0]
+}
+
+/** Default Apply Remap selection / RHS preview episode — layers item 13's
+ * refsub-availability preference UNDER item 16's leading-identification
+ * fix, not on top of it. Verified against LIVE data (job 14, real
+ * production verdict): s_claimed 0.6 >= s_alt 0.468, so the claimed
+ * episode (S05E07) leads — but S05E07 itself has no cached reference
+ * subs (whisper-subs only ever caches OTHER episodes' subs, to compare
+ * against — see its `"no reference subs for claimed"` evidence note),
+ * while its best alternate (S05E02) does. Blindly applying item 13's
+ * "prefer whichever populated track exists" on top of the leading id
+ * would silently swap the RHS back to S05E02 — reproducing the exact
+ * item-16 bug on a real job despite `leadingEpisodeId` "fixing" it.
+ *
+ * So: a human override or the CLAIMED episode leading (item 16's fixed
+ * cases) is authoritative and never swapped for a different episode just
+ * because that episode happens to have cached subs — a claimed episode
+ * with no cached refsubs is an honest fact about it (TextPanel's
+ * "No reference subtitles cached for this episode." says so plainly),
+ * not a reason to show a different episode's identity instead. Only when
+ * the ALTERNATE leads (or there's no scoring signal at all) does item
+ * 13's original refsub-availability preference still apply, exactly as
+ * before — item 16 explicitly left that path unchanged ("s_alt >
+ * s_claimed: current behavior... is correct"). */
+export function defaultPreviewEpisodeId(detail: JobDetail, candidates: AlternateCandidate[]): number {
+  const leadingId = leadingEpisodeId(detail, candidates)
+  const verdict = detail.verdict
+  const humanOverride = verdict?.source === 'human' && verdict.human_ident != null
+  const sClaimed = verdict?.s_claimed ?? null
+  const sAlt = verdict?.s_alt ?? null
+  const claimedLeads = sClaimed !== null && (sAlt === null || sClaimed >= sAlt)
+  if (humanOverride || claimedLeads) return leadingId
+
+  if (hasCuedRefsubsFor(detail, leadingId)) return leadingId
+  for (const candidate of candidates) {
+    if (hasCuedRefsubsFor(detail, candidate.episodeIds[0])) return candidate.episodeIds[0]
+  }
+  for (const id of detail.file.episode_ids) {
+    if (hasCuedRefsubsFor(detail, id)) return id
+  }
+  for (const track of detail.reference_subtitles) {
+    if (track.cues.length > 0 && track.episode_ids.length > 0) return track.episode_ids[0]
+  }
+  return leadingId
+}
+
 export function findCrossSeriesCandidate(detail: JobDetail): Record<string, unknown> | null {
   for (const pr of detail.plugin_results) {
     if (!Array.isArray(pr.candidates) || !Array.isArray(pr.normalized)) continue
@@ -289,21 +388,26 @@ export function proposalTone(detail: JobDetail): 'remap' | 'replace' | null {
   return null
 }
 
-/** Resolves proposed-action target episode ids to "S05E03" via
- * `job.episode_labels`. Falls back to a plain-language "episode(s) 684"
- * only if the resolution is incomplete. */
-export function targetLabel(job: JobDetail, targetIds: number[]): string {
-  const resolved = targetIds.map((id) => job.episode_labels[String(id)]).filter((label) => label != null)
+/** Resolves proposed-action target episode ids to a linked "S05E03" (via
+ * `job.episode_labels`, which carries each id's tvdb_id — see
+ * `EpisodeRef`). Falls back to plain-language "episode(s) 684" only if the
+ * resolution is incomplete (nothing to link there). */
+export function targetNode(job: JobDetail, targetIds: number[]): ReactNode {
+  const resolved = targetIds.map((id) => job.episode_labels[String(id)]).filter((label): label is EpisodeLabel => label != null)
   if (targetIds.length === 0 || resolved.length !== targetIds.length) {
     return targetIds.length > 0 ? `episode(s) ${targetIds.join(', ')}` : 'the proposed episode'
   }
-  return formatSeasonEpisode(resolved[0].season, resolved.map((r) => r.episode))
+  return <EpisodeRef season={resolved[0].season} episodes={resolved.map((r) => ({ episode: r.episode, tvdbId: r.tvdb_id }))} />
 }
 
-/** Text describing the not-yet-approved proposal, from either an
+/** Node describing the not-yet-approved proposal, from either an
  * auto-computed `proposed_action` or a human `is_other` verdict's
- * `human_ident`. Backs the Proposed Action banner (section A). */
-export function describeProposal(job: JobDetail): string | null {
+ * `human_ident` — its embedded SxxEyy is a real per-episode TVDB link
+ * (item A) wherever the target episode's tvdb id is known. Backs the
+ * Proposed Action banner (section A), which always renders now (item 5) —
+ * this returns `null` only for the "no proposal" case that banner
+ * separately renders neutral copy for. */
+export function describeProposal(job: JobDetail): ReactNode | null {
   const verdict = job.verdict
   if (!verdict) return null
   const action = verdict.proposed_action
@@ -311,7 +415,7 @@ export function describeProposal(job: JobDetail): string | null {
     const record = action as Record<string, unknown>
     if (record.kind === 'remap') {
       const ids = record.target_episode_ids
-      return `Remap to ${Array.isArray(ids) ? targetLabel(job, ids as number[]) : 'unknown episode'}`
+      return <>Remap to {Array.isArray(ids) ? targetNode(job, ids as number[]) : 'unknown episode'}</>
     }
     if (record.kind === 'replace') {
       return 'Replace — no known episode of this series matched this file'
@@ -319,7 +423,19 @@ export function describeProposal(job: JobDetail): string | null {
   }
   if (verdict.source === 'human' && verdict.human_ident) {
     const { season, episodes } = verdict.human_ident
-    return `Remap to ${formatSeasonEpisode(season, episodes)}`
+    // human_ident carries season+episode NUMBERS (not ids) — resolve each
+    // to its tvdb id via series_episodes (the full episode list) rather
+    // than episode_labels (filtered to referenced ids only, which a raw
+    // human override may not be in).
+    const withTvdb = episodes.map((episodeNumber) => {
+      const match = (job.series_episodes ?? []).find((ep) => ep.season === season && ep.episode === episodeNumber)
+      return { episode: episodeNumber, tvdbId: match?.tvdb_id }
+    })
+    return (
+      <>
+        Remap to <EpisodeRef season={season} episodes={withTvdb} />
+      </>
+    )
   }
   return null
 }

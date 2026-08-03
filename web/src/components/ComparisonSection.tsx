@@ -1,42 +1,46 @@
 import { useMemo, useState } from 'react'
 import type { JobDetail } from '../api/types'
 import {
-  collectAlternates,
+  type AlternateCandidate,
   isProbePayload,
   isSubsPayload,
   isTranscriptPayload,
-  labelledText,
+  labelledEpisodes,
   labelledTitles,
 } from '../lib/inspectData'
+import { TWO_COLUMN_GRID_CLASS } from '../lib/layout'
 import ConfidenceBadge from './ConfidenceBadge'
 import type { TextPanelSource } from './TextPanel'
 import LhsPanel from './LhsPanel'
 import RhsPanel from './RhsPanel'
-import TimelineScrubber from './TimelineScrubber'
 
 /** Section C: the two-column comparison (LHS 2/3 "Sonarr says", RHS 1/3
- * "Content Identity"), a shared timeline scrubber above both, and the
- * out-of-flow confidence badge straddling their boundary.
+ * "Content Identity") and the out-of-flow confidence badge straddling
+ * their boundary. The timeline scrubber lives inside LhsPanel now (item
+ * 4, directly below Framegrabs) rather than spanning above both columns.
  *
  * LHS and RHS are each a single CSS-grid child using `grid-template-rows:
- * subgrid` against this component's own 4 explicit row tracks — that's
- * what keeps header/ident/links/content row-aligned between the two
- * columns (a plain two-column flex layout can't guarantee that: either
- * column's content can be taller per-row than the other's). The
- * confidence badge sits in a zero-width middle grid column (the visual
- * seam between the two boxes) and is itself `position: absolute` within
- * it — out of flow, centered exactly on the boundary, row-placed to
- * line up with the ident row. */
-function ComparisonSection({ detail }: { detail: JobDetail }) {
+ * subgrid` against this component's own 3 explicit row tracks (header,
+ * ident, content — the links row folds into ident as inline title chips,
+ * item 14) — that's what keeps header/ident/content row-aligned between
+ * the two columns. The confidence badge sits in a zero-width middle grid
+ * column (the visual seam between the two boxes) and is itself
+ * `position: absolute` within it — out of flow, centered exactly on the
+ * boundary, row-placed to line up with the ident row.
+ *
+ * `selectedEpisodeId`/`candidates` are owned by InspectModal (shared with
+ * ActionBar's Apply Remap combobox, item 1) — this component only reads
+ * them to drive RhsPanel's preview and the badge's confidence value. */
+function ComparisonSection({
+  detail,
+  selectedEpisodeId,
+  candidates,
+}: {
+  detail: JobDetail
+  selectedEpisodeId: number
+  candidates: AlternateCandidate[]
+}) {
   const labelledIds = useMemo(() => new Set(detail.file.episode_ids), [detail])
-  const candidates = useMemo(() => collectAlternates(detail, labelledIds), [detail, labelledIds])
-  const allEpisodes = useMemo(
-    () => [...(detail.series_episodes ?? [])].sort((a, b) => a.season - b.season || a.episode - b.episode),
-    [detail],
-  )
-
-  const defaultEpisodeId = candidates.length > 0 ? candidates[0].episodeIds[0] : detail.file.episode_ids[0]
-  const [selectedEpisodeId, setSelectedEpisodeId] = useState(defaultEpisodeId)
 
   const selectedCandidate = candidates.find((c) => c.episodeIds.includes(selectedEpisodeId))
   const confidence = selectedCandidate
@@ -77,38 +81,30 @@ function ComparisonSection({ detail }: { detail: JobDetail }) {
     : []
 
   return (
-    <section>
-      <TimelineScrubber durationS={durationS} valueS={scrubTimeS ?? 0} onChange={setScrubTimeS} />
-      <div className="relative grid grid-cols-[2fr_0_1fr] grid-rows-[auto_auto_auto_auto] gap-x-16 gap-y-3">
-        <div className="glow-panel row-span-4 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 4' }}>
-          <LhsPanel
-            instanceName={detail.instance}
-            labelText={labelledText(detail)}
-            titleText={labelledTitles(detail)}
-            externalIds={detail.external_ids}
-            jobId={detail.job.id}
-            assets={detail.assets}
-            embeddedSubsSources={embeddedSubsSources}
-            transcriptSources={transcriptSources}
-            scrubTimeS={scrubTimeS}
-          />
-        </div>
+    <section className={`relative ${TWO_COLUMN_GRID_CLASS} grid-rows-[auto_auto_auto] gap-y-3`}>
+      <div className="glow-panel row-span-3 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 3' }}>
+        <LhsPanel
+          instanceName={detail.instance}
+          episodeIds={detail.file.episode_ids}
+          labelledEpisodes={labelledEpisodes(detail)}
+          titleText={labelledTitles(detail)}
+          externalIds={detail.external_ids}
+          jobId={detail.job.id}
+          assets={detail.assets}
+          embeddedSubsSources={embeddedSubsSources}
+          transcriptSources={transcriptSources}
+          durationS={durationS}
+          scrubTimeS={scrubTimeS}
+          onScrub={setScrubTimeS}
+        />
+      </div>
 
-        <div className="relative" style={{ gridRow: 2 }}>
-          <ConfidenceBadge confidence={confidence} />
-        </div>
+      <div className="relative" style={{ gridRow: 2 }}>
+        <ConfidenceBadge confidence={confidence} />
+      </div>
 
-        <div className="glow-panel row-span-4 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 4' }}>
-          <RhsPanel
-            detail={detail}
-            selectedEpisodeId={selectedEpisodeId}
-            onSelectEpisode={setSelectedEpisodeId}
-            candidates={candidates}
-            allEpisodes={allEpisodes}
-            referenceSources={referenceSources}
-            scrubTimeS={scrubTimeS}
-          />
-        </div>
+      <div className="glow-panel row-span-3 grid grid-rows-subgrid rounded-lg p-4" style={{ gridRow: '1 / span 3' }}>
+        <RhsPanel detail={detail} selectedEpisodeId={selectedEpisodeId} referenceSources={referenceSources} scrubTimeS={scrubTimeS} />
       </div>
     </section>
   )

@@ -530,6 +530,7 @@ def test_static_mount_cache_headers(tmp_path, monkeypatch):
 # -- queues -----------------------------------------------------------------
 
 
+@respx.mock
 def test_queues_paging_and_ordering(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
@@ -556,12 +557,91 @@ def test_queues_paging_and_ordering(app):
     assert body["items"][0]["file"]["series_id"] == 42
 
 
+# -- queue rows resolve series title / episode label (item 17: raw ids) -----
+
+
+@respx.mock
+def test_queues_resolves_series_title_and_episode_label(app):
+    mock_series(title="American Dad!")
+    mock_episodes()  # 101 (S01E01), 102 (S01E02) — _make_file defaults to episode_ids=[101]
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/queues/quarantine")
+
+    file = response.json()["items"][0]["file"]
+    assert file["series_title"] == "American Dad!"
+    assert file["episode_label"] == "S01E01"
+    assert file["episode_tvdb_ids"] == [None]
+
+
+@respx.mock
+def test_queues_resolves_multi_episode_label(app):
+    mock_series()
+    mock_episodes()  # 101 (S01E01), 102 (S01E02)
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id, episode_ids=[101, 102])
+    _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/queues/quarantine")
+
+    file = response.json()["items"][0]["file"]
+    assert file["episode_label"] == "S01E01-E02"
+
+
+@respx.mock
+def test_queues_falls_back_to_null_label_on_sonarr_failure(app):
+    respx.get(f"{API_URL}/series/42").mock(return_value=httpx.Response(500, json={}))
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/queues/quarantine")
+
+    assert response.status_code == 200
+    file = response.json()["items"][0]["file"]
+    assert file["series_title"] is None
+    assert file["episode_label"] is None
+    assert file["episode_tvdb_ids"] is None
+    # raw ids are still present for the frontend's fallback rendering.
+    assert file["series_id"] == 42
+    assert file["episode_ids"] == [101]
+
+
+@respx.mock
+def test_queues_one_sonarr_fetch_per_distinct_series_per_page(app):
+    series_route = respx.get(f"{API_URL}/series/42").mock(return_value=httpx.Response(200, json=series_json(42)))
+    episodes_route = respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(200, json=episodes_json(42))
+    )
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    for i in range(3):
+        file_id = _make_file(session_factory, instance_id, episode_file_id=9800 + i)  # all series_id=42
+        _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/queues/quarantine")
+
+    assert len(response.json()["items"]) == 3
+    assert series_route.call_count == 1
+    assert episodes_route.call_count == 1
+
+
 def test_queues_invalid_status_400(app):
     with TestClient(app) as client:
         response = client.get(f"{API_PREFIX}/queues/not-a-status")
     assert response.status_code == 400
 
 
+@respx.mock
 def test_queues_echoes_page_size(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
@@ -574,6 +654,7 @@ def test_queues_echoes_page_size(app):
     assert response.json()["page_size"] == 5
 
 
+@respx.mock
 def test_queues_includes_instance_name(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
@@ -586,6 +667,7 @@ def test_queues_includes_instance_name(app):
     assert response.json()["items"][0]["instance"] == "main"
 
 
+@respx.mock
 def test_queues_instance_filter(app):
     session_factory = _session_factory(app)
     instance_a = _make_instance(session_factory, name="a")
@@ -604,6 +686,7 @@ def test_queues_instance_filter(app):
     assert body["items"][0]["instance"] == "a"
 
 
+@respx.mock
 def test_queues_sort_created_at_ascending(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
@@ -626,6 +709,7 @@ def test_queues_sort_created_at_ascending(app):
     assert [item["job_id"] for item in body["items"]] == ids
 
 
+@respx.mock
 def test_queues_sort_confidence_desc_nulls_last(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
@@ -648,6 +732,7 @@ def test_queues_sort_confidence_desc_nulls_last(app):
     assert [item["job_id"] for item in asc.json()["items"]] == [job_low, job_high, job_none]
 
 
+@respx.mock
 def test_queues_sort_series(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)
@@ -666,6 +751,7 @@ def test_queues_sort_series(app):
     assert [item["job_id"] for item in desc.json()["items"]] == [job_b, job_c, job_a]
 
 
+@respx.mock
 def test_queues_sort_instance(app):
     session_factory = _session_factory(app)
     instance_a = _make_instance(session_factory, name="alpha")
@@ -683,6 +769,72 @@ def test_queues_sort_instance(app):
     assert [item["job_id"] for item in desc.json()["items"]] == [job_b, job_a]
 
 
+@respx.mock
+def test_queues_sort_episode(app):
+    # "episode" sorts by the file's first raw Sonarr episode id (see
+    # QUEUE_SORT_FIELDS's `episode` comment) — not resolved episode
+    # number, a deliberate, documented deviation.
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_a = _make_file(session_factory, instance_id, episode_file_id=9310, episode_ids=[10])
+    file_b = _make_file(session_factory, instance_id, episode_file_id=9311, episode_ids=[30])
+    file_c = _make_file(session_factory, instance_id, episode_file_id=9312, episode_ids=[20])
+    job_a = _make_job(session_factory, file_a, status="quarantine")
+    job_b = _make_job(session_factory, file_b, status="quarantine")
+    job_c = _make_job(session_factory, file_c, status="quarantine")
+
+    with TestClient(app) as client:
+        asc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "episode", "dir": "asc"})
+        desc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "episode", "dir": "desc"})
+
+    assert [item["job_id"] for item in asc.json()["items"]] == [job_a, job_c, job_b]
+    assert [item["job_id"] for item in desc.json()["items"]] == [job_b, job_c, job_a]
+
+
+@respx.mock
+def test_queues_sort_file(app):
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_a = _make_file(session_factory, instance_id, episode_file_id=9320, sonarr_path="/tv/Alpha/S01E01.mkv")
+    file_b = _make_file(session_factory, instance_id, episode_file_id=9321, sonarr_path="/tv/Charlie/S01E01.mkv")
+    file_c = _make_file(session_factory, instance_id, episode_file_id=9322, sonarr_path="/tv/Bravo/S01E01.mkv")
+    job_a = _make_job(session_factory, file_a, status="quarantine")
+    job_b = _make_job(session_factory, file_b, status="quarantine")
+    job_c = _make_job(session_factory, file_c, status="quarantine")
+
+    with TestClient(app) as client:
+        asc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "file", "dir": "asc"})
+        desc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "file", "dir": "desc"})
+
+    assert [item["job_id"] for item in asc.json()["items"]] == [job_a, job_c, job_b]
+    assert [item["job_id"] for item in desc.json()["items"]] == [job_b, job_c, job_a]
+
+
+@respx.mock
+def test_queues_sort_outcome_nulls_last(app):
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_low = _make_file(session_factory, instance_id, episode_file_id=9330)
+    file_high = _make_file(session_factory, instance_id, episode_file_id=9331)
+    file_none = _make_file(session_factory, instance_id, episode_file_id=9332)
+    job_low = _make_job(session_factory, file_low, status="quarantine")
+    job_high = _make_job(session_factory, file_high, status="quarantine")
+    job_none = _make_job(session_factory, file_none, status="quarantine")
+    _make_verdict(session_factory, job_low, outcome="quarantine")
+    _make_verdict(session_factory, job_high, outcome="remediated")
+    # job_none: no verdict row -> null outcome via the correlated
+    # subquery, sorts after every job with a verdict regardless of dir.
+
+    with TestClient(app) as client:
+        asc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "outcome", "dir": "asc"})
+        desc = client.get(f"{API_PREFIX}/queues/quarantine", params={"sort": "outcome", "dir": "desc"})
+
+    # "quarantine" < "remediated" lexically.
+    assert [item["job_id"] for item in asc.json()["items"]] == [job_low, job_high, job_none]
+    assert [item["job_id"] for item in desc.json()["items"]] == [job_high, job_low, job_none]
+
+
+@respx.mock
 def test_queues_order_is_deterministic_under_ties(app):
     """P0 regression. Root cause of "clicked E20's row, opened E01's job":
     GET /queues/{status}'s ORDER BY had no secondary/tiebreak key, so jobs
@@ -724,6 +876,7 @@ def test_queues_order_is_deterministic_under_ties(app):
     assert first_ids == second_ids == list(reversed(ids))
 
 
+@respx.mock
 def test_click_after_sse_refetch_still_opens_correct_job(app):
     """P0 regression, literal reproduction of the reported bug: sort the
     queue, note which job a given row holds, simulate the debounced
@@ -965,7 +1118,15 @@ def _episodes_with_titles(series_id=42):
         return_value=httpx.Response(
             200,
             json=[
-                {"id": 101, "title": "Pilot", "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 9001, "hasFile": True},
+                {
+                    "id": 101,
+                    "title": "Pilot",
+                    "seasonNumber": 1,
+                    "episodeNumber": 1,
+                    "episodeFileId": 9001,
+                    "hasFile": True,
+                    "tvdbId": 378653,
+                },
                 {"id": 102, "title": "Second", "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 0, "hasFile": False},
                 {"id": 103, "title": "Third", "seasonNumber": 1, "episodeNumber": 3, "episodeFileId": 0, "hasFile": False},
             ],
@@ -1005,9 +1166,11 @@ def test_job_detail_episode_labels_resolves_file_proposed_and_normalized_ids(app
     labels = response.json()["episode_labels"]
     # file's own claimed episode, the proposed remap target, and the
     # plugin's in-series candidate all resolve — not just the claimed one.
-    assert labels["101"] == {"id": 101, "season": 1, "episode": 1, "title": "Pilot"}
-    assert labels["102"] == {"id": 102, "season": 1, "episode": 2, "title": "Second"}
-    assert labels["103"] == {"id": 103, "season": 1, "episode": 3, "title": "Third"}
+    # 101 carries a live Sonarr tvdbId (for the per-episode TVDB deep
+    # link); 102/103 have none, resolving to null rather than being omitted.
+    assert labels["101"] == {"id": 101, "season": 1, "episode": 1, "title": "Pilot", "tvdb_id": 378653}
+    assert labels["102"] == {"id": 102, "season": 1, "episode": 2, "title": "Second", "tvdb_id": None}
+    assert labels["103"] == {"id": 103, "season": 1, "episode": 3, "title": "Third", "tvdb_id": None}
 
 
 @respx.mock
@@ -1037,7 +1200,15 @@ def test_job_detail_series_episodes_includes_all_and_sorted(app):
             200,
             json=[
                 {"id": 201, "title": "S2E1", "seasonNumber": 2, "episodeNumber": 1, "episodeFileId": 0, "hasFile": False},
-                {"id": 101, "title": "Pilot", "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 9001, "hasFile": True},
+                {
+                    "id": 101,
+                    "title": "Pilot",
+                    "seasonNumber": 1,
+                    "episodeNumber": 1,
+                    "episodeFileId": 9001,
+                    "hasFile": True,
+                    "tvdbId": 378653,
+                },
                 {"id": 102, "title": "Second", "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 0, "hasFile": False},
             ],
         )
@@ -1057,9 +1228,9 @@ def test_job_detail_series_episodes_includes_all_and_sorted(app):
     # ...but series_episodes lists every episode in the series, sorted by
     # (season, episode) ascending regardless of Sonarr's response order.
     assert body["series_episodes"] == [
-        {"id": 101, "season": 1, "episode": 1, "title": "Pilot"},
-        {"id": 102, "season": 1, "episode": 2, "title": "Second"},
-        {"id": 201, "season": 2, "episode": 1, "title": "S2E1"},
+        {"id": 101, "season": 1, "episode": 1, "title": "Pilot", "tvdb_id": 378653},
+        {"id": 102, "season": 1, "episode": 2, "title": "Second", "tvdb_id": None},
+        {"id": 201, "season": 2, "episode": 1, "title": "S2E1", "tvdb_id": None},
     ]
 
 
@@ -1792,7 +1963,14 @@ async def test_sse_event_stream_periodic_stats_and_heartbeat(app, monkeypatch):
 # -- trash --------------------------------------------------------------
 
 
+@respx.mock
 def test_list_trash_returns_active_items_newest_first(app, tmp_path):
+    mock_series(series_id=1, title="Series One")
+    mock_episodes(series_id=1)
+    # series_id=2 deliberately left unmocked — respx's assert_all_called
+    # rejection on that lookup exercises the graceful-fallback path (item
+    # 17): a Sonarr hiccup degrades that row's title/label to `None`
+    # rather than 500ing the whole trash listing.
     session_factory = _session_factory(app)
     older_id = _make_trash_item(
         session_factory, tmp_path, trash_path=tmp_path / "trash/main/a-1", series_id=1,
@@ -1814,14 +1992,26 @@ def test_list_trash_returns_active_items_newest_first(app, tmp_path):
     assert [item["id"] for item in body["items"]] == [newer_id, older_id]
     first = body["items"][0]
     assert set(first) == {
-        "id", "instance", "original_path", "trash_path", "series_id", "episode_ids",
-        "size", "trashed_at", "expires_at", "expires_in_s",
+        "id", "instance", "original_path", "trash_path", "series_id", "series_title",
+        "episode_ids", "episode_label", "episode_tvdb_ids", "size", "trashed_at",
+        "expires_at", "expires_in_s",
     }
     assert first["instance"] == "main"
     assert first["expires_in_s"] > 0
+    # newest item (series_id=2) has no mocked Sonarr route -> fallback.
+    assert first["series_title"] is None
+    assert first["episode_label"] is None
+    # oldest item (series_id=1) resolves fully.
+    older_item = body["items"][1]
+    assert older_item["series_title"] == "Series One"
+    assert older_item["episode_label"] == "S01E01"
+    assert older_item["episode_tvdb_ids"] == [None]
 
 
+@respx.mock
 def test_list_trash_excludes_already_deleted_items(app, tmp_path):
+    mock_series()
+    mock_episodes()
     session_factory = _session_factory(app)
     active_id = _make_trash_item(session_factory, tmp_path)
     deleted_id = _make_trash_item(
@@ -1838,6 +2028,41 @@ def test_list_trash_excludes_already_deleted_items(app, tmp_path):
 
     ids = [item["id"] for item in response.json()["items"]]
     assert ids == [active_id]
+
+
+@respx.mock
+def test_list_trash_resolves_multi_episode_label(app, tmp_path):
+    mock_series()
+    mock_episodes()  # episodes 101 (S01E01), 102 (S01E02)
+    session_factory = _session_factory(app)
+    _make_trash_item(session_factory, tmp_path, episode_ids=[101, 102])
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/trash")
+
+    item = response.json()["items"][0]
+    assert item["episode_label"] == "S01E01-E02"
+
+
+@respx.mock
+def test_list_trash_one_sonarr_fetch_per_distinct_series(app, tmp_path):
+    series_route = respx.get(f"{API_URL}/series/42").mock(return_value=httpx.Response(200, json=series_json(42)))
+    episodes_route = respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(
+        return_value=httpx.Response(200, json=episodes_json(42))
+    )
+    session_factory = _session_factory(app)
+    _make_trash_item(session_factory, tmp_path, trash_path=tmp_path / "trash/main/a-1")
+    _make_trash_item(session_factory, tmp_path, trash_path=tmp_path / "trash/main/b-2")
+    _make_trash_item(session_factory, tmp_path, trash_path=tmp_path / "trash/main/c-3")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/trash")
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 3
+    # 3 rows, all series_id=42 -> exactly one series + one episode fetch.
+    assert series_route.call_count == 1
+    assert episodes_route.call_count == 1
 
 
 def test_delete_trash_item_unlinks_and_marks_deleted(app, tmp_path):

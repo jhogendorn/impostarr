@@ -20,6 +20,14 @@ export function tvdbUrl(ids: SeriesExternalIds | Record<string, unknown> | null 
   return null
 }
 
+/** Per-*episode* TVDB deep link, from Sonarr's own per-episode `tvdbId`
+ * (see `Episode.tvdb_id`, sonarr/types.py) — distinct from `tvdbUrl` above,
+ * which links the whole series. Backs every rendered SxxEyy in the
+ * inspect panel (see `EpisodeRef`), not the title-row DB chips. */
+export function tvdbEpisodeUrl(tvdbId: number | null | undefined): string | null {
+  return typeof tvdbId === 'number' ? `https://thetvdb.com/dereferrer/episode/${tvdbId}` : null
+}
+
 export function imdbUrl(ids: SeriesExternalIds | Record<string, unknown> | null | undefined): string | null {
   if (!ids) return null
   const record = ids as Record<string, unknown>
@@ -28,19 +36,26 @@ export function imdbUrl(ids: SeriesExternalIds | Record<string, unknown> | null 
   return null
 }
 
+const CHIP_CLASS =
+  'inline-flex min-h-6 items-center rounded border border-slate-600 bg-slate-800 px-1.5 py-0.5 align-baseline text-[10px] font-semibold uppercase tracking-wide text-indigo-300 hover:bg-slate-700 hover:text-indigo-200'
+
+/** Small uppercase DB-reference chips (item 14) — baseline-aligned inline
+ * with whatever title text precedes them (LhsPanel/RhsPanel render this
+ * right after the episode title, not on a separate row), annotation-
+ * styled but still real, clickable links with a real (~24px) tap target. */
 export function ExternalLinks({ ids }: { ids: SeriesExternalIds | Record<string, unknown> | null | undefined }) {
   const tvdb = tvdbUrl(ids)
   const imdb = imdbUrl(ids)
   if (!tvdb && !imdb) return null
   return (
-    <span className="ml-2 space-x-2 text-xs">
+    <span className="inline-flex items-center gap-1">
       {tvdb && (
-        <a href={tvdb} target="_blank" rel="noreferrer" className="text-indigo-400 hover:underline">
+        <a href={tvdb} target="_blank" rel="noreferrer" className={CHIP_CLASS}>
           TVDB
         </a>
       )}
       {imdb && (
-        <a href={imdb} target="_blank" rel="noreferrer" className="text-indigo-400 hover:underline">
+        <a href={imdb} target="_blank" rel="noreferrer" className={CHIP_CLASS}>
           IMDB
         </a>
       )}

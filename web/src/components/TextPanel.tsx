@@ -15,6 +15,11 @@ interface TextPanelProps {
    * dragged the timeline scrubber — drives the nearest-cue highlight and
    * auto-scroll within this panel's own scrollable container only. */
   scrubTimeS?: number | null
+  /** Whether to show the source-picker when more than one source exists.
+   * Defaults `true`. Embedded Subtitles sets this `false` (item 12): full
+   * per-track language handling is deferred, so it always shows just the
+   * first extracted track rather than reintroducing a many-option picker. */
+  showSourceSelector?: boolean
 }
 
 /** One independently-scrollable text panel (embedded subs / transcript /
@@ -23,7 +28,7 @@ interface TextPanelProps {
  * language tracks), per-line hover tooltips showing that line's
  * timestamp, and nearest-cue highlight/auto-scroll driven by the shared
  * timeline scrubber. */
-function TextPanel({ title, sources, emptyText, scrubTimeS = null }: TextPanelProps) {
+function TextPanel({ title, sources, emptyText, scrubTimeS = null, showSourceSelector = true }: TextPanelProps) {
   const [index, setIndex] = useState(0)
   const active = sources[Math.min(index, sources.length - 1)]
   const containerRef = useRef<HTMLDivElement>(null)
@@ -57,7 +62,7 @@ function TextPanel({ title, sources, emptyText, scrubTimeS = null }: TextPanelPr
     <div className="flex min-w-0 flex-col">
       <div className="mb-1 flex items-center justify-between gap-2">
         <h4 className="font-medium text-slate-300">{title}</h4>
-        {sources.length > 1 && (
+        {showSourceSelector && sources.length > 1 && (
           <select
             aria-label={`${title} source`}
             value={index}

@@ -105,7 +105,7 @@ function TrashTable() {
               <td className="rounded-l-lg px-3 py-2 text-slate-200">{pathBasename(item.original_path)}</td>
               <td className="px-3 py-2 text-slate-300">{item.instance}</td>
               <td className="px-3 py-2 text-slate-400">
-                {item.series_id} · {item.episode_ids.join(', ')}
+                {item.series_title ?? `Series ${item.series_id}`} · {item.episode_label ?? item.episode_ids.join(', ')}
               </td>
               <td className="px-3 py-2 text-slate-400">{(item.size / 1024 / 1024).toFixed(1)} MB</td>
               <td className="px-3 py-2 text-slate-500">{new Date(item.trashed_at).toLocaleString()}</td>

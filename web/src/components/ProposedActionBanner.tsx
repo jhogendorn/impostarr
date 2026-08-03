@@ -3,9 +3,10 @@ import type { JobDetail } from '../api/types'
 import { formatCountdown } from '../lib/format'
 import { describeProposal, proposalTone } from '../lib/inspectData'
 
-const TONE_CLASSES: Record<'remap' | 'replace', string> = {
+const TONE_CLASSES: Record<'remap' | 'replace' | 'none', string> = {
   remap: 'border-indigo-600/40 bg-indigo-500/10 text-indigo-200',
   replace: 'border-red-600/40 bg-red-500/10 text-red-200',
+  none: 'border-slate-700 bg-slate-800/60 text-slate-400',
 }
 
 function RemapIcon() {
@@ -49,20 +50,22 @@ function AutoApplySlot({ applyAt }: { applyAt: string | null }) {
   )
 }
 
-/** Section A: the proposed-action banner — only rendered when a proposal
- * (auto-computed `proposed_action`) or a human `is_other` verdict exists.
- * Tinted to match the action bar's Apply Remap (indigo) / Trash and
- * Regrab (red) button colours, so the banner visually previews which
- * control would carry it out. */
+/** Section A: the proposed-action banner. ALWAYS renders (item 5) — mid-
+ * band quarantine jobs with no computed proposal get the same section,
+ * neutral-toned, with "No Proposed Action" + "Manual Review" rather than
+ * disappearing outright. Tinted to match the action bar's Apply Remap
+ * (indigo) / Trash and Regrab (red) button colours when a proposal does
+ * exist, so the banner visually previews which control would carry it
+ * out. */
 function ProposedActionBanner({ job }: { job: JobDetail }) {
-  const tone = proposalTone(job)
-  if (!tone) return null
-  const description = describeProposal(job)
+  const tone = proposalTone(job) ?? 'none'
+  const description = tone === 'none' ? 'No Proposed Action' : describeProposal(job)
 
   return (
     <div className={`mb-3 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 ${TONE_CLASSES[tone]}`}>
       <div className="flex min-w-0 items-center gap-2 text-sm">
-        {tone === 'remap' ? <RemapIcon /> : <ReplaceIcon />}
+        {tone === 'remap' && <RemapIcon />}
+        {tone === 'replace' && <ReplaceIcon />}
         <span className="truncate">{description ?? 'Proposed action pending review'}</span>
       </div>
       <AutoApplySlot applyAt={job.verdict?.apply_at ?? null} />

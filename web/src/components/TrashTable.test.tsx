@@ -29,14 +29,18 @@ describe('TrashTable', () => {
     vi.useRealTimers()
   })
 
-  it('renders trash rows with file, instance, series/episodes, size, and an expires-in countdown', async () => {
+  it('renders trash rows with file, instance, resolved series title + episode label, size, and an expires-in countdown (item 17: never raw ids when a resolved title/label is available)', async () => {
     render(<TrashTable />)
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0)
     })
 
     expect(screen.getByText('Show.S01E01.mkv')).toBeInTheDocument()
-    expect(screen.getByText('10 · 100')).toBeInTheDocument()
+    // item 1 resolves fully: title + label, not raw ids.
+    expect(screen.getByText('Show · S01E01')).toBeInTheDocument()
+    // item 2: resolution failed (series_title/episode_label both null) ->
+    // falls back to the raw ids, exactly like pre-item-17 rendering.
+    expect(screen.getByText('Series 11 · 200, 201')).toBeInTheDocument()
     expect(screen.getAllByText('main')).toHaveLength(2)
     // item 1: expires_in_s = 1209600 (14d) -> "14d 00h"
     expect(screen.getByText('14d 00h')).toBeInTheDocument()

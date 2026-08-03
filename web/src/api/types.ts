@@ -72,13 +72,26 @@ export interface PauseResponse {
 
 // -- /queues/{status} ---------------------------------------------------
 
-export type QueueSortField = 'updated_at' | 'created_at' | 'confidence' | 'series' | 'instance'
+export type QueueSortField = 'updated_at' | 'created_at' | 'confidence' | 'series' | 'instance' | 'episode' | 'file' | 'outcome'
 export type SortDir = 'asc' | 'desc'
 
 export interface QueueFileSummary {
   series_id: number
+  /** Resolved series title (live Sonarr lookup, memoized per distinct
+   * series per page — see routes.py `_SeriesLabelCache`), `null` on
+   * resolution failure — render `series_id` as a fallback then (item 17:
+   * these are Sonarr's internal ids, never a series name/episode number
+   * on their own). */
+  series_title: string | null
   sonarr_path: string
   episode_ids: number[]
+  /** "S05E17" (or "S05E17-E18" for a multi-episode file), `null` on
+   * resolution failure. */
+  episode_label: string | null
+  /** Per-episode TVDB ids, aligned with `episode_ids`/`episode_label`'s
+   * episodes — `null` overall on resolution failure, individual entries
+   * `null` when that one episode has none. */
+  episode_tvdb_ids: (number | null)[] | null
 }
 
 export interface QueueVerdictSummary {
@@ -213,6 +226,11 @@ export interface EpisodeLabel {
   season: number
   episode: number
   title: string | null
+  /** Sonarr's own per-episode TVDB id, when known — backs the
+   * `https://thetvdb.com/dereferrer/episode/<id>` deep link every
+   * rendered SxxEyy in the inspect panel carries. `null` when Sonarr's
+   * episode resource didn't have one. */
+  tvdb_id: number | null
 }
 
 /** One subtitle cue with its start timestamp (seconds) — `start_s` is
@@ -323,7 +341,10 @@ export interface TrashItem {
   original_path: string
   trash_path: string
   series_id: number
+  series_title: string | null
   episode_ids: number[]
+  episode_label: string | null
+  episode_tvdb_ids: (number | null)[] | null
   size: number
   trashed_at: string
   expires_at: string
