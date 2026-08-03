@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from impostarr import jobs, trash
+from impostarr import __version__, jobs, trash
 from impostarr.jobs import InvalidTransition
 from impostarr.models import (
     JOB_STATUSES,
@@ -36,6 +36,7 @@ from impostarr.models import (
     Verdict,
 )
 from impostarr.models import PluginResult as PluginResultRow
+from impostarr.plugins.subtitles import parse_srt
 from impostarr.remediate import Remediator
 from impostarr.trash import RestoreConflict
 
@@ -387,6 +388,110 @@ async def _series_external_ids(request: Request, file: File) -> dict[str, Any] |
     }
 
 
+def _referenced_episode_ids(
+    file: File, verdict: Verdict | None, plugin_results: list[PluginResultRow]
+) -> set[int]:
+    """Every Sonarr episode id referenced anywhere in a job-detail payload:
+    the file's own claimed episode(s), a proposed remap's target(s), and
+    every in-series candidate any plugin normalized against — the inputs
+    `_episode_labels` resolves to `{id, season, episode, title}` so the UI
+    never has to render a bare episode id (P0.5)."""
+    ids: set[int] = set(file.episode_ids)
+    if verdict is not None and isinstance(verdict.proposed_action, dict):
+        targets = verdict.proposed_action.get("target_episode_ids")
+        if isinstance(targets, list):
+            ids.update(i for i in targets if isinstance(i, int))
+    for pr in plugin_results:
+        if not isinstance(pr.normalized, list):
+            continue
+        for entry in pr.normalized:
+            if isinstance(entry, dict) and entry.get("kind") == "in_series":
+                episode_ids = entry.get("episode_ids")
+                if isinstance(episode_ids, list):
+                    ids.update(i for i in episode_ids if isinstance(i, int))
+    return ids
+
+
+async def _episode_labels(request: Request, file: File, target_ids: set[int]) -> dict[int, dict[str, Any]]:
+    """Best-effort `{episode_id: {id, season, episode, title}}` for every id
+    in `target_ids`, via the same per-instance Sonarr episode lookup
+    `_resolve_human_ident_ids` uses. Degrades to `{}` on any failure (same
+    broad-except rationale as `_series_external_ids`) — a raw id is still
+    better than a broken job-detail request, though the frontend prefers
+    the resolved label whenever one is present."""
+    if not target_ids:
+        return {}
+    try:
+        runtime = _instance_runtime_for_file(request, file)
+        episodes = await runtime.client.episodes(file.series_id)
+    except Exception:
+        logger.warning("episode lookup failed for episode_labels (series_id=%s)", file.series_id, exc_info=True)
+        return {}
+    return {
+        ep.id: {"id": ep.id, "season": ep.season_number, "episode": ep.episode_number, "title": ep.title}
+        for ep in episodes
+        if ep.id in target_ids
+    }
+
+
+def _embedded_subs_payload(asset: Asset) -> dict[str, Any] | None:
+    """Best-effort embedded-subtitle text for the three-way text comparison's
+    left column, for a text-coded `subs` asset (`.srt` on disk — image-sub
+    codecs like PGS/VobSub have no text to show here and are skipped).
+    Read from disk rather than stored in the DB: `extract_embedded_subs`
+    persists only a path (see `assets/extract.py`), matching how frame
+    assets work — this mirrors what `get_job_asset` already does for raw
+    bytes, just parsed to cue text instead of streamed. Missing/unreadable
+    files degrade to `None`, same non-fatal-enrichment rationale as
+    `_series_external_ids`."""
+    if asset.type != "subs" or asset.path is None or not asset.path.endswith(".srt"):
+        return None
+    try:
+        text = Path(asset.path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    language = (asset.tool_meta or {}).get("language") if isinstance(asset.tool_meta, dict) else None
+    return {"cues": parse_srt(text), "language": language}
+
+
+def _reference_subtitles(plugin_results: list[PluginResultRow]) -> list[dict[str, Any]]:
+    """Reference-subtitle text for the three-way comparison's right column,
+    sourced from whisper-subs candidates' `evidence.refsub_path` (the only
+    plugin that fetches reference subs — see
+    `impostarr_plugin_whisper_subs`). Deduplicated by path (the same
+    reference file backs one candidate per nearby episode) and read
+    best-effort — a cache eviction or path this instance doesn't have
+    mounted degrades that one entry to being omitted, not a failed
+    request."""
+    seen_paths: set[str] = set()
+    tracks: list[dict[str, Any]] = []
+    for pr in plugin_results:
+        if not isinstance(pr.candidates, list):
+            continue
+        for candidate in pr.candidates:
+            if not isinstance(candidate, dict):
+                continue
+            evidence = candidate.get("evidence")
+            if not isinstance(evidence, dict):
+                continue
+            path = evidence.get("refsub_path")
+            if not isinstance(path, str) or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            ident = candidate.get("ident")
+            label = "reference subtitle"
+            if isinstance(ident, dict) and isinstance(ident.get("season"), int) and isinstance(ident.get("episodes"), list):
+                season = ident["season"]
+                episodes = "".join(f"E{ep:02d}" for ep in ident["episodes"] if isinstance(ep, int))
+                label = f"S{season:02d}{episodes}"
+            try:
+                text = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            tracks.append({"label": label, "language": evidence.get("refsub_language"), "cues": parse_srt(text)})
+    return tracks
+
+
 @router.get("/jobs/{job_id}")
 async def get_job_detail(job_id: int, request: Request) -> dict:
     with _session_factory(request)() as session:
@@ -413,6 +518,10 @@ async def get_job_detail(job_id: int, request: Request) -> dict:
             else None
         )
         external_ids = await _series_external_ids(request, file)
+        episode_labels = await _episode_labels(
+            request, file, _referenced_episode_ids(file, verdict, plugin_results)
+        )
+        reference_subtitles = _reference_subtitles(plugin_results)
         return {
             "job": {
                 "id": job.id,
@@ -471,10 +580,16 @@ async def get_job_detail(job_id: int, request: Request) -> dict:
                     "path": a.path,
                     "has_path": a.path is not None,
                     "tool_meta": a.tool_meta,
-                    "payload": a.payload if a.type in ("probe", "transcript") else None,
+                    "payload": (
+                        a.payload
+                        if a.type in ("probe", "transcript")
+                        else _embedded_subs_payload(a) if a.type == "subs" else None
+                    ),
                 }
                 for a in assets
             ],
+            "episode_labels": episode_labels,
+            "reference_subtitles": reference_subtitles,
             "frame_hash_present": frame_hash is not None,
             "frame_hash": (
                 {"algo": frame_hash.algo, "version": frame_hash.version, "n_frames": len(frame_hash.hashes)}
@@ -507,6 +622,117 @@ def get_job_asset(job_id: int, asset_id: int, request: Request) -> Response:
         if asset.payload is not None:
             return JSONResponse(asset.payload)
         raise HTTPException(404, "asset has no content")
+
+
+@router.get("/jobs/{job_id}/datapack")
+def get_job_datapack(job_id: int, request: Request) -> Response:
+    """Attachment-download JSON bundle for filing an issue against a job:
+    the job/file rows (paths included — that's the point, see the UI's
+    "include file paths" note), every verdict ever recorded for it (not
+    just the latest — the full history), all plugin_results, asset
+    metadata (paths/tool_meta, never raw bytes), a log excerpt spanning the
+    job's own created_at..updated_at window, and the running app version.
+
+    Nothing here is redacted based on any request parameter: the frontend's
+    "include file paths" checkbox only gates whether its Download button is
+    enabled (a 2-click confirmation that this file contains local paths),
+    it does not change what this endpoint returns — see UI-SPEC section 7.
+    """
+    with _session_factory(request)() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        file = session.get(File, job.file_id)
+        verdicts = (
+            session.execute(select(Verdict).where(Verdict.job_id == job_id).order_by(Verdict.id.asc()))
+            .scalars()
+            .all()
+        )
+        plugin_results = (
+            session.execute(select(PluginResultRow).where(PluginResultRow.job_id == job_id)).scalars().all()
+        )
+        assets = session.execute(select(Asset).where(Asset.file_id == job.file_id)).scalars().all()
+
+        window_start = job.created_at.isoformat()
+        window_end = job.updated_at.isoformat()
+        all_logs = request.app.state.log_buffer.get_logs(limit=request.app.state.log_buffer.capacity)
+        log_excerpt = [record for record in all_logs if window_start <= record["ts"] <= window_end]
+
+        bundle = {
+            "app_version": __version__,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "job": {
+                "id": job.id,
+                "status": job.status,
+                "attempts": job.attempts,
+                "claimed_by": job.claimed_by,
+                "claimed_at": _iso(job.claimed_at),
+                "heartbeat_at": _iso(job.heartbeat_at),
+                "created_at": job.created_at.isoformat(),
+                "updated_at": job.updated_at.isoformat(),
+            },
+            "file": (
+                {
+                    "id": file.id,
+                    "instance_id": file.instance_id,
+                    "series_id": file.series_id,
+                    "episode_ids": file.episode_ids,
+                    "episode_file_id": file.episode_file_id,
+                    "sonarr_path": file.sonarr_path,
+                    "local_path": file.local_path,
+                    "size": file.size,
+                    "content_hash": file.content_hash,
+                    "quality": file.quality,
+                    "languages": file.languages,
+                    "history_id": file.history_id,
+                    "download_id": file.download_id,
+                    "source_title": file.source_title,
+                    "indexer": file.indexer,
+                    "guid": file.guid,
+                }
+                if file is not None
+                else None
+            ),
+            "verdicts": [
+                {
+                    "id": v.id,
+                    "s_claimed": v.s_claimed,
+                    "s_alt": v.s_alt,
+                    "outcome": v.outcome,
+                    "proposed_action": v.proposed_action,
+                    "remediation_log": v.remediation_log,
+                    "source": v.source,
+                    "human_ident": v.human_ident,
+                    "dupe_info": v.dupe_info,
+                    "created_at": v.created_at.isoformat(),
+                }
+                for v in verdicts
+            ],
+            "plugin_results": [
+                {
+                    "name": pr.plugin_name,
+                    "version": pr.plugin_version,
+                    "status": pr.status,
+                    "reason": pr.reason,
+                    "candidates": pr.candidates,
+                    "normalized": pr.normalized,
+                    "created_at": pr.created_at.isoformat(),
+                }
+                for pr in plugin_results
+            ],
+            "assets": [
+                {"id": a.id, "type": a.type, "path": a.path, "tool_meta": a.tool_meta, "created_at": a.created_at.isoformat()}
+                for a in assets
+            ],
+            "log_excerpt": log_excerpt,
+        }
+
+    body = json.dumps(bundle, indent=2)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="impostarr-job-{job_id}-datapack.json"'},
+    )
 
 
 # -- verdict / approve / reject --------------------------------------------

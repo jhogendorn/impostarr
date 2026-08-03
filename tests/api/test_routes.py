@@ -925,6 +925,234 @@ def test_job_detail_404_unknown(app):
     assert response.status_code == 404
 
 
+# -- episode_labels (P0.5) ----------------------------------------------
+
+
+def _episodes_with_titles(series_id=42):
+    respx.get(f"{API_URL}/episode", params={"seriesId": str(series_id)}).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 101, "title": "Pilot", "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 9001, "hasFile": True},
+                {"id": 102, "title": "Second", "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 0, "hasFile": False},
+                {"id": 103, "title": "Third", "seasonNumber": 1, "episodeNumber": 3, "episodeFileId": 0, "hasFile": False},
+            ],
+        )
+    )
+
+
+@respx.mock
+def test_job_detail_episode_labels_resolves_file_proposed_and_normalized_ids(app):
+    mock_series()
+    _episodes_with_titles()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id, episode_ids=[101])
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    with session_factory() as session:
+        session.add(
+            PluginResultRow(
+                job_id=job_id,
+                plugin_name="whisper-subs",
+                plugin_version="1.0",
+                status="ok",
+                candidates=[],
+                normalized=[{"kind": "in_series", "episode_ids": [103]}],
+                input_fingerprint="fp1",
+            )
+        )
+        session.commit()
+    _make_verdict(
+        session_factory, job_id, s_claimed=0.1, s_alt=0.9, outcome="quarantine",
+        proposed_action={"kind": "remap", "target_episode_ids": [102]},
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    labels = response.json()["episode_labels"]
+    # file's own claimed episode, the proposed remap target, and the
+    # plugin's in-series candidate all resolve — not just the claimed one.
+    assert labels["101"] == {"id": 101, "season": 1, "episode": 1, "title": "Pilot"}
+    assert labels["102"] == {"id": 102, "season": 1, "episode": 2, "title": "Second"}
+    assert labels["103"] == {"id": 103, "season": 1, "episode": 3, "title": "Third"}
+
+
+@respx.mock
+def test_job_detail_episode_labels_empty_on_lookup_failure(app):
+    mock_series()
+    respx.get(f"{API_URL}/episode", params={"seriesId": "42"}).mock(return_value=httpx.Response(500, json={}))
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["episode_labels"] == {}
+
+
+# -- embedded subs / reference subtitles (three-way text comparison) -----
+
+
+@respx.mock
+def test_job_detail_embedded_subs_payload_parses_srt_from_disk(app, tmp_path):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    srt_path = tmp_path / "embedded.en.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello embedded\n", encoding="utf-8")
+    with session_factory() as session:
+        session.add(
+            Asset(
+                file_id=file_id, type="subs", path=str(srt_path),
+                tool_meta={"language": "en", "codec_name": "subrip"}, input_fingerprint="fp",
+            )
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    subs_asset = next(a for a in response.json()["assets"] if a["type"] == "subs")
+    assert subs_asset["payload"] == {"cues": ["Hello embedded"], "language": "en"}
+
+
+@respx.mock
+def test_job_detail_embedded_subs_payload_null_for_image_sub_codec(app, tmp_path):
+    """PGS/VobSub subs have no text to parse — payload stays null rather
+    than erroring on binary content."""
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    sup_path = tmp_path / "embedded.sup"
+    sup_path.write_bytes(b"\x00\x01binary")
+    with session_factory() as session:
+        session.add(
+            Asset(file_id=file_id, type="subs", path=str(sup_path), tool_meta={}, input_fingerprint="fp")
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    subs_asset = next(a for a in response.json()["assets"] if a["type"] == "subs")
+    assert subs_asset["payload"] is None
+
+
+@respx.mock
+def test_job_detail_reference_subtitles_from_whisper_subs_evidence(app, tmp_path):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    ref_path = tmp_path / "ref.S01E01.srt"
+    ref_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello reference\n", encoding="utf-8")
+    with session_factory() as session:
+        session.add(
+            PluginResultRow(
+                job_id=job_id,
+                plugin_name="whisper-subs",
+                plugin_version="1.0",
+                status="ok",
+                candidates=[
+                    {
+                        "confidence": 0.9,
+                        "ident": {"series": "claimed", "season": 1, "episodes": [1]},
+                        "numbering": "tvdb",
+                        "evidence": {"refsub_path": str(ref_path), "refsub_language": "en"},
+                    }
+                ],
+                normalized=[{"kind": "in_series", "episode_ids": [101]}],
+                input_fingerprint="fp1",
+            )
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    tracks = response.json()["reference_subtitles"]
+    assert tracks == [{"label": "S01E01", "language": "en", "cues": ["Hello reference"]}]
+
+
+@respx.mock
+def test_job_detail_reference_subtitles_empty_when_no_whisper_subs_evidence(app):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}")
+
+    assert response.json()["reference_subtitles"] == []
+
+
+# -- datapack -------------------------------------------------------------
+
+
+@respx.mock
+def test_job_datapack_is_attachment_with_full_bundle(app):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    _make_verdict(session_factory, job_id, s_claimed=0.2, outcome="quarantine")
+    _make_verdict(session_factory, job_id, s_claimed=0.9, outcome="matched")  # 2nd verdict = history
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}/datapack")
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == f'attachment; filename="impostarr-job-{job_id}-datapack.json"'
+    body = response.json()
+    assert body["job"]["id"] == job_id
+    assert body["file"]["sonarr_path"] == "/tv/Show/S01E01.mkv"  # paths are NOT redacted
+    assert [v["outcome"] for v in body["verdicts"]] == ["quarantine", "matched"]  # full history, not just latest
+    assert body["app_version"]
+
+
+def test_job_datapack_404_unknown(app):
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/999999/datapack")
+    assert response.status_code == 404
+
+
+@respx.mock
+def test_job_datapack_log_excerpt_scoped_to_job_timeframe(app, caplog):
+    mock_series()
+    session_factory = _session_factory(app)
+    instance_id = _make_instance(session_factory)
+    file_id = _make_file(session_factory, instance_id)
+    job_id = _make_job(session_factory, file_id, status="quarantine")
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        job.created_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        job.updated_at = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        session.commit()
+
+    buffer = app.state.log_buffer
+    buffer._buffer.append({"ts": "2025-12-31T00:00:00+00:00", "level": "INFO", "logger": "x", "message": "before window", "exc": None})
+    buffer._buffer.append({"ts": "2026-01-01T00:02:00+00:00", "level": "INFO", "logger": "x", "message": "inside window", "exc": None})
+    buffer._buffer.append({"ts": "2026-02-01T00:00:00+00:00", "level": "INFO", "logger": "x", "message": "after window", "exc": None})
+
+    with TestClient(app) as client:
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}/datapack")
+
+    messages = [r["message"] for r in response.json()["log_excerpt"]]
+    assert messages == ["inside window"]
+
+
 def test_job_asset_json_payload(app):
     session_factory = _session_factory(app)
     instance_id = _make_instance(session_factory)

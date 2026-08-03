@@ -85,6 +85,7 @@ class Episode(BaseModel):
     model_config = _MODEL_CONFIG
 
     id: int
+    title: str | None = Field(default=None)
     season_number: int = Field(alias="seasonNumber")
     episode_number: int = Field(alias="episodeNumber")
     absolute_episode_number: int | None = Field(default=None, alias="absoluteEpisodeNumber")
