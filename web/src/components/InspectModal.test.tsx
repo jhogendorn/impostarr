@@ -606,7 +606,7 @@ describe('InspectModal', () => {
 
   // -- section 7: debug datapack download, 2-click ------------------------
 
-  it('the datapack download is disabled until the "include file paths" checkbox is checked (2-click)', async () => {
+  it('the datapack download is disabled until the arming checkbox is checked (2-click)', async () => {
     const user = userEvent.setup()
     getJobMock.mockResolvedValue(jobDetailFixture)
     render(<InspectModal jobId={42} open onClose={vi.fn()} onChanged={vi.fn()} />)
@@ -615,7 +615,7 @@ describe('InspectModal', () => {
     expect(screen.getByRole('button', { name: 'Download debug datapack' })).toBeDisabled()
     expect(screen.queryByRole('link', { name: 'Download debug datapack' })).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('checkbox', { name: /include file paths/i }))
+    await user.click(screen.getByRole('checkbox', { name: /enable download/i }))
 
     const link = screen.getByRole('link', { name: 'Download debug datapack' })
     expect(link).toHaveAttribute('href', '/api/v1/jobs/42/datapack')
