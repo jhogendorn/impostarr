@@ -134,7 +134,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         refsubs_cfg = refsubs_cfg.model_copy(
             update={"cache_dir": str(settings.state_dir / "refsubs_cache")}
         )
-    refsubs_http_client = httpx.AsyncClient()
+    # follow_redirects: OpenSubtitles 301s a /subtitles search whose params
+    # aren't in canonical (alphabetical) order -- an un-followed redirect
+    # surfaces as a JSONDecodeError on the empty 301 body.
+    refsubs_http_client = httpx.AsyncClient(follow_redirects=True)
     refsub_service = RefSubService(refsubs_cfg, refsubs_http_client)
 
     instances: dict[str, InstanceRuntime] = {}

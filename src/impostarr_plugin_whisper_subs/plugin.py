@@ -140,6 +140,9 @@ def _series_ext_ids(series: dict[str, Any]) -> dict[str, Any]:
         value = series.get(field)
         if value is not None:
             ext_ids[key] = value
+    title = series.get("title")
+    if title:
+        ext_ids["title"] = title
     return ext_ids
 
 
