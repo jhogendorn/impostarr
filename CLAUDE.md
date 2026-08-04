@@ -189,11 +189,12 @@ button below") — it goes stale the moment anything moves.
   (gitignored).
 - `docs/` holds the original spec (`docs/specs/`), the PoC plan
   (`docs/plans/`), `docs/scoring.md` (fusion/outlier rationale),
-  `docs/BACKLOG.md` (agreed-but-unstarted work, with the decisions already
-  settled), `docs/integrations.md` (hard-won Sonarr/OpenSubtitles/provider
+  `docs/BACKLOG.md` (agreed work whose shape is settled — startable without
+  further decisions), `docs/integrations.md` (hard-won Sonarr/OpenSubtitles/provider
   behaviour — read before touching those clients), `docs/llm-identification.md`
   (measured results on what LLMs can identify, and why the prompts are shaped
-  the way they are), and `docs/ROADMAP.md` (non-committal future direction).
+  the way they are), and `docs/ROADMAP.md` (unsettled direction; items graduate to the backlog
+  once their shape is agreed, and are deleted from the roadmap when they do).
   `docs/local-deployment.md` is gitignored operator notes.
 - **External-service behaviour is verified live, not from docs or mocks.**
   Several integrations behave differently from their documentation

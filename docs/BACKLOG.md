@@ -1,7 +1,16 @@
 # Backlog
 
-Agreed work, not yet started. Ordered roughly by dependency, not priority.
-Each item records the decision already made so it doesn't get re-litigated.
+Agreed work, not yet started: the shape is settled, so a fresh contributor
+could start any of these without needing a decision only the owner can make.
+Each item records the decisions already made so they don't get re-litigated.
+
+Speculative direction lives in `docs/ROADMAP.md`; ideas graduate from there to
+here when their shape is agreed. Ordered roughly by dependency, not priority.
+
+**Standing constraint on everything below:** users are never expected to build
+infrastructure. Anything that would otherwise require compilation ships as a
+prebuilt artifact from CI (notably a Vulkan-enabled `pywhispercpp` wheel for
+Intel/AMD iGPU transcription). "Ready out of the box, no assembly."
 
 ## 1. LLM prompt + schema redesign
 

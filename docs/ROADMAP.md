@@ -1,7 +1,13 @@
 # Roadmap
 
-Longer-horizon direction. Not a commitment list — near-term work is tracked
-per release.
+Direction we might take: ideas whose shape is not settled, recorded so design
+decisions keep their options open. Nothing here is committed and anything
+here may be superseded.
+
+Once an item's shape is agreed — enough that someone could start it without
+needing another decision — it moves to `docs/BACKLOG.md` and is deleted from
+here. The test is "could a fresh contributor start this tomorrow without
+asking a question only the owner can answer?".
 
 ## Shared identification database
 
@@ -24,16 +30,11 @@ scheduled; recorded so design decisions keep the door open (fingerprint
 schemas versioned, run-context captured with timing data, external-id maps
 not collapsed to a single provider).
 
-## LLM cost visibility
-
-Providers do not expose remaining credit/balance via API, so Impostarr
-self-meters spend (tokens × configured per-model prices). Optional
-reconciliation against provider usage APIs (OpenAI organization Usage API;
-Anthropic Usage & Cost API) is possible where the operator supplies
-admin-scoped keys — these are separate credentials from inference keys and
-never required.
 
 ## Plugin taxonomy build-out
+
+(Settled language, transcription and prompt work lives in `docs/BACKLOG.md`;
+what remains here is genuinely unsettled.)
 
 - llm-compare: transcript vs fetched reference subtitle, judged by an LLM
   (robust where fuzzy ratios fail: ASR noise, dubtitle divergence).
@@ -50,25 +51,6 @@ never required.
 - Extraction-stage pluggability ("inspection plugins") once multiple
   identifiers consume shared derived artifacts like OCR text.
 
-## Language model
-
-Per-file language profiles, preferred-track policies (e.g. `ja+en` over
-`ja`), unwanted-track exclusion (audio description/commentary),
-correct-episode-wrong-language flagging, alt-track fallback on low
-confidence, dupe taxonomy with language sets (true dupe / language variant /
-misplacement).
-
-## Distribution: prebuilt everything
-
-Decision (2026-08-03): users are never expected to build infrastructure —
-"ready out of the box, no assembly." Plugins distribute as prebuilt wheels
-(pip specs resolve to binaries), not source builds and not per-plugin
-containers. Implies CI publishes wheels for anything that would otherwise
-need compilation — notably a Vulkan-enabled pywhispercpp wheel so Intel/AMD
-iGPU transcription acceleration is an install-time choice, not a
-compile-your-own exercise. An OpenVINO transcriber backend is the other
-candidate for Intel acceleration; both slot in via the existing
-`impostarr.transcribers` entry-point group.
 
 ## Maybe pile
 
