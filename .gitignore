@@ -16,3 +16,6 @@ web/dist/
 # volumes) — regenerated fresh by demo/e2e.sh on every run.
 demo/volumes/*
 !demo/volumes/.gitkeep
+
+# Operator-local notes, not for distribution
+docs/local-deployment.md
